@@ -74,7 +74,8 @@ use crate::error::{
 pub struct ChunkBorrow<'a> {
     pub length: usize,
     pub reads: Vec<&'a [u8]>,
-    pub writes: Vec<*mut u8>
+    pub writes: Vec<*mut u8>,
+    pub _marker: std::marker::PhantomData<&'a mut u8>
 }
 
 #[derive(Debug)]
@@ -102,7 +103,7 @@ impl Archetype {
     /// ## Invariants
     /// The archetype contains no entities upon creation.
 
-    fn new(archetype_id: ArchetypeID) -> Self {
+    pub fn new(archetype_id: ArchetypeID) -> Self {
             Self {
                 archetype_id,
                 components: vec![None; COMPONENT_CAP], // fixed-size component attribute slots
@@ -165,6 +166,7 @@ impl Archetype {
         component_id: ComponentID
     ) -> Option<(&'a mut Box<dyn TypeErasedAttribute>, &'a mut Box<dyn TypeErasedAttribute>)> {
         // Returns matching component columns in both archetypes; used for row movement.
+        if self.archetype_id == other.archetype_id { return None; }
         let component_a = self.components[component_id as usize].as_mut()?;
         let component_b = other.components[component_id as usize].as_mut()?;
         Some((component_a, component_b))
@@ -182,6 +184,9 @@ impl Archetype {
     #[inline]
     pub fn ensure_component(&mut self, component_id: ComponentID, factory: impl FnOnce() -> Box<dyn TypeErasedAttribute>) {
         // Lazily creates the column for a component type.
+        let index = component_id as usize;
+        if index >= COMPONENT_CAP { return; }
+
         if self.components[component_id as usize].is_none() {
             self.components[component_id as usize] = Some(factory());
             self.signature.set(component_id);
@@ -295,10 +300,10 @@ impl Archetype {
     /// ## Invariants
     /// Removing attributes in a populated archetype would break row alignment.
 
-    pub fn remove_component(&mut self, component_id: ComponentID) -> Option<Box<dyn TypeErasedAttribute>> {
+    pub fn remove_component(&mut self, component_id: ComponentID) -> Result<Option<Box<dyn TypeErasedAttribute>>, SpawnError> {
         // Components cannot be removed while entities exist—would break row alignment.
         if self.length > 0 {
-            panic!("cannot remove a component from a non-empty archetype.");
+            return Err(SpawnError::ArchetypeNotEmpty);
         } 
 
         let index = component_id as usize;
@@ -306,7 +311,7 @@ impl Archetype {
         if taken.is_some() {
             self.signature.clear(component_id); // signature always matches stored columns
         }
-        taken
+        Ok(taken)
     }
 
     /// Moves an entity's component row from this archetype to another.
@@ -393,8 +398,18 @@ impl Archetype {
             }
         }
 
-        // Safe: At least one component must have been created or moved.
-        let (destination_chunk, destination_row) = first_move_destination.expect("must have moved/pushed at least one component");
+        if first_move_destination.is_none() && added_component.is_none() {
+            // handle empty move safely
+            let destination_chunk = 0;
+            let destination_row = destination.length as RowID;
+            destination.ensure_capacity(destination_chunk as usize + 1);
+            destination.entity_positions[destination_chunk][destination_row as usize] = Some(entity);
+            shards.set_location(entity, EntityLocation { archetype: destination.archetype_id, chunk: destination_chunk, row: destination_row });
+            first_move_destination = Some((destination_chunk, destination_row));
+        }
+
+        // Safe: At least one component must have been created or moved.        
+        let (destination_chunk, destination_row) = first_move_destination.unwrap();
 
         // Ensure entity_positions can store this row.
         destination.ensure_capacity((destination_chunk as usize) + 1);
@@ -614,6 +629,9 @@ impl Archetype {
         }
         
         self.length -= 1;
+        if self.length == 0 {
+            self.entity_positions.clear();
+        }
         Ok(())
     }
 
@@ -644,18 +662,16 @@ impl Archetype {
 
         for &component_id in read_ids {
             let component = self.components[component_id as usize].as_ref().expect("missing read component");
-            let s = component.chunk_slice_ref::<u8>(chunk, length).expect("slice type mismatch");
-            reads.push(s);
+            reads.push(component.chunk_bytes_ref(chunk, length));
         }
 
         for &component_id in write_ids {
             let component = self.components[component_id as usize].as_ref().expect("missing write component");
-            let s = component.as_ref();
-            let pointer = s as *const _ as *mut u8;
-            writes.push(pointer);
+            let bytes = component.chunk_bytes_mut(chunk, length);
+            writes.push(bytes.as_mut_ptr());
         }
-        
-        ChunkBorrow { length, reads, writes }
+
+        ChunkBorrow { length, reads, writes, _marker: std::marker::PhantomData }
     }
 
     /// Constructs a new archetype and inserts empty attributes for the provided

@@ -21,6 +21,9 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     fn chunk_slice_ref<T: 'static>(&self, chunk: ChunkID, length: usize) -> Option<&[T]>;
     fn chunk_slice_mut<T: 'static>(&mut self, chunk: ChunkID, length: usize) -> Option<&mut [T]>;
 
+    fn chunk_bytes_ref(&self, chunk: ChunkID, length: usize) -> &[u8];
+    fn chunk_bytes_mut(&mut self, chunk: ChunkID, length: usize) -> &mut [u8];
+
     fn element_type_id(&self) -> TypeId;
     fn element_type_name(&self) -> &'static str;
 
@@ -215,6 +218,23 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         Some(unsafe { std::slice::from_raw_parts_mut(pointer, length) }.as_mut().map(|s| unsafe {
             &mut *(s as *mut [T] as *mut [U])
         }).unwrap())
+    }
+
+    fn chunk_bytes_ref(&self, chunk: ChunkID, length: usize) -> &[u8] {
+        let base = self.chunks[chunk as usize].as_ptr();
+        let len = length.min(CHUNK_CAP);
+        
+        unsafe {
+            std::slice::from_raw_parts(base as *const u8, len * std::mem::size_of::<T>())
+        }
+    }
+
+    fn chunk_bytes_mut(&mut self, chunk: ChunkID, length: usize) -> &mut [u8] {
+        let base = self.chunks[chunk as usize].as_mut_ptr();
+        let len = length.min(CHUNK_CAP);
+        unsafe {
+            std::slice::from_raw_parts_mut(base as *mut u8, len * std::mem::size_of::<T>())
+        }
     }
 
     fn element_type_id(&self) -> TypeId {TypeId::of::<T>()}
