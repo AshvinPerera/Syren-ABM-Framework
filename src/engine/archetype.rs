@@ -182,15 +182,16 @@ impl Archetype {
     /// Attribute allocation and signature must remain consistent.
 
     #[inline]
-    pub fn ensure_component(&mut self, component_id: ComponentID, factory: impl FnOnce() -> Box<dyn TypeErasedAttribute>) {
+    pub fn ensure_component(&mut self, component_id: ComponentID, factory: impl FnOnce() -> Box<dyn TypeErasedAttribute>) -> Result<(), SpawnError>{
         // Lazily creates the column for a component type.
         let index = component_id as usize;
-        if index >= COMPONENT_CAP { return; }
+        if index >= COMPONENT_CAP { return Err(SpawnError::InvalidComponentId); }
 
-        if self.components[component_id as usize].is_none() {
-            self.components[component_id as usize] = Some(factory());
+        if self.components[index].is_none() {
+            self.components[index] = Some(factory());
             self.signature.set(component_id);
         }
+        Ok(())
     }
 
     /// Returns `true` if the archetype contains the specified component.
@@ -400,11 +401,12 @@ impl Archetype {
 
         if first_move_destination.is_none() && added_component.is_none() {
             // handle empty move safely
-            let destination_chunk = 0;
-            let destination_row = destination.length as RowID;
+            let destination_chunk = (destination.length / CHUNK_CAP) as ChunkID;
+            let destination_row = (destination.length % CHUNK_CAP) as RowID;
             destination.ensure_capacity(destination_chunk as usize + 1);
-            destination.entity_positions[destination_chunk][destination_row as usize] = Some(entity);
+            destination.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
             shards.set_location(entity, EntityLocation { archetype: destination.archetype_id, chunk: destination_chunk, row: destination_row });
+            destination.length += 1;
             first_move_destination = Some((destination_chunk, destination_row));
         }
 

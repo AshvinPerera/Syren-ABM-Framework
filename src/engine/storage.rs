@@ -221,6 +221,9 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     }
 
     fn chunk_bytes_ref(&self, chunk: ChunkID, length: usize) -> &[u8] {
+        if chunk as usize >= self.chunks.len() {
+            return &[];
+        }
         let base = self.chunks[chunk as usize].as_ptr();
         let len = length.min(CHUNK_CAP);
         
@@ -230,6 +233,10 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     }
 
     fn chunk_bytes_mut(&mut self, chunk: ChunkID, length: usize) -> &mut [u8] {
+        if chunk as usize >= self.chunks.len() {
+            return &mut [];
+        }
+
         let base = self.chunks[chunk as usize].as_mut_ptr();
         let len = length.min(CHUNK_CAP);
         unsafe {
