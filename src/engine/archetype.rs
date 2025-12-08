@@ -315,24 +315,76 @@ impl Archetype {
         Ok(taken)
     }
 
-    /// Moves an entity's component row from this archetype to another.
+    /// Moves an entity’s component row from this archetype to another.
     ///
-    /// ## Purpose
-    /// Used when an entity changes signatures (adding or removing components).
+    /// # Purpose
+    /// This operation is used when an entity transitions to a new archetype
+    /// because its set of components has changed (added or removed).
     ///
-    /// ## Behavior
-    /// - Copies shared components to the destination.
-    /// - Handles optional newly added component insertion.
-    /// - Updates both archetypes’ `entity_positions`.
-    /// - Applies `swap_remove` in the source to maintain compactness.
+    /// The function constructs a new row in the destination archetype containing
+    /// exactly the components described by the destination’s signature.
     ///
-    /// ## Invariants
-    /// - Destination must contain all components being moved.
-    /// - All component attributes must agree on the row index of the moved entity.
-    /// - Row alignment must be preserved across all participating components.
+    /// # Behavior
     ///
-    /// ## Failure
-    /// Panics internally if invariants are violated (storage inconsistency).
+    /// For each component type:
+    ///
+    /// - **If the component exists in both source and destination**  
+    ///   The component value at `(source_chunk, source_row)` is moved into the
+    ///   destination component column via `push_from`, preserving its internal
+    ///   ordering guarantees (including swap–remove semantics).
+    ///
+    /// - **If the component exists in the destination but not in the source**  
+    ///   A value for this component **must** be supplied in `added_components`.
+    ///   That value is inserted using `push_dyn`.
+    ///
+    /// - **If the component exists in the source but not in the destination**  
+    ///   The component value at `(source_chunk, source_row)` is discarded using
+    ///   `swap_remove`, removing the row compactly from the source column.
+    ///
+    /// The first column to receive the moved or inserted value defines the
+    /// destination `(chunk, row)` for this entity. All other component columns
+    /// for the entity must place their data **at exactly the same location**.
+    /// This preserves strict row alignment across all component arrays.
+    ///
+    /// After all component values are written:
+    ///
+    /// - The destination archetype’s `entity_positions` entry for the final
+    ///   `(chunk, row)` is updated to record the entity’s ID.
+    ///
+    /// - The source archetype’s row at `(source_chunk, source_row)` is cleared.
+    ///
+    /// - If any source component column performed a swap–remove, the function
+    ///   updates `entity_positions` and the global shard registry so the moved
+    ///   entity now references the correct new position.
+    ///
+    /// - Archetype `length` counters are updated in both source and destination.
+    ///
+    /// # Invariants
+    ///
+    /// - Each component column in the destination must report the **same**
+    ///   `(chunk, row)` for the newly inserted or moved value.
+    ///
+    /// - Each component column in the source must report **consistent**
+    ///   swap–remove behavior when removing the entity’s row.
+    ///
+    /// - The destination archetype must contain storage for every component
+    ///   ID appearing either in the source signature or in `added_components`.
+    ///
+    /// - Row alignment across all component arrays must remain correct at the
+    ///   end of the operation.
+    ///
+    /// # Failure Modes
+    ///
+    /// This function panics if any internal invariant is violated, including:
+    /// - A destination-only component without a provided value
+    /// - Mismatched row placement across destination columns
+    /// - Inconsistent swap–remove reports across source columns
+    /// - Signature/storage mismatches between archetypes and component tables
+    ///
+    /// # Returns
+    ///
+    /// The `(chunk, row)` pair representing the location of the entity’s
+    /// new row in the destination archetype.
 
     pub fn move_row_to_archetype(
         &mut self,
@@ -341,109 +393,183 @@ impl Archetype {
         entity: Entity,
         source_chunk: ChunkID,
         source_row: RowID,
-        added_component: Option<(ComponentID, Box<dyn std::any::Any>)>,
+        mut added_components: Vec<(ComponentID, Box<dyn Any>)>,
     ) -> (ChunkID, RowID) {
-        // For the first moved component, record where the row landed.
-        let mut first_move_destination: Option<(ChunkID, RowID)> = None;
-        // For swap_remove behavior: record if any component swapped from the last element.
-        let mut first_swap_information: Option<(ChunkID, RowID)> = None;
+        // Helper: take (and remove) one added value for a given component id, if present.
+        fn take_added_component(
+            added: &mut Vec<(ComponentID, Box<dyn Any>)>,
+            id: ComponentID,
+        ) -> Option<Box<dyn Any>> {
+            if let Some(index) = added.iter().position(|(component_id, _)| *component_id == id) {
+                Some(added.remove(index).1)
+            } else {
+                None
+            }
+        }
 
+        // The first destination row will define where all components
+        // for this entity must live in the destination.
+        let mut first_destination: Option<(ChunkID, RowID)> = None;
+
+        // If the removal of the source row used swap_remove semantics, then one
+        // other entity may have been moved into (source_chunk, source_row).
+        let mut unified_swap_info: Option<(ChunkID, RowID)> = None;
+
+        // Move all components that exist in BOTH source and destination.
         for component_id in self.signature.iterate_over_components() {
             if !destination.signature.has(component_id) {
-                continue; // skip components not in destination archetype
+                continue;
             }
 
-            // both archetypes must contain this component column.
             let (destination_component, source_component) = {
                 let source_component = self.components[component_id as usize]
                     .as_mut()
-                    .expect("source archetype must have this component");
+                    .expect("source archetype signature and storage must agree");
                 let destination_component = destination.components[component_id as usize]
                     .as_mut()
-                    .expect("destination archetype must have this component");
+                    .expect("destination archetype signature and storage must agree");
                 (destination_component, source_component)
             };
 
-            let ((destination_chunk, destination_row), moved_from_last) =
-                destination_component.push_from(source_component, source_chunk, source_row)
-                    .expect("push_from failed to move component");;
-            
-            // Record the storage location where this new row lives.
-            if first_move_destination.is_none() {
-                first_move_destination = Some((destination_chunk, destination_row));
-            }
-            // Record swap_remove metadata; all components must agree.
-            if first_swap_information.is_none() {
-                first_swap_information = moved_from_last;
-            }
-        }
+            // If the caller also provided an "added" value for a component that
+            // exists in the source, that is ambiguous: do we move or override?
+            // We choose to treat this as a programmer error in debug builds.
+            debug_assert!(
+                take_added_component(&mut added_components, component_id).is_none(),
+                "added_components contains a component that also exists in the source; \
+                 this is ambiguous. Either remove it from added_components or from the source signature."
+            );
 
-        // Handle new component added during move (component insertion operation).
-        if let Some((added_component_id, value)) = added_component {
-            let destination_component = destination.components[added_component_id as usize]
-                .as_mut()
-                .expect("destination must have the newly added component");
+            let ((destination_chunk, destination_row), moved_from_last) = destination_component
+                .push_from(source_component, source_chunk, source_row)
+                .expect("push_from failed to move component");
 
-            let (added_chunk, added_row) = destination_component.push_dyn(value);
-
-            // All columns must share identical row placement for the entity.
-            if let Some((destination_chunk, destination_row)) = first_move_destination {
+            // Enforce that all destination components place this entity
+            // at the same (chunk, row).
+            if let Some((c, r)) = first_destination {
                 debug_assert_eq!(
-                    (added_chunk, added_row),
                     (destination_chunk, destination_row),
-                    "added component storage row must match existing moved row"
+                    (c, r),
+                    "all destination components must agree on row placement for the entity"
                 );
             } else {
-                // If no other component existed, this defines the row.
-                first_move_destination = Some((added_chunk, added_row));
+                first_destination = Some((destination_chunk, destination_row));
             }
-        }
 
-        if first_move_destination.is_none() && added_component.is_none() {
-            // No component was moved or added; abort to preserve row alignment invariants.
-            panic!("must have moved/pushed at least one component");
-        }
-
-        // Safe: At least one component must have been created or moved.        
-        let (destination_chunk, destination_row) = first_move_destination.unwrap();
-
-        // Ensure entity_positions can store this row.
-        destination.ensure_capacity((destination_chunk as usize) + 1);
-        
-        // Set entity at destination.
-        destination.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
-        shards.set_location(entity, EntityLocation { archetype: destination.archetype_id, chunk: destination_chunk, row: destination_row });
-
-        // If swap_remove moved something into the vacated slot, update entity_positions accordingly.
-        if let Some((source_last_chunk, source_last_row)) = first_swap_information {
-
-            self.ensure_capacity((source_last_chunk as usize) + 1);
-
-            let moved_entity = self.entity_positions[source_last_chunk as usize][source_last_row as usize]
-                .expect("entity must exist in swapped slot");
-            
-            // Fill hole created by swap_remove.
-            self.entity_positions[source_chunk as usize][source_row as usize] = Some(moved_entity);
-            shards.set_location(moved_entity, EntityLocation { archetype: self.archetype_id, chunk: source_chunk, row: source_row });
-            // Clear swapped source slot.
-            self.entity_positions[source_last_chunk as usize][source_last_row as usize] = None;
-        } else {
-            // No swapping occurred; simply clear the source slot.
-            self.entity_positions[source_chunk as usize][source_row as usize] = None;
-        }
-
-        // If a component was removed during relocation, clean up the removed component row.
-        if added_component.is_none() {
-            if let Some(removed_id) = self.signature.iterate_over_components()
-                                       .find(|&component_id| !destination.signature.has(component_id)) {
-                if let Some(source_component) = self.components[removed_id as usize].as_mut() {
-                    let _ = source_component.swap_remove(source_chunk, source_row);
+            // Unify swap_info: all components must report the same swap result.
+            if let Some(swap) = moved_from_last {
+                if let Some(existing) = unified_swap_info {
+                    debug_assert_eq!(
+                        existing, swap,
+                        "all components must agree on swap_remove source location"
+                    );
+                } else {
+                    unified_swap_info = Some(swap);
                 }
             }
         }
 
-        self.length -= 1; // entity removed from source
-        destination.length += 1; // entity added to destination
+        // For components that are only in destination, push the provided extra values.
+        for component_id in destination.signature.iterate_over_components() {
+            if self.signature.has(component_id) {
+                continue;
+            }
+
+            let destination_component = destination.components[component_id as usize]
+                .as_mut()
+                .expect("destination archetype signature and storage must agree");
+
+            // Require that the caller provides a value for every component
+            let value = take_added_component(&mut added_components, component_id).unwrap_or_else(|| {
+                panic!(
+                    "No value provided in added_components for destination-only component {:?}",
+                    component_id
+                )
+            });
+
+            let (destination_chunk, destination_row) = destination_component.push_dyn(value);
+
+            if let Some((c, r)) = first_destination {
+                debug_assert_eq!(
+                    (destination_chunk, destination_row),
+                    (c, r),
+                    "added (destination-only) component must share row placement with other components"
+                );
+            } else {
+                first_destination = Some((destination_chunk, destination_row));
+            }
+        }
+
+        // Any remaining entries in `added_components` correspond to component
+        // IDs that do not exist in the destination signature.
+        let (destination_chunk, destination_row) = first_destination.expect(
+            "move_row_to_archetype: no component moved or added; this suggests an empty \
+             intersection and no destination-only components, which is unsupported.",
+        );
+
+        // Discard components that are ONLY in source (not in destination).
+        for component_id in self.signature.iterate_over_components() {
+            if destination.signature.has(component_id) {
+                continue;
+            }
+
+            if let Some(source_component) = self.components[component_id as usize].as_mut() {
+                if let Some(swap) = source_component.swap_remove(source_chunk, source_row) {
+                    if let Some(existing) = unified_swap_info {
+                        debug_assert_eq!(
+                            existing, swap,
+                            "swap_remove for removed components must agree with other components"
+                        );
+                    } else {
+                        unified_swap_info = Some(swap);
+                    }
+                }
+            }
+        }
+
+        // Update entity_positions and global shards for the destination.
+        destination.ensure_capacity((destination_chunk as usize) + 1);
+        destination.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
+
+        shards.set_location(
+            entity,
+            EntityLocation {
+                archetype: destination.archetype_id,
+                chunk: destination_chunk,
+                row: destination_row,
+            },
+        );
+
+        // Fix up entity_positions in the source for swap_remove behavior.
+        if let Some((source_last_chunk, source_last_row)) = unified_swap_info {
+            // Ensure the swapped-from-last position can be indexed.
+            self.ensure_capacity((source_last_chunk as usize) + 1);
+
+            let moved_entity = self.entity_positions[source_last_chunk as usize]
+                [source_last_row as usize]
+                .expect("entity must exist in swapped-from-last slot");
+
+            // The moved entity now occupies the vacated row.
+            self.entity_positions[source_chunk as usize][source_row as usize] = Some(moved_entity);
+            shards.set_location(
+                moved_entity,
+                EntityLocation {
+                    archetype: self.archetype_id,
+                    chunk: source_chunk,
+                    row: source_row,
+                },
+            );
+
+            // Clear the old last position.
+            self.entity_positions[source_last_chunk as usize][source_last_row as usize] = None;
+        } else {
+            // No swap occurred; just clear the old source slot.
+            self.entity_positions[source_chunk as usize][source_row as usize] = None;
+        }
+
+        // Adjust archetype entity counts.
+        self.length -= 1;
+        destination.length += 1;
 
         (destination_chunk, destination_row)
     }
