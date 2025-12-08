@@ -224,11 +224,14 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         if chunk as usize >= self.chunks.len() {
             return &[];
         }
-        let base = self.chunks[chunk as usize].as_ptr();
-        let len = length.min(CHUNK_CAP);
+        
+        let length_elements = length.min(CHUNK_CAP);
+
+        let base = self.chunks[chunk as usize].as_ptr() as *const u8;
+        let byte_length = length_elements.saturating_mul(std::mem::size_of::<T>());
         
         unsafe {
-            std::slice::from_raw_parts(base as *const u8, len * std::mem::size_of::<T>())
+            std::slice::from_raw_parts(base, byte_length)
         }
     }
 
@@ -237,10 +240,13 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
             return &mut [];
         }
 
-        let base = self.chunks[chunk as usize].as_mut_ptr();
-        let len = length.min(CHUNK_CAP);
+        let length_elements = length.min(CHUNK_CAP);
+
+        let base = self.chunks[chunk as usize].as_mut_ptr() as *mut u8;
+        let byte_length = length_elements.saturating_mul(std::mem::size_of::<T>());
+
         unsafe {
-            std::slice::from_raw_parts_mut(base as *mut u8, len * std::mem::size_of::<T>())
+            std::slice::from_raw_parts_mut(base, byte_length)
         }
     }
 
