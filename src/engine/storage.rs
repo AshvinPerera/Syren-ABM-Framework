@@ -18,12 +18,15 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any; 
 
+    fn chunk_slice_ref<T: 'static>(&self, chunk: ChunkID, length: usize) -> Option<&[T]>;
+    fn chunk_slice_mut<T: 'static>(&mut self, chunk: ChunkID, length: usize) -> Option<&mut [T]>;
+
     fn element_type_id(&self) -> TypeId;
     fn element_type_name(&self) -> &'static str;
 
     fn swap_remove(&mut self, chunk: ChunkID, row: RowID) -> Result<Option<(ChunkID, RowID)>, AttributeError>;
     fn push_dyn(&mut self, value: Box<dyn Any>) -> Result<(ChunkID, RowID), AttributeError>;
-    fn push_from(&mut self, source: &mut dyn TypeErasedAttribute, source_chunk: ChunkID, source_row: RowID) -> ((ChunkID, RowID), Option<(ChunkID, RowID)>);
+    fn push_from(&mut self, source: &mut dyn TypeErasedAttribute, source_chunk: ChunkID, source_row: RowID) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError>;
 }
 
 /// Invariant:
@@ -105,6 +108,19 @@ impl<T> Attribute<T> {
         Some(unsafe { self.chunks[chunk as usize][row as usize].assume_init_mut() })
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.chunks.iter().enumerate().flat_map(move |(i, chunk)| {
+            let initialized = if i == self.chunks.len() - 1 {
+                self.last_chunk_length
+            } else {
+                CHUNK_CAP
+            };
+            chunk[..initialized]
+                .iter()
+                .map(|mu| unsafe { mu.assume_init_ref() })
+        })
+    }
+
     pub fn push(&mut self, value: T) -> Result<(ChunkID, RowID), AttributeError> {
         self.ensure_last_chunk();
         let chunk_index = self.chunks.len() - 1;
@@ -164,9 +180,10 @@ impl<T> Attribute<T> {
 
         self.drop_all_initialized_elements();
         self.chunks.clear();
-        self.last_chunk_length = 0;
         self.length = 0;
+        self.last_chunk_length = 0;
     }    
+
 }
 
 impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
@@ -177,89 +194,168 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     fn as_any(&self) -> &dyn Any { self }
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
 
+    fn chunk_slice_ref<U: 'static>(&self, chunk: ChunkID, valid_length: usize) -> Option<&[U]> {
+        if TypeId::of::<T>() != TypeId::of::<U>() { return None; }
+        let slice = &self.chunks[chunk as usize][..];
+
+        let length = if (chunk as usize) == self.chunks.len() - 1 { self.last_chunk_length } else { CHUNK_CAP };
+        let length = length.min(valid_length);
+        let pointer = slice.as_ptr() as *const T;
+        Some(unsafe { std::slice::from_raw_parts(pointer, length) }.as_ref().map(|s| unsafe {
+            &*(s as *const [T] as *const [U])
+        }).unwrap())
+    }
+
+    fn chunk_slice_mut<U: 'static>(&mut self, chunk: ChunkID, valid_length: usize) -> Option<&mut [U]> {
+        if TypeId::of::<T>() != TypeId::of::<U>() { return None; }
+        let slice = &mut self.chunks[chunk as usize][..];
+        let length = if (chunk as usize) == self.chunks.len() - 1 { self.last_chunk_length } else { CHUNK_CAP };
+        let length = length.min(valid_length);
+        let pointer = slice.as_mut_ptr() as *mut T;
+        Some(unsafe { std::slice::from_raw_parts_mut(pointer, length) }.as_mut().map(|s| unsafe {
+            &mut *(s as *mut [T] as *mut [U])
+        }).unwrap())
+    }
+
     fn element_type_id(&self) -> TypeId {TypeId::of::<T>()}
     fn element_type_name(&self) -> &'static str {type_name::<T>()}
 
     fn swap_remove(&mut self, chunk: ChunkID, row: RowID) -> Result<Option<(ChunkID, RowID)>, AttributeError> {
-        let Some((last_chunk_index, last_row_index)) = self.last_filled_position() else {
-            return Err(AttributeError::Position(PositionOutOfBoundsError {
+        if chunk as usize >= self.chunks.len() {
+            return Err(AttributeError::PositionOutOfBounds(PositionOutOfBoundsError {
+                chunk, 
+                row, 
+                last_chunk_length: self.last_chunk_length,
+                capacity: CHUNK_CAP,
+                }));
+            }
+
+        let index = chunk as usize * CHUNK_CAP + row as usize;
+        
+        if index >= self.length {
+            return Err(AttributeError::PositionOutOfBounds(PositionOutOfBoundsError {
                 chunk,
                 row,
-                chunks: self.chunk_count(),
-                capacity: CHUNK_CAP,
                 last_chunk_length: self.last_chunk_length,
-            }));
+                capacity: CHUNK_CAP,
+                }));
+            }
+
+
+        let last_index = self.length - 1;
+        let last_chunk = last_index / CHUNK_CAP;
+        let last_row = last_index % CHUNK_CAP;
+
+
+        unsafe {
+            let removed = self.get_slot_unchecked(chunk as usize, row as usize).assume_init_read();
+            let moved_from = if chunk as usize != last_chunk || row as usize != last_row {
+                let last_value = self.get_slot_unchecked(last_chunk, last_row).assume_init_read();
+                    self.get_slot_unchecked(chunk as usize, row as usize)
+                    .write(MaybeUninit::new(last_value));
+                    Some((last_chunk as ChunkID, last_row as RowID))
+                } else {
+                    None
+            };
+
+            drop(removed);
+        }
+
+        self.length -= 1;
+        self.last_chunk_length = if self.last_chunk_length > 0 {
+            self.last_chunk_length - 1
+            } else {
+            0
         };
 
-        if !self.valid_position(chunk, row) {
-            return Err(AttributeError::Position(PositionOutOfBoundsError {
-                chunk,
-                row,
-                chunks: self.chunk_count(),
-                capacity: CHUNK_CAP,
-                last_chunk_length: self.last_chunk_length,
-            }));
+        if self.last_chunk_length == 0 {
+            self.chunks.pop();
+
+            if !self.chunks.is_empty() {
+                self.last_chunk_length = CHUNK_CAP;
+            }
         }
 
-        let c = chunk as usize;
-        let r = row as usize;
-
-        if last_chunk_index == c && last_row_index == r {
-            unsafe { self.get_slot_unchecked(last_chunk_index, last_row_index).assume_init_drop(); }
-            self.length -= 1;
-            self.last_chunk_length -= 1;
-
-            if self.last_chunk_length == 0 {
-                self.chunks.pop();
-                if !self.chunks.is_empty() {
-                    self.last_chunk_length = CHUNK_CAP;
-                }
-            }
-            return Ok(None);
-        } else {
-            unsafe {
-                let dst_ptr = self.chunks.get_unchecked(c).as_ptr().add(r);
-                let src_ptr = self.chunks.get_unchecked(last_chunk_index).as_ptr().add(last_row_index);
-                ptr::swap(dst_ptr as *mut T, src_ptr as *mut T);
-                src_ptr.cast::<MaybeUninit<T>>().write(MaybeUninit::uninit());
-            }
-
-            self.length -= 1;
-            self.last_chunk_length -= 1;
-            if self.last_chunk_length == 0 {
-                self.chunks.pop();
-                if !self.chunks.is_empty() {
-                    self.last_chunk_length = CHUNK_CAP;
-                }
-            }
-
-            let moved_from = Self::to_ids(last_chunk_index, last_row_index)?;
-            return Ok(Some(moved_from));
-        }
-    }
+        Ok(moved_from)
+    }   
 
     fn push_dyn(&mut self, value: Box<dyn Any>) -> Result<(ChunkID, RowID), AttributeError> {
         if let Ok(v) = value.downcast::<T>() {
             return Attribute::<T>::push(self, *v);
         }
-        let expected = type_name::<T>();
-        let actual = type_name_of_val(&*value);
+        let expected = TypeId::of::<T>();
+        let actual = value.as_ref().type_id();
         Err(AttributeError::TypeMismatch(TypeMismatchError { expected, actual }))
     }
 
-    fn push_from(&mut self, source: &mut dyn TypeErasedAttribute, source_chunk: ChunkID, source_row: RowID) -> ((ChunkID, RowID), Option<(ChunkID, RowID)>) {
-        let source = source.as_any_mut()
+    fn push_from(
+        &mut self, 
+        source: &mut dyn TypeErasedAttribute, 
+        source_chunk: ChunkID, 
+        source_row: RowID
+    ) ->Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError> {
+        let source_attribute = source
+            .as_any_mut()
             .downcast_mut::<Attribute<T>>()
-            .expect("component type mismatch between columns.");
+            .expect("component type mismatch between attributes.");
 
-        let value: T = unsafe {
-            source.get_mut(source_chunk, source_row).assume_init_read()
+        if !source_attribute.valid_position(source_chunk, source_row) {
+            return Err(AttributeError::Position(PositionOutOfBoundsError {
+                chunk: source_chunk,
+                row: source_row,
+                chunks: source_attribute.chunks.len(),
+                capacity: CHUNK_CAP,
+                last_chunk_length: source_attribute.last_chunk_length,
+            }));
+        }
+
+        let value = unsafe {
+            source_attribute
+                .get_slot_unchecked(source_chunk as usize, source_row as usize)
+                .assume_init_read()
         };
 
-        let (destination_chunk, destination_row) = self.push_dyn(Box::new(value));
-        let moved_from_last = source.swap_remove(source_chunk, source_row);
+        let (destination_chunk, destination_row) = Attribute::<T>::push(self, value).map_err(|e| {
+            unsafe {
+                source_attribute
+                    .get_slot_unchecked(source_chunk as usize, source_row as usize)
+                    .as_mut_ptr()
+                    .write(value);
+            }
+            e
+        })?;
 
-        ((destination_chunk, destination_row), moved_from_last)
+        let source_index = source_chunk as usize * CHUNK_CAP + source_row as usize;
+        let last_index = source_attribute.length - 1;
+        let moved_from = if source_index != last_index {
+            let last_chunk = last_index / CHUNK_CAP;
+            let last_row = last_index % CHUNK_CAP;
+            let last_value = unsafe {
+                source_attribute.get_slot_unchecked(last_chunk, last_row).assume_init_read()
+            };
+            unsafe {
+                source_attribute.get_slot_unchecked(source_chunk as usize, source_row as usize)
+                          .write(MaybeUninit::new(last_value));
+            }
+            Some((last_chunk as ChunkID, last_row as RowID))
+        } else {
+            None
+        };
+
+        source_attribute.length -= 1;
+        source_attribute.last_chunk_length = if source_attribute.last_chunk_length > 0 {
+            source_attribute.last_chunk_length - 1
+        } else {
+            0
+        };
+        if source_attribute.last_chunk_length == 0 {
+            source_attribute.chunks.pop();
+            if !source_attribute.chunks.is_empty() {
+                source_attribute.last_chunk_length = CHUNK_CAP;
+            }
+        }
+
+        Ok(((destination_chunk, destination_row), moved_from))
     }
 }
 

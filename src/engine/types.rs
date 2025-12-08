@@ -74,6 +74,24 @@ impl Signature {
         }
         true
     }
+
+    pub fn iterate_over_components(&self) -> impl Iterator<Item = ComponentID> + '_ {
+        self.components
+            .iter()
+            .enumerate()
+            .flat_map(|(word_index, &word)| {
+                let base = word_index * 64;
+                let mut bits = word;
+                std::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let tz = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some((base + tz) as ComponentID)
+                })
+            })
+    }
 }
 
 pub fn build_signature(component_ids: &[ComponentID]) -> Signature {
@@ -81,6 +99,38 @@ pub fn build_signature(component_ids: &[ComponentID]) -> Signature {
     for &component_id in component_ids { signature.set(component_id); }
     signature
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QuerySignature {
+    pub read: Signature,
+    pub write: Signature,
+    pub without: Signature,
+}
+
+impl QuerySignature {
+    pub fn requires_all(&self, archetype_signature: &Signature) -> bool {
+        archetype_signature.contains_all(&self.read)
+            && archetype_signature.contains_all(&self.write)
+            && archetype_signature
+                .components
+                .iter()
+                .zip(self.without.components.iter())
+                .all(|(arch_word, without_word)| (arch_word & without_word) == 0)
+    }
+}
+
+pub fn set_read<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
+    signature.read.set(component_id_of::<T>());
+}
+pub fn set_write<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
+    signature.write.set(component_id_of::<T>());
+}
+pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
+    signature.without.set(component_id_of::<T>());
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessMode { Read, Write }
 
 pub trait DynamicBundle {
     fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any>>;
@@ -124,3 +174,4 @@ impl DynamicBundle for Bundle {
         self.values.get_mut(component_id as usize).and_then(|slot| slot.take())
     }
 }
+

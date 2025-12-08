@@ -5,8 +5,20 @@ use std::{
     collections::HashMap,    
 };
 
+use crate::storage::{Attribute, TypeErasedAttribute};
 use crate::types::{ComponentID, COMPONENT_CAP};
 
+
+type FactoryFn = fn() -> Box<dyn TypeErasedAttribute>;
+
+static COMPONENT_FACTORIES: OnceLock<RwLock<Vec<Option<FactoryFn>>>> = OnceLock::new();
+fn component_factories() -> &'static RwLock<Vec<Option<FactoryFn>>> {
+    COMPONENT_FACTORIES.get_or_init(|| RwLock::new(vec![None; COMPONENT_CAP]))
+}
+
+fn new_attribute_storage<T: 'static + Send + Sync>() -> Box<dyn TypeErasedAttribute> {
+    Box::new(Attribute::<T>::default())
+}
 
 pub struct ComponentRegistry {
     next_id: ComponentID,
@@ -40,13 +52,16 @@ impl ComponentRegistry {
     pub fn is_frozen(&self) -> bool { self.frozen }
 
     pub fn register_type(&mut self, type_id: TypeId, name: &'static str, size: usize, align: usize) -> ComponentID {
-        if let Some(&component_id) = self.by_type.get(&type_id) {
-            return component_id;
+        if let Some(&existing) = self.by_type.get(&type_id) {
+            return existing;
         }
         assert!(!self.frozen, "ComponentRegistry is frozen; all components must be registered before freeze.");
         let component_id = self.alloc_id();
+
         self.by_type.insert(type_id, component_id);
         self.by_id[component_id as usize] = Some(ComponentDesc { component_id, name, type_id, size, align });
+
+        component_factories().write().unwrap()[component_id as usize] = Some(new_attribute_storage::<T>);
         component_id
     }
 
@@ -137,4 +152,14 @@ impl std::fmt::Display for ComponentDesc {
             self.component_id, self.name, self.size, self.align
         )
     }
+}
+
+pub fn get_component_storage_factory(component_id: ComponentID) -> FactoryFn {
+    component_factories()
+        .read().unwrap()[component_id as usize]
+        .expect("no factory registered for this component id")
+}
+
+pub fn make_empty_component(component_id: ComponentID) -> Box<dyn TypeErasedAttribute> {
+    get_component_storage_factory(component_id)()
 }

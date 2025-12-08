@@ -306,6 +306,7 @@ impl From<TypeMismatchError> for AttributeError {
 pub enum SpawnError {
     Capacity(CapacityError),
     ShardBounds(ShardBoundsError),
+    ShardError,
     StaleEntity,
     EmptyArchetype,
     StoragePushFailedWith(AttributeError),
@@ -318,6 +319,7 @@ impl fmt::Display for SpawnError {
         match self {
             SpawnError::Capacity(e) => write!(f, "{e}"),
             SpawnError::ShardBounds(e) => write!(f, "{e}"),
+            SpawnError::ShardError => write!(f, "shard operation failed"),
             SpawnError::StaleEntity => write!(f, "stale or dead entity reference"),
             SpawnError::EmptyArchetype => write!(f, "archetype contains no components"),
             SpawnError::StoragePushFailedWith(e) => write!(f, "failed to push into storage: {e}"),

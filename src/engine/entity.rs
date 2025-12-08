@@ -54,7 +54,7 @@ impl Entity {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EntityLocation {
     pub archetype: ArchetypeID,
-    pub chunk: ChunkId,
+    pub chunk: ChunkID,
     pub row: RowID,
 }
 
@@ -84,7 +84,7 @@ impl Entities {
         self.locations.resize((entities_needed as usize), EntityLocation::default());
 
         for index in current_entity_count..entities_needed {
-            self.free_store.push(index);
+            self.free_store.push(index as IndexID);
         }
         Ok(())
     }
@@ -237,11 +237,19 @@ impl EntityShards {
         self.shards[shard_id as usize]
             .live_entity_count
             .fetch_add(1, Ordering::Relaxed);
+        
         if before > 0 {
             self.shards[shard_id as usize]
                 .approximate_free_store_length
                 .fetch_sub(1, Ordering::Relaxed);
-        }
+        } else {
+            let after = entities.free_store.len();
+            let added_slots = after;
+            self.shards[shard_id as usize]
+                .approximate_free_store_length
+                .fetch_add(added_slots, Ordering::Relaxed);
+}
+
         Ok(entity)
     }
 
@@ -269,8 +277,12 @@ impl EntityShards {
     pub fn despawn(&self, entity: Entity) -> bool {
         let shard_id = entity.shard() as usize;
         if shard_id >= self.shard_count() { return false; }
-        let mut entities = self.shards[shard_id].entities.lock().unwrap();
+        let mut entities = self.shards[shard_id as usize].entities.lock().unwrap();
         if entities.despawn(entity) {
+            self.shards[shard_id]
+                .approximate_free_store_length
+                .fetch_add(1, Ordering::Relaxed);
+
             self.shards[shard_id]
                 .live_entity_count
                 .fetch_sub(1, Ordering::Relaxed);
