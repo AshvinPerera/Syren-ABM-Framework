@@ -10,6 +10,9 @@ pub type IndexID = u32;
 pub type VersionID = u32;
 pub type EntityCount = u32;
 
+pub type SystemID = u16;
+pub type Tick = u64;
+
 pub const ENTITY_BITS: Bits = 64;
 pub const SHARD_BITS: Bits = 10;
 pub const VERSION_BITS: Bits = 32;
@@ -101,7 +104,7 @@ pub fn build_signature(component_ids: &[ComponentID]) -> Signature {
 }
 
 #[inline]
-fn iter_bits_from_words<'a>(
+pub fn iter_bits_from_words<'a>(
     words: &'a [u64; SIGNATURE_SIZE],
 ) -> impl Iterator<Item = ComponentID> + 'a {
     words
@@ -152,6 +155,32 @@ pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessMode { Read, Write }
+
+#[derive(Clone, Debug, Default)]
+pub struct AccessSets {
+    pub read: Signature,
+    pub write: Signature,
+}
+
+impl AccessSets {
+    #[inline]
+    pub fn conflicts_with(&self, other: &AccessSets) -> bool {
+        // Conflicts if: (W ∩ W) or (W ∩ R) or (R ∩ W)
+        let mut w_and_w = false;
+        let mut w_and_r = false;
+        let mut r_and_w = false;
+
+        for ((a_w, a_r), (b_w, b_r)) in self.write.words.iter().zip(self.read.words.iter())
+            .zip(other.write.words.iter().zip(other.read.words.iter()))
+        {
+            if (a_w & b_w) != 0 { w_and_w = true; }
+            if (a_w & b_r) != 0 { w_and_r = true; }
+            if (a_r & b_w) != 0 { r_and_w = true; }
+            if w_and_w || w_and_r || r_and_w { return true; }
+        }
+        false
+    }
+}
 
 pub trait DynamicBundle {
     fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any>>;

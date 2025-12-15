@@ -1,4 +1,9 @@
 use std::collections::HashMap;
+use std::sync::{Mutex, Arc};
+use rayon::prelude::*;
+use rayon::ThreadPool;
+
+use crate::commands::Command;
 use crate::types::{
     Signature, 
     ComponentID, 
@@ -18,15 +23,23 @@ use crate::entity::{Entity, EntityShards, EntityLocation};
 use crate::component::make_empty_component;
 
 
-pub struct ECS {
+pub struct ECSManager {
     pub archetypes: Vec<Archetype>,
     signature_map: HashMap<[u64; SIGNATURE_SIZE], ArchetypeID>,
     shards: EntityShards,
+    exclusive: Mutex<()>,
+    deferred: Mutex<Vec<Command>>,
 }
 
-impl ECS {
+impl ECSManager {
     pub fn new(shards: EntityShards) -> Self {
-        Self { archetypes: Vec::new(), signature_map: HashMap::new(), shards }
+        Self {
+            archetypes: Vec::new(),
+            by_signature: std::collections::HashMap::new(),
+            shards,
+            exclusive: Mutex::new(()),
+            deferred: Mutex::new(Vec::new()),
+        }
     }
 
     fn get_or_create_archetype(&mut self, signature: &Signature) -> ArchetypeID {
@@ -121,9 +134,70 @@ impl ECS {
             None,
         );
     }
+
+    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut ECSManager) -> R) -> R {
+        let _g = self.exclusive.lock().unwrap();
+        let ecs_manager_ptr = self as *const _ as *mut ECSManager;
+        let m = unsafe { &mut *ecs_manager_ptr };
+        f(m)
+    }    
+
+    pub fn defer(&self, command: Command) {
+        self.deferred.lock().unwrap().push(command);
+    }
+
+    pub fn apply_deferred_commands(&mut self) {
+        let mut commands = self.deferred.lock().unwrap();
+        for command in commands.drain(..) {
+            match command {
+                Command::Spawn { shard, archetype } => {
+                    // TODO
+                }
+                Command::Despawn { entity } => {
+                    // TODO
+                }
+                Command::Add { entity, component_id, value } => {
+                    // TODO
+                }
+                Command::Remove { entity, component_id } => {
+                    self.remove_component(entity, component_id);
+                }
+            }
+        }
+    }
+
+    pub fn par_for_each3<A: 'static + Send + Sync, B: 'static + Send + Sync, C: 'static + Send + Sync>(
+        &mut self,
+        reads: [crate::types::ComponentId; 2],
+        writes: [crate::types::ComponentId; 1],
+        mut f: impl Fn(&A, &B, &mut C) + Send + Sync,
+    ) {
+        for archetype in &mut self.archetypes {
+            if !(archetype.has(reads[0]) && archetype.has(reads[1]) && archetype.has(writes[0])) { continue; }
+
+            let chunks = archetype.chunk_count();
+            (0..chunks).into_par_iter().for_each(|chunk| {
+                let len = archetype.chunk_valid_len(chunk as _);
+                if len == 0 { return; }
+
+                let a_col = archetype.columns[reads[0] as usize].as_mut().unwrap();
+                let b_col = archetype.columns[reads[1] as usize].as_mut().unwrap();
+                let c_col = archetype.columns[writes[0] as usize].as_mut().unwrap();
+
+                let a_slice = a_col.chunk_slice_ref::<A>(chunk as _, len).unwrap();
+                let b_slice = b_col.chunk_slice_ref::<B>(chunk as _, len).unwrap();
+                let c_slice = c_col.chunk_slice_mut::<C>(chunk as _, len).unwrap();
+
+                let n = len.min(a_slice.len()).min(b_slice.len()).min(c_slice.len());
+                for i in 0..n {
+                    f(&a_slice[i], &b_slice[i], &mut c_slice[i]);
+                }
+            });
+        }
+    }
 }
 
-impl ECS {
+impl ECSManager {
     pub fn query(&mut self) -> QueryBuilder {
         QueryBuilder::new()
     }

@@ -51,20 +51,6 @@ impl ComponentRegistry {
     pub fn freeze(&mut self) { self.frozen = true; }
     pub fn is_frozen(&self) -> bool { self.frozen }
 
-    pub fn register_type(&mut self, type_id: TypeId, name: &'static str, size: usize, align: usize) -> ComponentID {
-        if let Some(&existing) = self.by_type.get(&type_id) {
-            return existing;
-        }
-        assert!(!self.frozen, "ComponentRegistry is frozen; all components must be registered before freeze.");
-        let component_id = self.alloc_id();
-
-        self.by_type.insert(type_id, component_id);
-        self.by_id[component_id as usize] = Some(ComponentDesc { component_id, name, type_id, size, align });
-
-        component_factories().write().unwrap()[component_id as usize] = Some(new_attribute_storage::<T>);
-        component_id
-    }
-
     pub fn component_id_of_type_id(&self, type_id: TypeId) -> Option<ComponentID> {
         self.by_type.get(&type_id).copied()
     }
@@ -76,11 +62,24 @@ impl ComponentRegistry {
 
 impl ComponentRegistry {
     pub fn register<T: 'static + Send + Sync>(&mut self) -> ComponentID {
-        self.register_type(TypeId::of::<T>(), type_name::<T>(), size_of::<T>(), align_of::<T>())
+        let type_id = TypeId::of::<T>();
+        if let Some(&existing) = self.by_type.get(&type_id) { 
+            return existing; 
+        }
+        
+        assert!(!self.frozen, "Registry frozen");
+        let id = self.alloc_id();
+        self.by_type.insert(type_id, id);
+        self.by_id[id as usize] = Some(ComponentDesc::of::<T>().with_id(id));
+        
+        component_factories().write().unwrap()[id as usize] = Some(new_attribute_storage::<T>);
+        id
     }
+
     pub fn id_of<T: 'static>(&self) -> Option<ComponentID> {
         self.component_id_of_type_id(TypeId::of::<T>())
     }
+
     pub fn require_id_of<T: 'static>(&self) -> ComponentID {
         self.id_of::<T>().expect("component not registered.")
     }

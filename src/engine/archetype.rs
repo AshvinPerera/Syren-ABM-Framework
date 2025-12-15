@@ -1210,7 +1210,7 @@ impl Archetype {
     /// Returned slices must correspond to valid rows of the requested chunk.
 
     pub fn borrow_chunk_for(
-        &self,
+        &mut self,
         chunk: ChunkID,
         read_ids: &[ComponentID],
         write_ids: &[ComponentID],

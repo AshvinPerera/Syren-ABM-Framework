@@ -4,15 +4,13 @@ use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::collections::{HashMap, hash_map::DefaultHasher};
 
-use rayon::prelude::*;
-
-use random::{tl_rand_u64};
-use types::{
+use crate::random::{tl_rand_u64};
+use crate::types::{
     EntityID, ShardID, IndexID, VersionID, EntityCount, 
     SHARD_BITS, INDEX_BITS, INDEX_MASK, SHARD_MASK, INDEX_CAP,
     ArchetypeID, RowID
 };
-use error::{
+use crate::error::{
     CapacityError, ShardBoundsError, SpawnError
 };
 

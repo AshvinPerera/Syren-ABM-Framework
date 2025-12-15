@@ -1,10 +1,10 @@
 use std::any::Any;
 
 use crate::storage::{Attribute, TypeErasedAttribute};
-use crate::types::{QuerySignature, ComponentID, ChunkID};
+use crate::types::{QuerySignature, ComponentID, ChunkID, AccessSets};
 use crate::component::{set_read, set_write, set_without, component_id_of};
 use crate::archetype::ArchetypeMatch;
-use crate::ecs::ECS;
+use crate::manager::ECSManager;
 
 pub struct QueryBuilder {
     signature: QuerySignature,
@@ -30,19 +30,23 @@ impl QueryBuilder {
         self
     }
 
-    pub fn for_each<F>(self, ecs_manager: &mut ECS, mut f: F)
+    pub fn for_each<F>(self, ecs_manager: &mut ECSManager, mut f: F)
     where
         F: FnMut( /* filled at call site by helper methods below */ ),
     {
         // This base method will be specialized by typed adapters below.
         unreachable!("use typed adapters: for_each3::<A,B,C>, etc");
     }
+
+    pub fn access_sets(&self) -> AccessSets {
+        AccessSets { read: self.signature.read, write: self.signature.write }
+    }
 }
 
 impl QueryBuilder {
     pub fn for_each3<A: 'static + Send + Sync, B: 'static + Send + Sync, C: 'static + Send + Sync, F>(
         self,
-        ecs_manager: &mut ECS,
+        ecs_manager: &mut ECSManager,
         mut f: F,
     )
     where
@@ -51,9 +55,9 @@ impl QueryBuilder {
         debug_assert_eq!(self.reads.len(), 2);
         debug_assert_eq!(self.writes.len(), 1);
 
-        let matches = ecs.matching_archetypes(&self.signature);
+        let matches = ecs_manager.matching_archetypes(&self.signature);
         for archetype_match in matches {
-            let archetype = &mut ecs.archetypes[archetype_match.archetype_id as usize];
+            let archetype = &mut ecs_manager.archetypes[archetype_match.archetype_id as usize];
 
             let a_attribute = archetype.component_mut(self.reads[0]).unwrap()
                 .as_any_mut().downcast_mut::<Attribute<A>>().unwrap();
