@@ -309,9 +309,12 @@ pub enum SpawnError {
     ShardError,
     StaleEntity,
     EmptyArchetype,
+    ArchetypeNotEmpty,
+    StorageSwapRemoveFailed(AttributeError),
     StoragePushFailedWith(AttributeError),
     MissingComponent { type_id: TypeId, name: &'static str },
     MisalignedStorage { expected: (ChunkID, RowID), got: (ChunkID, RowID) },
+    InvalidComponentId,
 }
 
 impl fmt::Display for SpawnError {
@@ -322,6 +325,8 @@ impl fmt::Display for SpawnError {
             SpawnError::ShardError => write!(f, "shard operation failed"),
             SpawnError::StaleEntity => write!(f, "stale or dead entity reference"),
             SpawnError::EmptyArchetype => write!(f, "archetype contains no components"),
+            SpawnError::ArchetypeNotEmpty => write!(f, "cannot remove component from non-empty archetype"), 
+            SpawnError::StorageSwapRemoveFailed(e) => write!(f, "failed to swap-remove from storage: {e}"),
             SpawnError::StoragePushFailedWith(e) => write!(f, "failed to push into storage: {e}"),
             SpawnError::MissingComponent { name, .. } => write!(f, "missing component: {}", name),
             SpawnError::MisalignedStorage { expected, got } => write!(
@@ -329,6 +334,7 @@ impl fmt::Display for SpawnError {
                 "component storages became misaligned; expected position {:?}, got {:?}",
                 expected, got
             ),
+            SpawnError::InvalidComponentId => write!(f, "invalid component id"),
         }
     }
 }
@@ -343,4 +349,17 @@ impl From<ShardBoundsError> for SpawnError {
 }
 impl From<AttributeError> for SpawnError {
     fn from(e: AttributeError) -> Self { SpawnError::StoragePushFailedWith(e) }
+}
+
+#[derive(Debug)]
+pub enum MoveError {
+    InconsistentStorage,
+    PushFromFailed { component_id: ComponentID, source_error: AttributeError },
+    RowMisalignment { expected: (ChunkID, RowID), got: (ChunkID, RowID), component_id: ComponentID },
+    NoComponentsMoved,
+    PushFailed { component_id: ComponentID, source_error: AttributeError },
+    SwapRemoveError { component_id: ComponentID, source_error: AttributeError },
+    InconsistentSwapInfo,
+    MetadataFailure,
+    RollbackFailed,
 }

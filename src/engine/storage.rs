@@ -583,9 +583,10 @@ impl<T> Attribute<T> {
             .map_err(|_| AttributeError::IndexOverflow("RowID"))?;
 
         unsafe {
-            self.get_slot_unchecked(chunk_index, row_index)
-                .as_mut_ptr()
-                .write(value);
+            self
+            .get_slot_unchecked(chunk_index, row_index)
+            .as_mut_ptr()
+            .write(value);
         }
         self.last_chunk_length += 1;
         self.length += 1;

@@ -100,6 +100,27 @@ pub fn build_signature(component_ids: &[ComponentID]) -> Signature {
     signature
 }
 
+#[inline]
+fn iter_bits_from_words<'a>(
+    words: &'a [u64; SIGNATURE_SIZE],
+) -> impl Iterator<Item = ComponentID> + 'a {
+    words
+        .iter()
+        .enumerate()
+        .flat_map(|(word_index, &word)| {
+            let base = word_index * 64;
+            let mut bits = word;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let tz = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some((base + tz) as ComponentID)
+            })
+        })
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QuerySignature {
     pub read: Signature,
