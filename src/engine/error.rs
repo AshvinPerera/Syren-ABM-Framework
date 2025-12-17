@@ -1,8 +1,3 @@
-use std::fmt;
-use std::any::TypeId;
-
-use crate::types::{ShardID, ChunkID, RowID};
-
 //! Error types for entity spawning and attribute storage.
 //!
 //! This module declares focused, composable error types used across the
@@ -59,6 +54,11 @@ use crate::types::{ShardID, ChunkID, RowID};
 //!   imperative phrasing).
 //! * [`fmt::Debug`] (derived) retains full structure for diagnostics.
 
+use std::fmt;
+use std::any::TypeId;
+
+use crate::engine::types::{ShardID, ChunkID, RowID, ComponentID};
+
 
 /// Returned when the system cannot satisfy a request to create or place
 /// additional entities because the target container has insufficient capacity.
@@ -80,8 +80,12 @@ use crate::types::{ShardID, ChunkID, RowID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
-    pub entities_needed: u64,   /// Total entities the operation attempted to allocate.
-    pub capacity: u64,          /// Current capacity limiting the operation.
+    
+    /// Total entities the operation attempted to allocate.
+    pub entities_needed: u64,   
+
+    /// Current capacity limiting the operation.
+    pub capacity: u64,          
 }
 
 impl fmt::Display for CapacityError {
@@ -113,8 +117,12 @@ impl std::error::Error for CapacityError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardBoundsError {
-    pub index: ShardID,         /// Offending shard index that was requested.
-    pub max_index: u32,         /// Maximum valid shard index (inclusive) for the collection.
+    
+    /// Offending shard index that was requested.
+    pub index: ShardID,  
+
+    /// Maximum valid shard index (inclusive) for the collection.       
+    pub max_index: u32,        
 }
 
 impl fmt::Display for ShardBoundsError {
@@ -152,6 +160,18 @@ impl fmt::Display for StaleEntityError {
 
 impl std::error::Error for StaleEntityError {}
 
+/// Returned when an operation expects an archetype to contain at least one
+/// component, but the archetype is empty.
+///
+/// ## Context
+/// This typically indicates a logic error during entity construction or
+/// component migration, where an archetype signature was assumed to be
+/// non-empty but was not.
+///
+/// ## Notes
+/// This error represents a structural invariant violation rather than a
+/// recoverable runtime condition.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyArchetypeError;
 
@@ -163,12 +183,33 @@ impl fmt::Display for EmptyArchetypeError {
 
 impl std::error::Error for EmptyArchetypeError {}
 
+/// Returned when a `(ChunkID, RowID)` pair refers to a position outside
+/// valid component storage bounds.
+///
+/// ## Context
+/// Used by attribute and archetype storage to report invalid addressing,
+/// typically caused by stale metadata or incorrect index calculations.
+///
+/// ## Invariants
+/// - `chunk < chunks`
+/// - `row < capacity` for all but the last chunk
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionOutOfBoundsError {
+    
+    /// Chunk index that was addressed.
     pub chunk: ChunkID,
+
+    /// Row index that was addressed.
     pub row: RowID,
+
+    /// Total number of chunks in the storage.
     pub chunks: usize,
+
+    /// Maximum row capacity per chunk.
     pub capacity: usize,
+
+    /// Number of valid rows in the final chunk.
     pub last_chunk_length: usize,
 }
 
@@ -203,8 +244,12 @@ impl std::error::Error for PositionOutOfBoundsError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeMismatchError {
-    pub expected: TypeId,           /// Destination storage's declared element type.
-    pub actual: TypeId,             /// Provided value's dynamic type.
+    
+    /// Destination storage's declared element type.
+    pub expected: TypeId,
+    
+    /// Provided value's dynamic type.           
+    pub actual: TypeId,             
 }
 
 impl fmt::Display for TypeMismatchError {
@@ -248,8 +293,16 @@ impl std::error::Error for TypeMismatchError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeError {
+    
+    /// A `(ChunkID, RowID)` addressed storage outside valid bounds.
     Position(PositionOutOfBoundsError),
+    
+    /// The dynamic type of a value did not match the component storage type.
     TypeMismatch(TypeMismatchError),
+
+    /// Index arithmetic overflow occurred while constructing a storage index.
+    ///
+    /// The string identifies which index overflowed (e.g. `"row"` or `"chunk"`).
     IndexOverflow(&'static str),
 }
 
@@ -304,16 +357,53 @@ impl From<TypeMismatchError> for AttributeError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
+
+    /// Entity creation failed due to insufficient capacity.
     Capacity(CapacityError),
+
+    /// A shard index was outside the valid range.
     ShardBounds(ShardBoundsError),
+    
+    /// A shard-level operation failed unexpectedly.
     ShardError,
+    
+    /// An entity handle was stale or referred to a despawned entity.
     StaleEntity,
+    
+    /// An operation required a non-empty archetype.
     EmptyArchetype,
+    
+    /// Attempted to remove a component from an archetype that still
+    /// contained entities.
     ArchetypeNotEmpty,
+    
+    /// Failed while swap-removing a component from storage.
     StorageSwapRemoveFailed(AttributeError),
+    
+    /// Failed while pushing component data into storage.
     StoragePushFailedWith(AttributeError),
-    MissingComponent { type_id: TypeId, name: &'static str },
-    MisalignedStorage { expected: (ChunkID, RowID), got: (ChunkID, RowID) },
+    
+    /// A required component was missing during entity construction.
+    MissingComponent { 
+        /// Runtime type identifier of the missing component.
+        type_id: TypeId, 
+        
+        /// Human-readable component name.
+        name: &'static str 
+    },
+    
+    /// Component storages disagreed on the row position of an entity.
+    ///
+    /// This indicates a serious internal invariant violation.
+    MisalignedStorage { 
+        /// Expected `(chunk, row)` position.
+        expected: (ChunkID, RowID), 
+
+        /// Actual `(chunk, row)` encountered.
+        got: (ChunkID, RowID) 
+    },
+    
+    /// An invalid or unregistered component ID was encountered.
     InvalidComponentId,
 }
 
@@ -351,15 +441,129 @@ impl From<AttributeError> for SpawnError {
     fn from(e: AttributeError) -> Self { SpawnError::StoragePushFailedWith(e) }
 }
 
+/// Errors that can occur while moving an entity between archetypes.
+///
+/// ## Context
+/// `MoveError` is used by archetype migration logic when transferring
+/// component rows between archetypes during add/remove operations.
+///
+/// ## Notes
+/// These errors generally indicate internal inconsistencies or violated
+/// invariants rather than recoverable user-facing failures.
+
 #[derive(Debug)]
 pub enum MoveError {
+
+    /// Component storage layouts were inconsistent between archetypes.
     InconsistentStorage,
-    PushFromFailed { component_id: ComponentID, source_error: AttributeError },
-    RowMisalignment { expected: (ChunkID, RowID), got: (ChunkID, RowID), component_id: ComponentID },
+    
+    /// Failed to move component data from the source archetype.
+    PushFromFailed { 
+        /// Component being transferred.
+        component_id: ComponentID, 
+        
+        /// Underlying attribute error.
+        source_error: AttributeError 
+    },
+    
+    /// Component columns disagreed on the destination row.
+    RowMisalignment { 
+        /// Expected `(chunk, row)` position.
+        expected: (ChunkID, RowID), 
+        
+        /// Actual `(chunk, row)` encountered.
+        got: (ChunkID, RowID), 
+
+        /// Component whose storage was misaligned.
+        component_id: ComponentID 
+    },
+    
+    /// No components were transferred during the move.
     NoComponentsMoved,
-    PushFailed { component_id: ComponentID, source_error: AttributeError },
-    SwapRemoveError { component_id: ComponentID, source_error: AttributeError },
+    
+    /// Failed while inserting component data into the destination archetype.    
+    PushFailed { 
+        /// Component being inserted.
+        component_id: ComponentID,
+
+        /// Underlying attribute error. 
+        source_error: AttributeError 
+    },
+    
+    /// Failed while removing component data from the source archetype.
+    SwapRemoveError { 
+        /// Component being removed.
+        component_id: ComponentID, 
+
+        /// Underlying attribute error.
+        source_error: AttributeError 
+    },
+    
+    /// Swap-remove operations yielded inconsistent metadata.
     InconsistentSwapInfo,
+    
+    /// Entity metadata could not be updated consistently after the move.
     MetadataFailure,
+
+    /// Rollback failed after a partial archetype migration.
+    /// This indicates a catastrophic internal error.
     RollbackFailed,
+}
+
+impl fmt::Display for MoveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MoveError::InconsistentStorage => {
+                f.write_str("component storage layouts are inconsistent between archetypes")
+            }
+
+            MoveError::PushFromFailed { component_id, source_error } => {
+                write!(
+                    f,
+                    "failed to move component {} from source archetype: {}",
+                    component_id, source_error
+                )
+            }
+
+            MoveError::RowMisalignment { expected, got, component_id } => {
+                write!(
+                    f,
+                    "component {} storage misaligned: expected position {:?}, got {:?}",
+                    component_id, expected, got
+                )
+            }
+
+            MoveError::NoComponentsMoved => {
+                f.write_str("no components were moved during archetype transition")
+            }
+
+            MoveError::PushFailed { component_id, source_error } => {
+                write!(
+                    f,
+                    "failed to insert component {} into destination archetype: {}",
+                    component_id, source_error
+                )
+            }
+
+            MoveError::SwapRemoveError { component_id, source_error } => {
+                write!(
+                    f,
+                    "failed to remove component {} from source archetype: {}",
+                    component_id, source_error
+                )
+            }
+
+            MoveError::InconsistentSwapInfo => {
+                f.write_str("swap-remove produced inconsistent metadata")
+            }
+
+            MoveError::MetadataFailure => {
+                f.write_str("failed to update entity metadata after archetype move")
+            }
+
+            MoveError::RollbackFailed => {
+                f.write_str("rollback failed after partial archetype migration")
+            }
+        }
+    }
 }
