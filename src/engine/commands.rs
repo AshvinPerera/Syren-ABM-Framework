@@ -30,9 +30,8 @@ use std::any::Any;
 
 use crate::engine::entity::Entity;
 use crate::engine::types::{
-    ShardID,
     ComponentID,
-    ArchetypeID
+    Bundle
 };
 
 
@@ -56,15 +55,9 @@ use crate::engine::types::{
 
 pub enum Command {
     /// Spawns a new entity into a specific archetype.
-    ///
-    /// ## Behavior
-    /// - Allocates a new entity handle in the specified shard.
-    /// - Inserts the entity into the given archetype.
     Spawn { 
-        /// Target shard in which the entity will be created.
-        shard: ShardID, 
-         /// Archetype describing the initial component signature of the entity.
-        archetype: ArchetypeID 
+        /// Data bundle for the new entity.
+        bundle: Bundle
     },
 
     /// Despawns an existing entity.

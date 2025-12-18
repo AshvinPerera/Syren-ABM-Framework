@@ -339,13 +339,15 @@ impl AccessSets {
 /// Type-erased container for component values.
 pub trait DynamicBundle {
     /// Removes and returns the value for `component_id`, if present.
-    fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any>>;
+    fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any + Send>>;
 }
 
 /// Concrete implementation of a dynamic component bundle.
 pub struct Bundle {
-    /// Indexed storage of optional component values.
-    values: Vec<Option<Box<dyn Any>>>,
+    /// Component presence
+    signature: Signature,
+    /// Indexed storage of component values.
+    values: Vec<Option<Box<dyn Any + Send>>>,
 }
 
 impl Bundle {
@@ -353,8 +355,12 @@ impl Bundle {
     pub fn with_len(length: usize) -> Self {
         let mut values = Vec::with_capacity(length);
         values.resize_with(length, || None);
-        Self { values }
-    }
+
+        Self {
+            signature: Signature::default(),
+            values,
+        }
+}
 
     /// Clears all stored component values.
     #[inline]
@@ -364,13 +370,17 @@ impl Bundle {
 
     /// Inserts a component value into the bundle.
     #[inline]
-    pub fn insert<T: Any>(&mut self, component_id: ComponentID, value: T) {
+    pub fn insert<T: Any + Send>(&mut self, component_id: ComponentID, value: T) {
+        self.signature.set(component_id);
         self.values[component_id as usize] = Some(Box::new(value));
     }
 
     /// Inserts multiple component values from an iterator.
     #[inline]
-    pub fn extend_from_iter<T: Any, I: IntoIterator<Item = (ComponentID, T)>>(&mut self, iter: I) {
+    pub fn extend_from_iter<T: Any + Send, I: IntoIterator<Item = (ComponentID, T)>>(
+        &mut self,
+        iter: I,
+    ) {
         for (component_id, value) in iter {
             self.insert(component_id, value);
         }
@@ -379,14 +389,24 @@ impl Bundle {
     /// Returns `true` if all required components are present.
     #[inline]
     pub fn is_complete_for(&self, required: &[bool]) -> bool {
-        required.iter().enumerate().all(|(i, req)| !*req || self.values[i].is_some())
+        required
+            .iter()
+            .enumerate()
+            .all(|(i, req)| !*req || self.signature.has(i as ComponentID))
+    }
+
+    /// Builds a signature representing the components present in this bundle.
+    #[inline]
+    pub fn signature(&self) -> Signature {
+        self.signature
     }
 }
 
 impl DynamicBundle for Bundle {
     #[inline]
-    fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any>> {
-        self.values.get_mut(component_id as usize).and_then(|slot| slot.take())
+    fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any + Send>> {
+        self.values
+            .get_mut(component_id as usize)
+            .and_then(|slot| slot.take())
     }
 }
-

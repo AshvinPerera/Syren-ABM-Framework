@@ -24,12 +24,48 @@
 //! * exclusive access when mutating structure,
 //! * non-overlapping write sets between concurrent queries.
 
-use crate::engine::storage::{Attribute, TypeErasedAttribute};
-use crate::engine::types::{QuerySignature, ComponentID, ChunkID, AccessSets, set_read, set_write, set_without};
+use crate::engine::types::{QuerySignature, ComponentID, AccessSets, set_read, set_write, set_without};
 use crate::engine::archetype::{ArchetypeMatch};
 use crate::engine::component::{component_id_of};
 use crate::engine::manager::ECSManager;
 
+
+/// A fully constructed, immutable ECS query description.
+///
+/// ## Purpose
+/// `BuiltQuery` represents the *resolved* form of a query after it has been
+/// assembled by the query builder. It contains all information required to
+/// execute the query over matching archetypes without further mutation.
+///
+/// Unlike `QueryBuilder`, this type:
+/// * is immutable,
+/// * is cheap to clone,
+/// * can be safely passed across scheduling and execution layers.
+///
+/// ## Usage
+/// `BuiltQuery` is typically produced by a query builder and then consumed by
+/// execution backends (sequential or parallel) to perform component iteration.
+///
+/// ## Execution semantics
+/// * `signature` determines which archetypes match
+/// * `reads` specifies read-only component columns
+/// * `writes` specifies mutable component columns
+///
+/// Correctness relies on higher-level scheduling to ensure:
+/// * no overlapping mutable access,
+/// * no structural mutation during execution.
+
+#[derive(Clone)]
+pub struct BuiltQuery {
+    /// Structural query signature used to match archetypes.
+    pub signature: QuerySignature,
+
+    /// Component IDs accessed in read-only mode.
+    pub reads: Vec<ComponentID>,
+
+    /// Component IDs accessed mutably.
+    pub writes: Vec<ComponentID>,
+}
 
 /// Builder for ECS component queries.
 ///
@@ -119,12 +155,12 @@ impl QueryBuilder {
     /// ## Panics
     /// Always panics.    
 
-    pub fn for_each<F>(self)
-    where
-        F: FnMut( /* filled at call site by helper methods below */ ),
-    {
-        // This base method will be specialized by typed adapters below.
-        unreachable!("use typed adapters: for_each3::<A,B,C>, etc");
+    pub fn build(self) -> BuiltQuery {
+        BuiltQuery {
+            signature: self.signature,
+            reads: self.reads,
+            writes: self.writes,
+        }
     }
 
     /// Returns the read/write access sets declared by this query.
@@ -135,9 +171,6 @@ impl QueryBuilder {
     pub fn access_sets(&self) -> AccessSets {
         AccessSets { read: self.signature.read, write: self.signature.write }
     }
-}
-
-impl QueryBuilder {
 
     /// Resolves the query into matching archetypes.
     ///
@@ -148,106 +181,5 @@ impl QueryBuilder {
     ) -> Vec<ArchetypeMatch> {
         let world = ecs.world_ref();
         world.data().matching_archetypes(&self.signature)
-    }    
-
-    /// Executes a query over three components:
-    /// * two read-only (`A`, `B`)
-    /// * one mutable (`C`)
-    ///
-    /// ## Execution steps
-    /// 1. Resolve archetypes matching the query signature.
-    /// 2. For each archetype:
-    ///    * identify valid chunks,
-    ///    * downcast component storage to typed columns,
-    ///    * iterate row-by-row within each chunk.
-    /// 3. Invoke the user-provided closure for each entity.
-    ///
-    /// ## Safety and invariants
-    /// * The query must declare exactly two reads and one write.
-    /// * Component storage types must match `A`, `B`, and `C`.
-    /// * Chunk slices must be correctly aligned and non-overlapping.
-    ///
-    /// Violating these invariants results in undefined behavior.
-    ///
-    /// ## Parameters
-    /// * `ecs_manager` — ECS entry point providing access to world data.
-    /// * `f` — Closure executed for each matching entity.
-    ///
-    /// ## Performance
-    /// * Zero heap allocation per entity.
-    /// * Iteration is cache-friendly and archetype-local.
-    
-    pub fn for_each3<
-        A: 'static + Send + Sync,
-        B: 'static + Send + Sync,
-        C: 'static + Send + Sync,
-        F,
-    >(
-        self,
-        ecs_manager: &ECSManager,
-        mut f: F,
-    )
-    where
-        F: FnMut(&A, &B, &mut C),
-    {
-        debug_assert_eq!(self.reads.len(), 2);
-        debug_assert_eq!(self.writes.len(), 1);
-
-        // Acquire world capability
-        let world = ecs_manager.world_ref();
-        let data = world.data_mut();
-
-        let matches = data.matching_archetypes(&self.signature);
-
-        for m in matches {
-            let archetype =
-                &mut data.archetypes[m.archetype_id as usize];
-
-            let chunk_count = archetype.chunk_count();
-            let mut chunk_jobs = Vec::with_capacity(chunk_count);
-
-            for chunk in 0..chunk_count {
-                let len = archetype.chunk_valid_length(chunk);
-                if len != 0 {
-                    chunk_jobs.push((chunk as ChunkID, len));
-                }
-            }
-
-            let [a_any, b_any, c_any] = archetype.components_many_mut([
-                self.reads[0],
-                self.reads[1],
-                self.writes[0],
-            ]);
-
-            let a_attribute = a_any.unwrap()
-                .as_any_mut()
-                .downcast_mut::<Attribute<A>>()
-                .unwrap();
-
-            let b_attribute = b_any.unwrap()
-                .as_any_mut()
-                .downcast_mut::<Attribute<B>>()
-                .unwrap();
-
-            let c_attribute = c_any.unwrap()
-                .as_any_mut()
-                .downcast_mut::<Attribute<C>>()
-                .unwrap();
-
-            for (chunk, length) in chunk_jobs {
-                let a_slice = a_attribute.chunk_slice(chunk, length).unwrap();
-                let b_slice = b_attribute.chunk_slice(chunk, length).unwrap();
-                let c_slice = c_attribute.chunk_slice_mut(chunk, length).unwrap();
-
-                let n = length
-                    .min(a_slice.len())
-                    .min(b_slice.len())
-                    .min(c_slice.len());
-
-                for i in 0..n {
-                    f(&a_slice[i], &b_slice[i], &mut c_slice[i]);
-                }
-            }
-        }
     }
 }

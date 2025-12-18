@@ -147,15 +147,24 @@ impl Archetype {
     /// ## Invariants
     /// The archetype contains no entities upon creation.
 
-    pub fn new(archetype_id: ArchetypeID) -> Self {
-            Self {
-                archetype_id,
-                components: (0..COMPONENT_CAP).map(|_| None).collect(), // fixed-size component attribute slots
-                signature: Signature::default(),
-                length: 0,
-                entity_positions: Vec::new(), // grows chunk-by-chunk on demand
-            }
+    pub fn new(archetype_id: ArchetypeID, signature: Signature) -> Self {
+        let mut archetype = Self {
+            archetype_id,
+            components: (0..COMPONENT_CAP).map(|_| None).collect(),
+            signature: Signature::default(),
+            length: 0,
+            entity_positions: Vec::new(),
+        };
+
+        // Allocate component columns for the signature
+        for cid in iter_bits_from_words(&signature.components) {
+            let component = make_empty_component_for(cid);
+            archetype.components[cid as usize] = Some(component);
+            archetype.signature.set(cid);
         }
+
+        archetype
+    }
 
     /// Returns the number of active entities stored in the archetype.
     ///
@@ -1466,16 +1475,27 @@ impl Archetype {
     /// ## Invariants
     /// The resulting archetype is empty but has a fully defined signature.
 
-    pub fn from_components<T: IntoIterator<Item = std::any::TypeId>>(archetype_id: ArchetypeID, types: T) -> Self {
-        let mut archetype = Self::new(archetype_id);
+    pub fn from_components<T: IntoIterator<Item = std::any::TypeId>>(
+        archetype_id: ArchetypeID,
+        types: T
+    ) -> Self {
+        let mut signature = Signature::default();
+        let mut component_ids = Vec::new();
 
-        // Create empty component columns for a predefined signature.
         for type_id in types {
             let component_id = component_id_of_type_id(type_id)
                 .expect("component type must be registered before creating archetypes.");
-            let component: Box<dyn TypeErasedAttribute> = make_empty_component_for(component_id);
-            archetype.insert_empty_component(component_id, component);
+            signature.set(component_id);
+            component_ids.push(component_id);
         }
+
+        let archetype = Self::new(archetype_id, signature);
+
+        debug_assert!(
+            component_ids.iter().all(|&id| archetype.has(id)),
+            "archetype signature and storage must match"
+        );
+
         archetype
     }
 }

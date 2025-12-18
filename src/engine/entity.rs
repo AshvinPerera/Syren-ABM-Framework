@@ -362,7 +362,8 @@ pub struct EntityShards {
 }
 
 impl EntityShards {
-    #[inline] fn shard_count(&self) -> usize { self.shards.len() }
+    /// Returns the total number of entity shards.
+    #[inline] pub fn shard_count(&self) -> usize { self.shards.len() }
 
     /// Creates a new sharded entity manager.
     ///
