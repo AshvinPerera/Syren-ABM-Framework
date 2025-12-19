@@ -80,7 +80,6 @@ The included examples demonstrate these steps end-to-end.
 
 ## In Development
 - Component validation using a component registry
-- Dynamic scheduling
 
 ## Future Development
 - GPU integration
