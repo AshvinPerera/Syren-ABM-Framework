@@ -23,7 +23,7 @@ The framework has no additional OS requirements beyond standard Rust support, an
 Basic usage involves defining your data components, registering them with the ECS, creating an `ECSManager`, spawning entities, and 
 running systems in a schedule. The repository includes one example simulation at the momemt.
 
-1. toy_economy_test.rs – a full example using abm_framework’s ECS to implement a simple toy economy with households and firms.
+`toy_economy_test.rs` – a full example using abm_framework’s ECS to implement a simple toy economy with households and firms.
 
 You can run these examples via `cargo test`. The following steps outline the ECS workflow, referencing the `toy_economy_test.rs` example
 
@@ -72,8 +72,8 @@ The included examples demonstrate these steps end-to-end.
 ## Key Features
 - Structure-of-Arrays (SoA) storage
 - Cache-friendly chunk iteration
-- Explicit parallel execution using Rayon
-- Explicit read/write access declarations
+- Parallel execution using Rayon
+- Read/write access declarations
 - Deferred structural mutations
 - Non-overlapping write guarantees
 - Phase-based scheduling
@@ -83,7 +83,7 @@ The included examples demonstrate these steps end-to-end.
 
 ## Future Development
 - GPU integration
-- scripting language for quick simulation design
+- Scripting language for quick simulation design
 - Message passing
 - Social networks 
 
