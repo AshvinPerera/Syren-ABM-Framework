@@ -5,7 +5,7 @@ use abm_framework::engine::entity::EntityShards;
 use abm_framework::engine::manager::{ECSManager, ECSReference};
 use abm_framework::engine::systems::{System};
 use abm_framework::engine::scheduler::{make_stages, run_schedule};
-use abm_framework::engine::types::{Bundle, COMPONENT_CAP, AccessSets};
+use abm_framework::engine::types::{Bundle, AccessSets};
 use abm_framework::engine::commands::Command;
 
 #[allow(dead_code)]
@@ -209,7 +209,7 @@ fn toy_economy_ecs_abm() {
         let data = world.data_mut();
 
         for _ in 0..10 {
-            let mut b = Bundle::with_len(COMPONENT_CAP);
+            let mut b = Bundle::new();
             b.insert(component_id_of::<FirmTag>(), FirmTag(0));
             b.insert(component_id_of::<Cash>(), Cash(10_000.0));
             b.insert(component_id_of::<Inventory>(), Inventory(100.0));
@@ -222,7 +222,7 @@ fn toy_economy_ecs_abm() {
         }
 
         for _ in 0..10000 {
-            let mut b = Bundle::with_len(COMPONENT_CAP);
+            let mut b = Bundle::new();
             b.insert(component_id_of::<AgentTag>(), AgentTag(0));
             b.insert(component_id_of::<Cash>(), Cash(100.0));
             b.insert(component_id_of::<Hunger>(), Hunger(0.0));

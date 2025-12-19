@@ -344,35 +344,34 @@ pub trait DynamicBundle {
 
 /// Concrete implementation of a dynamic component bundle.
 pub struct Bundle {
-    /// Component presence
+    /// Component presence signature
     signature: Signature,
-    /// Indexed storage of component values.
-    values: Vec<Option<Box<dyn Any + Send>>>,
+    /// Sparse storage of component values
+    values: Vec<(ComponentID, Box<dyn Any + Send>)>,
 }
 
 impl Bundle {
-    /// Creates a bundle with capacity for `length` components.
-    pub fn with_len(length: usize) -> Self {
-        let mut values = Vec::with_capacity(length);
-        values.resize_with(length, || None);
-
+    /// Creates an empty bundle.
+    #[inline]
+    pub fn new() -> Self {
         Self {
             signature: Signature::default(),
-            values,
+            values: Vec::new(),
         }
-}
+    }
 
     /// Clears all stored component values.
     #[inline]
     pub fn clear(&mut self) {
-        for value in &mut self.values { *value = None; }
+        self.signature = Signature::default();
+        self.values.clear();
     }
 
     /// Inserts a component value into the bundle.
     #[inline]
     pub fn insert<T: Any + Send>(&mut self, component_id: ComponentID, value: T) {
         self.signature.set(component_id);
-        self.values[component_id as usize] = Some(Box::new(value));
+        self.values.push((component_id, Box::new(value)));
     }
 
     /// Inserts multiple component values from an iterator.
@@ -405,8 +404,12 @@ impl Bundle {
 impl DynamicBundle for Bundle {
     #[inline]
     fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any + Send>> {
-        self.values
-            .get_mut(component_id as usize)
-            .and_then(|slot| slot.take())
+        let index = self
+            .values
+            .iter()
+            .position(|(cid, _)| *cid == component_id)?;
+
+        let (_, value) = self.values.swap_remove(index);
+        Some(value)
     }
 }
