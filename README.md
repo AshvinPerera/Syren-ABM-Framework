@@ -12,7 +12,7 @@ economic agent based models.
 ## Installation
 Add the crate to your project by including it in your Cargo.toml
 
-```
+``` rust
 [dependencies]
 abm_framework = { git = "https://github.com/AshvinPerera/ABM-Framework.git" }
 ```
@@ -28,7 +28,7 @@ running systems in a schedule. The repository includes one example simulation at
 You can run these examples via `cargo test`. The following steps outline the ECS workflow, referencing the `toy_economy_test.rs` example
 
 - Register Components: Define your component types and register each one before building the world.
-```
+``` rust
 register_component::<Cash>();
 register_component::<Hunger>();
 register_component::<Inventory>();
@@ -37,12 +37,12 @@ freeze_components();
 ```
 
 - Initialize the ECS: Create the ECS manager with a chosen number of shards (worker threads).
-```
+``` rust
 let ecs = ECSManager::new(EntityShards::new(4));
 ```
 
 - Spawn Entities: Build component bundles and defer spawn commands to add entities.
-```
+``` rust
 let mut bundle = Bundle::new();
 bundle.insert(component_id_of::<Cash>(), Cash(100.0));
 bundle.insert(component_id_of::<Inventory>(), Inventory(50.0));
@@ -51,7 +51,7 @@ data.defer(Command::Spawn { bundle });
 ```
 
 - Define Systems and Schedule: Implement your logic as structs that implement the `System` trait. Collect them into a stage schedule.
-```
+``` rust
 let systems: Vec<Box<dyn System>> = vec![
     Box::new(ProductionSystem),
     Box::new(WagePaymentSystem),
@@ -61,7 +61,7 @@ let stages = make_stages(systems)
 ```
 
 - Run the Simulation Loop: Call `run_schedule(&mut ecs, &stages)` in each step to execute all systems in parallel.
-```
+``` rust
 for _step in 0..1000 {
     run_schedule(&mut ecs, &stages);
 }
