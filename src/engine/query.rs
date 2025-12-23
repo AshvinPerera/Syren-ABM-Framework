@@ -4,9 +4,51 @@
 //! *describing* ECS queries: which components are required, which are read,
 //! which are written, and which must be absent.
 
-use crate::engine::types::{QuerySignature, ComponentID, AccessSets, set_read, set_write, set_without};
-use crate::engine::component::{component_id_of};
+use crate::engine::types::{ComponentID};
+use crate::engine::component::{Signature, component_id_of};
+use crate::engine::systems::AccessSets;
 
+
+/// Component signature used for query matching.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QuerySignature {
+    /// Components read by the query.
+    pub read: Signature,
+
+    /// Components written by the query.
+    pub write: Signature,
+
+    /// Components explicitly excluded from the query.
+    pub without: Signature,
+}
+
+impl QuerySignature {
+    /// Returns `true` if an archetype satisfies this query.
+    pub fn requires_all(&self, archetype_signature: &Signature) -> bool {
+        archetype_signature.contains_all(&self.read)
+            && archetype_signature.contains_all(&self.write)
+            && archetype_signature
+                .components
+                .iter()
+                .zip(self.without.components.iter())
+                .all(|(arch_word, without_word)| (arch_word & without_word) == 0)
+    }
+}
+
+/// Marks a component type as read-only in a query signature.
+pub fn set_read<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
+    signature.read.set(component_id_of::<T>());
+}
+
+/// Marks a component type as writable in a query signature.
+pub fn set_write<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
+    signature.write.set(component_id_of::<T>());
+}
+
+/// Excludes a component type from a query signature.
+pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
+    signature.without.set(component_id_of::<T>());
+}
 
 /// An immutable, fully constructed ECS query description.
 ///
@@ -89,7 +131,19 @@ impl QueryBuilder {
     }
 
     /// Finalizes the query description and returns an immutable [`BuiltQuery`].  
-    pub fn build(self) -> BuiltQuery {
+    pub fn build(mut self) -> BuiltQuery {
+        self.reads.sort_unstable();
+        self.writes.sort_unstable();
+
+        self.reads.dedup();
+        self.writes.dedup();
+
+        for cid in &self.reads {
+            if self.writes.binary_search(cid).is_ok() {
+                panic!("Invalid query: component {cid} both read and written");
+            }
+        }
+
         BuiltQuery {
             signature: self.signature,
             reads: self.reads,

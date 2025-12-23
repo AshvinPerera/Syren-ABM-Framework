@@ -29,10 +29,11 @@ use std::{
     mem::{size_of, align_of},
     sync::{OnceLock, RwLock},
     collections::HashMap,    
+    any::Any
 };
 
 use crate::engine::storage::{Attribute, TypeErasedAttribute};
-use crate::engine::types::{ComponentID, COMPONENT_CAP};
+use crate::engine::types::{ComponentID, COMPONENT_CAP, SIGNATURE_SIZE};
 
 
 /// Factory function for constructing an empty type-erased component attribute column.
@@ -65,6 +66,182 @@ fn component_factories() -> &'static RwLock<Vec<Option<FactoryFn>>> {
 
 fn new_attribute_storage<T: 'static + Send + Sync>() -> Box<dyn TypeErasedAttribute> {
     Box::new(Attribute::<T>::default())
+}
+
+/// Type-erased container for component values.
+pub trait DynamicBundle {
+    /// Removes and returns the value for `component_id`, if present.
+    fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any + Send>>;
+}
+
+/// Concrete implementation of a dynamic component bundle.
+pub struct Bundle {
+    /// Component presence signature
+    signature: Signature,
+    /// Sparse storage of component values
+    values: Vec<(ComponentID, Box<dyn Any + Send>)>,
+}
+
+impl Bundle {
+    /// Creates an empty bundle.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::default(),
+            values: Vec::new(),
+        }
+    }
+
+    /// Clears all stored component values.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.signature = Signature::default();
+        self.values.clear();
+    }
+
+    /// Inserts a component value into the bundle.
+    #[inline]
+    pub fn insert<T: Any + Send>(&mut self, component_id: ComponentID, value: T) {
+        self.signature.set(component_id);
+        self.values.push((component_id, Box::new(value)));
+    }
+
+    /// Inserts multiple component values from an iterator.
+    #[inline]
+    pub fn extend_from_iter<T: Any + Send, I: IntoIterator<Item = (ComponentID, T)>>(
+        &mut self,
+        iter: I,
+    ) {
+        for (component_id, value) in iter {
+            self.insert(component_id, value);
+        }
+    }
+
+    /// Returns `true` if all required components are present.
+    #[inline]
+    pub fn is_complete_for(&self, required: &[bool]) -> bool {
+        required
+            .iter()
+            .enumerate()
+            .all(|(i, req)| !*req || self.signature.has(i as ComponentID))
+    }
+
+    /// Builds a signature representing the components present in this bundle.
+    #[inline]
+    pub fn signature(&self) -> Signature {
+        self.signature
+    }
+}
+
+impl DynamicBundle for Bundle {
+    #[inline]
+    fn take(&mut self, component_id: ComponentID) -> Option<Box<dyn Any + Send>> {
+        let index = self
+            .values
+            .iter()
+            .position(|(cid, _)| *cid == component_id)?;
+
+        let (_, value) = self.values.swap_remove(index);
+        Some(value)
+    }
+}
+
+/// Bitset representing a set of components.
+#[derive(Clone, Copy, Debug)]
+pub struct Signature {
+    /// Packed component bitset.
+    pub components: [u64; SIGNATURE_SIZE],
+}
+
+impl Default for Signature {
+    fn default() -> Self {
+        Self {
+            components: [0u64; SIGNATURE_SIZE],
+        }
+    }
+}
+
+impl Signature {
+    /// Sets the bit corresponding to `component_id`.
+    #[inline]
+    pub fn set(&mut self, component_id: ComponentID) {
+        let index = (component_id as usize) / 64;
+        let bits = (component_id as usize) % 64;
+        self.components[index] |= 1u64 << bits;
+    }
+
+    /// Clears the bit corresponding to `component_id`.
+    #[inline]
+    pub fn clear(&mut self, component_id: ComponentID) {
+        let index = (component_id as usize) / 64;
+        let bits = (component_id as usize) % 64;
+        self.components[index] &= !(1u64 << bits);
+    }
+
+    /// Returns `true` if `component_id` is present in this signature.
+    #[inline]
+    pub fn has(&self, component_id: ComponentID) -> bool {
+        let index = (component_id as usize) / 64;
+        let bits = (component_id as usize) % 64;
+        (self.components[index] >> bits) & 1 == 1
+    }
+
+    /// Returns `true` if all components in `signature` are present.
+    #[inline]
+    pub fn contains_all(&self, signature: &Signature) -> bool {
+        for (component_a, component_b) in self.components.iter().zip(signature.components.iter()) {
+            if (component_a & component_b) != *component_b { return false; }
+        }
+        true
+    }
+
+    /// Iterates over all component IDs set in this signature.
+    pub fn iterate_over_components(&self) -> impl Iterator<Item = ComponentID> + '_ {
+        self.components
+            .iter()
+            .enumerate()
+            .flat_map(|(word_index, &word)| {
+                let base = word_index * 64;
+                let mut bits = word;
+                std::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let tz = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some((base + tz) as ComponentID)
+                })
+            })
+    }
+}
+
+/// Builds a component signature from a list of component IDs.
+pub fn build_signature(component_ids: &[ComponentID]) -> Signature {
+    let mut signature = Signature::default();
+    for &component_id in component_ids { signature.set(component_id); }
+    signature
+}
+
+/// Iterates over component IDs set in a raw signature word array.
+#[inline]
+pub fn iter_bits_from_words<'a>(
+    words: &'a [u64; SIGNATURE_SIZE],
+) -> impl Iterator<Item = ComponentID> + 'a {
+    words
+        .iter()
+        .enumerate()
+        .flat_map(|(word_index, &word)| {
+            let base = word_index * 64;
+            let mut bits = word;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let tz = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some((base + tz) as ComponentID)
+            })
+        })
 }
 
 /// Global mapping between Rust component types and compact `ComponentID` values.

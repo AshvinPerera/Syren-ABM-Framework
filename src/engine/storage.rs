@@ -103,6 +103,7 @@ use std::{
     slice,
     any::{Any, TypeId, type_name},
     mem::MaybeUninit,
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     convert::TryInto
 };
 
@@ -1054,9 +1055,9 @@ impl<T> Attribute<T> {
                 last_row as RowID
             ));
         
-            *self.get_slot_unchecked(chunk as usize, row as usize) = MaybeUninit::uninit();
+            *self.get_slot_unchecked(last_chunk as usize, last_row as usize) = MaybeUninit::uninit();
         } else {
-            *self.get_slot_unchecked(chunk as usize, row as usize) = MaybeUninit::uninit();
+            *self.get_slot_unchecked(last_chunk as usize, last_row as usize) = MaybeUninit::uninit();
         }
 
         self.length -= 1;
@@ -2009,6 +2010,45 @@ impl<T> Drop for Attribute<T> {
     fn drop(&mut self) {
         self.drop_all_initialized_elements();
     }
+}
+
+/// A thread-safe wrapper around type-erased attribute.
+#[derive(Clone)]
+pub struct LockedAttribute {
+    inner: Arc<RwLock<Box<dyn TypeErasedAttribute>>>,
+}
+
+impl LockedAttribute {
+    /// Creates a new `LockedAttribute` wrapping the given type-erased attribute.
+    pub fn new(attribute: Box<dyn TypeErasedAttribute>) -> Self {
+        Self { inner: Arc::new(RwLock::new(attribute)) }
+    }
+
+    /// Returns a read guard to the inner attribute.
+    #[inline]
+    pub fn read(&self) -> RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>> {
+        self.inner.read().expect("LockedAttribute read lock poisoned")
+    }
+
+    /// Returns a write guard to the inner attribute.
+    #[inline]
+    pub fn write(&self) -> RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>> {
+        self.inner.write().expect("LockedAttribute write lock poisoned")
+    }
+
+    /// Returns a clone of the internal `Arc<RwLock<Box<dyn TypeErasedAttribute>>>`.
+    #[inline]
+    pub fn arc(&self) -> Arc<RwLock<Box<dyn TypeErasedAttribute>>> {
+        self.inner.clone()
+    }
+
+    /// Consumes the `LockedAttribute`, returning the inner attribute.
+    pub fn into_inner(self) -> Box<dyn TypeErasedAttribute> {
+        match std::sync::Arc::try_unwrap(self.inner) {
+            Ok(lock) => lock.into_inner().expect("lock poisoned"),
+            Err(_) => panic!("LockedAttribute still shared"),
+        }
+    }    
 }
 
 /// Interprets a raw byte slice as a typed slice.

@@ -1,82 +1,124 @@
 //! ECS world management and execution layer.
 //!
-//! This module defines the central orchestration layer of the ECS, responsible
-//! for:
+//! This module defines the central orchestration layer of the ECS. It is
+//! responsible for:
 //!
-//! * owning archetypes and their component storage,
+//! * owning archetypes and component storage,
 //! * coordinating entity movement between archetypes,
-//! * managing deferred structural mutations via commands,
-//! * providing safe shared and exclusive access to world state,
-//! * executing parallel component iteration with explicit read/write sets.
+//! * managing deferred structural mutations,
+//! * enforcing safe parallel iteration at runtime,
+//! * providing controlled access to ECS state.
 //!
 //! ## Concurrency model
 //!
-//! The ECS is internally mutable and uses `UnsafeCell` to allow aliasing between
-//! shared (`&`) and exclusive (`&mut`) access paths. Safety is enforced by
-//! *API discipline*, not the Rust borrow checker:
+//! The ECS uses **interior mutability** (`UnsafeCell`) to allow highly parallel
+//! iteration while avoiding fine-grained locks in hot paths.
 //!
-//! * Structural mutations must go through exclusive access (`&mut ECSData`)
-//! * Parallel iteration is limited to non-overlapping component access sets
-//! * Deferred commands are applied only at explicit synchronization points
+//! Safety is enforced by **runtime mechanisms**:
+//!
+//! * **Phase discipline**
+//!   - A global read/write phase lock prevents structural mutation during iteration.
+//! * **IterationScope**
+//!   - A global iteration counter forbids structural changes while iteration is active.
+//! * **BorrowTracker**
+//!   - Per-component runtime borrow tracking enforces Rust-like read/write rules.
+//!
+//! ## Structural mutation
+//!
+//! Structural changes (spawn, despawn, add/remove component) must be:
+//!
+//! * deferred via [`ECSReference::defer`], or
+//! * performed inside an exclusive phase using [`ECSReference::with_exclusive`].
+//!
+//! Applying deferred commands is a global synchronization point and is
+//! guaranteed not to overlap with iteration.
 //!
 //! ## Safety
 //!
 //! This module contains unsafe code for:
+//!
 //! * interior mutability (`UnsafeCell`),
 //! * raw pointer component access,
 //! * parallel execution using Rayon.
 //!
-//! All unsafe blocks rely on strict invariants documented at each boundary.
+//! Each unsafe block documents the invariants it relies on.
+//! Violating these invariants results in undefined behavior.
 
 use std::cell::UnsafeCell;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard,Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
 use rayon::prelude::*;
 
 use crate::engine::commands::Command;
-use crate::engine::types::{
-    Signature, 
+use crate::engine::types::{ 
     ComponentID, 
     ArchetypeID,
     ShardID,
     SIGNATURE_SIZE,
-    QuerySignature
+    
 };
-use crate::engine::query::{QueryBuilder, BuiltQuery};
+use crate::engine::query::{QuerySignature, QueryBuilder, BuiltQuery};
 use crate::engine::archetype::{
     Archetype,
     ArchetypeMatch
 };
 use crate::engine::entity::{Entity, EntityShards};
 use crate::engine::storage::{cast_slice, cast_slice_mut};
-use crate::engine::component::make_empty_component;
+use crate::engine::component::{Signature, make_empty_component};
+use crate::engine::scheduler::Scheduler;
+use crate::engine::borrow::{BorrowTracker, BorrowGuard};
 
 
 /// A unit of parallel work operating on a single archetype chunk.
 ///
 /// ## Purpose
-/// `Job` packages raw pointers and byte lengths for three component columns
-/// (two read-only, one mutable) so they can be processed in parallel by Rayon
-/// without holding references into archetype storage.
+/// `Job` packages raw pointers and byte lengths for component columns
+/// (read-only and writable) so they can be processed in parallel by Rayon
+/// without holding Rust references into archetype storage.
 ///
 /// ## Safety
-/// All pointers must:
-/// * originate from valid component storage,
-/// * remain valid for the duration of the job,
-/// * refer to non-overlapping mutable regions across jobs.
+/// The pointers contained in a `Job` are valid only under the following
+/// invariants:
 ///
-/// These invariants are established by archetype chunk partitioning.
+/// * All pointers originate from valid component storage.
+/// * Component storage is not structurally modified for the lifetime of the job.
+/// * No two jobs contain overlapping mutable regions.
+/// * All jobs execute within the ECS **iteration phase**, during which
+///   structural mutation is prohibited.
 ///
+/// These invariants are enforced by:
+/// * execution phase discipline (read/write phase locking),
+/// * `IterationScope` (prevents structural mutation),
+/// * `BorrowTracker` (runtime read/write conflict detection),
+/// * archetype chunk partitioning.
 
-#[allow(dead_code)]
+
 #[derive(Clone)]
 struct Job {
-    len: usize,
     read_pointers: Vec<(*const u8, usize)>,
     write_pointers: Vec<(*mut u8, usize)>,
 }
 
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
+
+struct IterationScope<'a>(&'a AtomicUsize);
+
+impl<'a> IterationScope<'a> {
+    #[inline]
+    fn new(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter)
+    }
+}
+
+impl Drop for IterationScope<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Thread-safe entry point to the ECS world.
 ///
@@ -89,26 +131,31 @@ unsafe impl Sync for Job {}
 /// * `ECSManager` is `Sync`
 /// * All mutation occurs through `UnsafeCell<ECSData>`
 /// * Users must respect API-level exclusivity guarantees
+
 pub struct ECSManager {
-    /// Interior-mutable ECS state.
     inner: UnsafeCell<ECSData>,
+    phase: RwLock<()>,
+    borrows: BorrowTracker,
+    active_iters: AtomicUsize,
+    deferred: Mutex<Vec<Command>>,
 }
 
 unsafe impl Sync for ECSManager {}
 
 impl ECSManager {
-    /// Creates a new ECS manager with the given entity shard configuration.
-    ///
-    /// ## Parameters
-    /// * `shards` — Entity shard allocator used for entity lifetime tracking.
+    /// Creates a new ECS manager.
     ///
     /// ## Notes
     /// Archetypes are initially empty and created lazily as signatures are
     /// encountered.    
 
-    pub fn new(shards: EntityShards) -> Self {
+    pub fn new(data: ECSData) -> Self {
         Self {
-            inner: UnsafeCell::new(ECSData::new(shards)),
+            inner: UnsafeCell::new(data),
+            phase: RwLock::new(()),
+            borrows: BorrowTracker::new(),
+            active_iters: AtomicUsize::new(0),
+            deferred: Mutex::new(Vec::new()),
         }
     }
 
@@ -122,10 +169,19 @@ impl ECSManager {
     /// The returned reference permits both shared and mutable access via
     /// `ECSReference`, relying on caller discipline to avoid data races.
 
+    /// Shared handle. This does *not* grant structural mutation by itself.
     #[inline]
     pub fn world_ref(&self) -> ECSReference<'_> {
-        ECSReference { inner: &self.inner }
+        ECSReference { manager: self }
     }
+
+    /// Runs the given scheduler for one full tick.
+    pub fn run(&self, scheduler: &mut Scheduler) {
+        // one full tick
+        scheduler.run(self.world_ref());
+        // single structural sync point
+        self.apply_deferred_commands();
+    }    
 
     /// Applies all queued deferred commands.
     ///
@@ -137,8 +193,43 @@ impl ECSManager {
     /// Commands are drained and executed in FIFO order.
 
     pub fn apply_deferred_commands(&self) {
-        unsafe { &mut *self.inner.get() }.apply_deferred_commands();
+        // Hard safety gate
+        if self.active_iters.load(Ordering::Acquire) != 0 {
+            panic!("apply_deferred_commands called during iteration");
+        }
+
+        let _phase = self.phase_write();
+
+        // Drain queue outside ECSData
+        let commands = {
+            let mut queue = self.deferred.lock().expect("deferred queue poisoned");
+            std::mem::take(&mut *queue)
+        };
+
+        // Apply to ECSData under exclusive phase
+        let data = unsafe { self.data_mut_unchecked() };
+        data.apply_deferred_commands(commands);
     }
+
+    #[inline]
+    pub(crate) fn phase_read(&self) -> PhaseRead<'_> {
+        PhaseRead(self.phase.read().expect("phase lock poisoned"))
+    }
+
+    #[inline]
+    pub(crate) fn phase_write(&self) -> PhaseWrite<'_> {
+        PhaseWrite(self.phase.write().expect("phase lock poisoned"))
+    }
+
+    #[inline]
+    unsafe fn data_ref_unchecked(&self) -> &ECSData {
+        unsafe { &*self.inner.get() }
+    }
+
+    #[inline]
+    unsafe fn data_mut_unchecked(&self) -> &mut ECSData {
+        unsafe{ &mut *self.inner.get() }
+    }     
 }
 
 /// A non-owning handle granting access to ECS data.
@@ -151,42 +242,257 @@ impl ECSManager {
 /// This type exposes raw access to `ECSData` via `UnsafeCell` and relies
 /// on higher-level scheduling to avoid conflicting mutable accesses.
 
+#[derive(Copy, Clone)]
 pub struct ECSReference<'a> {
-    /// Pointer to interior ECS data.
-    inner: &'a UnsafeCell<ECSData>,
+    manager: &'a ECSManager,
 }
 
 impl<'a> ECSReference<'a> {
-    /// Returns an immutable reference to the ECS manager.
-    #[inline]
-    pub fn manager(&self) -> &ECSManager {
-        // SAFETY: ECSReference always originates from ECSManager
-        unsafe {
-            &*(self.inner as *const _ as *const ECSManager)
-        }
-    }
 
-    /// Returns an immutable reference to ECS data.
+    /// Executes a closure with **exclusive access** to the ECS world.
     ///
-    /// ## Safety
-    /// No aliasing guarantees are enforced at compile time.    
+    /// ## Purpose
+    /// This function provides a **low-level escape hatch** for advanced use cases
+    /// that require direct, immediate mutation of ECS state.
+    ///
+    /// ## Safety contract
+    /// * This function **must not** be called during parallel iteration.
+    /// * Calling it while iteration is active will panic.
+    /// * The caller is responsible for maintaining all ECS invariants.
+    ///
+    /// ## Preferred alternative
+    /// Most systems should use [`ECSReference::defer`] to request structural
+    /// mutations instead of calling this function directly.
+    ///
+    /// ## Warning
+    /// This API bypasses the scheduler, borrow tracker, and command buffering.
+    /// Incorrect use can easily result in undefined behavior.
     
     #[inline]
-    pub fn data(&self) -> &ECSData {
-        unsafe { &*self.inner.get() }
+    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut ECSData) -> R) -> R {
+        if self.manager.active_iters.load(Ordering::Acquire) != 0 {
+            panic!("Structural mutation attempted during iteration");
+        }
+
+        let _phase = self.manager.phase_write();
+        let data = unsafe { self.manager.data_mut_unchecked() };
+        f(data)
     }
 
-    /// Returns a mutable reference to ECS data.
+    /// Queue a structural command.
+    #[inline]
+    pub fn defer(&self, command: Command) {
+        let mut queue = self.manager.deferred.lock().expect("deferred queue poisoned");
+        queue.push(command);
+    }
+
+    /// Begins construction of a component query.
+    #[inline]
+    pub fn query(&self) -> QueryBuilder {
+        QueryBuilder::new()
+    }
+
+    /// Executes a generic, parallel, chunk-oriented ECS query.
+    ///
+    /// ## Execution model
+    /// This function enforces all runtime safety guarantees before invoking
+    /// the underlying unchecked iteration primitive:
+    ///
+    /// * acquires a global read phase,
+    /// * increments the iteration counter,
+    /// * acquires per-component borrows via the borrow tracker.
+    ///
+    /// The provided closure is invoked once per non-empty chunk.
     ///
     /// ## Safety
-    /// Caller must ensure no other references (mutable or immutable) are
-    /// active while this reference is used.
+    /// This function is safe to call from systems. All aliasing, mutation,
+    /// and structural constraints are enforced at runtime.
+    ///
+    /// The closure must not:
+    /// * retain references beyond the call,
+    /// * perform structural ECS mutations.
 
-    #[inline]
-    pub fn data_mut(&self) -> &mut ECSData {
-        unsafe { &mut *self.inner.get() }
+    pub fn for_each_abstraction(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
+    ) {
+        let _phase = self.manager.phase_read();
+        let _iter_scope = IterationScope::new(&self.manager.active_iters);
+        let _borrows = BorrowGuard::new(
+            &self.manager.borrows,
+            &query.reads,
+            &query.writes,
+        );
+
+        // immutable world reference during iteration
+        let data = unsafe { self.manager.data_ref_unchecked() };
+        data.for_each_abstraction_unchecked(query, f);
+    }   
+}
+
+impl ECSReference<'_> {
+    /// Executes a parallel iteration over a single read-only component.
+    ///
+    /// Invokes `f` once per entity for each matching archetype chunk.
+    /// Structural ECS mutations must be deferred.
+    ///
+    /// ## Safety model
+    /// Runtime safety is enforced by:
+    /// - phase discipline (read phase)
+    /// - IterationScope (no structural mutation)
+    /// - BorrowGuard (no aliasing / RW conflicts)
+    ///
+    /// This function is safe to call from systems.
+
+    pub fn for_each_read<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A) + Send + Sync,
+    )
+    where
+        A: 'static + Send + Sync,
+    {
+        debug_assert_eq!(query.reads.len(), 1);
+        debug_assert_eq!(query.writes.len(), 0);
+
+        self.for_each_abstraction(query, move |reads, _| unsafe {
+            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            for v in a {
+                f(v);
+            }
+        });
+    }
+
+    /// Executes a parallel iteration over a single mutable component.
+    pub fn for_each_write<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&mut A) + Send + Sync,
+    )
+    where
+        A: 'static + Send + Sync,
+    {
+        debug_assert_eq!(query.reads.len(), 0);
+        debug_assert_eq!(query.writes.len(), 1);
+
+        self.for_each_abstraction(query, move |_, writes| unsafe {
+            let a = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
+            for v in a {
+                f(v);
+            }
+        });
+    }
+
+    /// Executes a parallel iteration over two read-only components.
+    pub fn for_each_read2<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B) + Send + Sync,
+    )
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+    {
+        debug_assert_eq!(query.reads.len(), 2);
+        debug_assert_eq!(query.writes.len(), 0);
+
+        self.for_each_abstraction(query, move |reads, _| unsafe {
+            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+
+            // These should have equal lengths, but min() avoids UB if something is wrong.
+            let n = a.len().min(b.len());
+            for i in 0..n {
+                f(&a[i], &b[i]);
+            }
+        });
+    }
+
+    /// Executes a parallel iteration over one read-only and one mutable component.
+    pub fn for_each_read_write<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &mut B) + Send + Sync,
+    )
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+    {
+        debug_assert_eq!(query.reads.len(), 1);
+        debug_assert_eq!(query.writes.len(), 1);
+
+        self.for_each_abstraction(query, move |reads, writes| unsafe {
+            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
+
+            let n = a.len().min(b.len());
+            for i in 0..n {
+                f(&a[i], &mut b[i]);
+            }
+        });
+    }
+
+    /// Executes a parallel iteration over two read-only components and one mutable component.
+    pub fn for_each_read2_write_1<A, B, C>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &mut C) + Send + Sync,
+    )
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
+    {
+        debug_assert_eq!(query.reads.len(), 2);
+        debug_assert_eq!(query.writes.len(), 1);
+
+        self.for_each_abstraction(query, move |reads, writes| unsafe {
+            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
+
+            let n = a.len().min(b.len()).min(c.len());
+            for i in 0..n {
+                f(&a[i], &b[i], &mut c[i]);
+            }
+        });
+    }
+
+    /// Executes a parallel iteration over two read-only and two mutable components.
+    pub fn for_each_read2_write2<A, B, C, D>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &mut C, &mut D) + Send + Sync,
+    )
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
+        D: 'static + Send + Sync,
+    {
+        debug_assert_eq!(query.reads.len(), 2);
+        debug_assert_eq!(query.writes.len(), 2);
+
+        self.for_each_abstraction(query, move |reads, writes| unsafe {
+            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
+            let d = cast_slice_mut::<D>(writes[1].as_mut_ptr(), writes[1].len());
+
+            let n = a.len().min(b.len()).min(c.len()).min(d.len());
+            for i in 0..n {
+                f(&a[i], &b[i], &mut c[i], &mut d[i]);
+            }
+        });
     }
 }
+
+/// RAII guard representing the ECS read phase.
+/// Holding this guard guarantees that no exclusive (structural) access exists.
+#[allow(dead_code)] pub struct PhaseRead<'a>(RwLockReadGuard<'a, ()>);
+/// phase write guard
+#[allow(dead_code)] pub struct PhaseWrite<'a>(RwLockWriteGuard<'a, ()>);
 
 /// Core ECS storage and orchestration structure.
 ///
@@ -202,7 +508,7 @@ impl<'a> ECSReference<'a> {
 
 pub struct ECSData {
     /// All registered archetypes.
-    pub archetypes: Vec<Archetype>,
+    archetypes: Vec<Archetype>,
 
     /// Maps component signatures to archetype IDs.
     signature_map: HashMap<[u64; SIGNATURE_SIZE], ArchetypeID>,
@@ -210,10 +516,7 @@ pub struct ECSData {
     /// Entity shard allocator and location tracker.
     shards: EntityShards,
 
-    /// Deferred structural commands.
-    deferred: Vec<Command>,
-
-     next_spawn_shard: ShardID,
+    next_spawn_shard: ShardID,
 }
 
 impl ECSData {
@@ -231,8 +534,7 @@ impl ECSData {
             archetypes: Vec::new(),
             signature_map: HashMap::new(),
             shards,
-            deferred: Vec::new(),
-            next_spawn_shard: 0
+            next_spawn_shard: 0,
         }
     }
 
@@ -529,34 +831,13 @@ impl ECSData {
         }        
     }
 
-    /// Executes a closure with exclusive access to ECS data.
-    ///
-    /// ## Purpose
-    /// Provides an explicit escape hatch for complex mutations requiring full
-    /// control over ECS state.
-
-    pub fn with_exclusive<R>(&mut self, f: impl FnOnce(&mut ECSData) -> R) -> R {
-        f(self)
-    } 
-
-    /// Queues a structural command for deferred execution.
-    ///
-    /// ## Use case
-    /// Used by systems that cannot mutate ECS structure immediately.
-
-    pub fn defer(&mut self, command: Command) {
-        self.deferred.push(command);
-    }
-
     /// Applies all queued deferred commands.
     ///
     /// ## Notes
     /// This method is expected to evolve as command execution is implemented.
     /// Currently acts as a structural synchronization point.
 
-    pub fn apply_deferred_commands(&mut self) {
-        let commands = std::mem::take(&mut self.deferred);
-
+    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) {
         for command in commands {
             match command {
                 Command::Spawn { bundle } => {
@@ -564,18 +845,14 @@ impl ECSData {
                     let archetype_id = self.get_or_create_archetype(&signature);
                     let shard_id = self.pick_spawn_shard();
 
-                    let (archetypes, shards) = (&mut self.archetypes, &mut self.shards);
-                    let archetype = &mut archetypes[archetype_id as usize];
-
-                    let _ = archetype.spawn_on(shards, shard_id, bundle);
+                    let archetype = &mut self.archetypes[archetype_id as usize];
+                    let _ = archetype.spawn_on(&mut self.shards, shard_id, bundle);
                 }
 
                 Command::Despawn { entity } => {
                     if let Some(loc) = self.shards.get_location(entity) {
-                        let (archetypes, shards) = (&mut self.archetypes, &mut self.shards);
-                        let archetype = &mut archetypes[loc.archetype as usize];
-
-                        let _ = archetype.despawn_on(shards, entity);
+                        let archetype = &mut self.archetypes[loc.archetype as usize];
+                        let _ = archetype.despawn_on(&mut self.shards, entity);
                     }
                 }
 
@@ -590,89 +867,33 @@ impl ECSData {
         }
     }
 
-    /// Executes a generic, parallel, chunk-oriented ECS query.
+    /// Executes a generic, parallel, chunk-oriented ECS query **without safety checks**.
     ///
-    /// ## Purpose
-    /// This function is the **core execution primitive** for the ECS query system.
-    /// It resolves archetypes matching a [`BuiltQuery`], partitions their component
-    /// storage into chunk-level jobs, and executes those jobs **in parallel** using
-    /// Rayon.
+    /// ## Important
+    /// This function is **unsafe by contract** and must only be called from
+    /// [`ECSReference::for_each_abstraction`].
     ///
-    /// All higher-level, typed query helpers (e.g. `for_each2`, `for_each3`,
-    /// variable-arity queries, and future GPU backends) should be implemented
-    /// **on top of this function**.
+    /// ## Required invariants
+    /// The caller must guarantee:
     ///
-    /// ## Execution model
-    /// For a given [`BuiltQuery`], this function:
-    ///
-    /// 1. Resolves all archetypes whose signatures satisfy the query.
-    /// 2. Iterates over each matching archetype.
-    /// 3. Partitions each archetype into per-chunk [`Job`]s.
-    /// 4. For each chunk:
-    ///    * collects raw byte ranges for all read-only components,
-    ///    * collects raw mutable byte ranges for all writable components.
-    /// 5. Executes all chunk jobs **in parallel**, invoking the provided closure
-    ///    exactly once per non-empty chunk.
-    ///
-    /// The closure is invoked **per chunk**, not per entity. Any per-entity iteration
-    /// must be performed by the closure itself.
-    ///
-    /// ## Parameters
-    /// * `query` — A fully constructed query describing:
-    ///   * required components,
-    ///   * read-only component access,
-    ///   * writable component access.
-    /// * `f` — A callback invoked for each chunk, receiving:
-    ///   * `&[&[u8]]` — raw byte slices for read-only components (in declaration order),
-    ///   * `&mut [&mut [u8]]` — raw mutable byte slices for writable components.
-    ///
-    /// The callback **must not** retain references to these slices beyond the
-    /// duration of the call.
-    ///
-    /// ## Safety
-    /// This function contains **unsafe code** and relies on the following invariants:
-    ///
-    /// * The `query` correctly describes component access:
-    ///   * all `reads` exist immutably,
-    ///   * all `writes` exist mutably,
-    ///   * no component appears in both sets.
-    /// * Component storage layouts are consistent across all columns in a chunk.
-    /// * Each chunk corresponds to a **disjoint region** of component storage.
-    /// * Mutable slices passed to the callback do **not overlap** with any other
-    ///   mutable slices processed in parallel.
-    /// * The callback does not perform structural ECS mutations.
-    ///
-    /// Violating any of these invariants results in **undefined behavior**.
-    ///
-    /// ## Concurrency
-    /// * Chunk jobs are executed in parallel using Rayon.
-    /// * Parallelism is limited to chunk-level granularity.
-    /// * Structural ECS mutations must be deferred and applied outside this call.
-    ///
-    /// ## Performance characteristics
-    /// * Zero heap allocation per entity.
-    /// * One job allocation per non-empty chunk.
-    /// * Cache-friendly, archetype-local iteration.
-    /// * No dynamic dispatch in the hot path.
-    ///
-    /// ## Design note
-    /// This function intentionally operates on **raw byte slices** rather than
-    /// typed component references. This enables:
-    /// * variable-arity queries,
-    /// * custom scheduling strategies,
-    /// * alternative execution backends (SIMD, GPU),
-    /// * minimal abstraction overhead.
+    /// * no structural mutation occurs for the duration of the call,
+    /// * component borrow rules are already enforced,
+    /// * each chunk represents a disjoint memory region,
+    /// * the callback does not escape references.
 
-    pub fn for_each_abstraction(
-        &mut self,
+
+    pub(crate) fn for_each_abstraction_unchecked(
+        &self,
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
     ) {
         let matches = self.matching_archetypes(&query.signature);
 
         for m in matches {
+            // Collect jobs for this archetype
             let jobs: Vec<Job> = {
-                let archetype = &mut self.archetypes[m.archetype_id as usize];
+                // immutable reference to archetype
+                let archetype = &self.archetypes[m.archetype_id as usize];
                 let mut jobs = Vec::new();
 
                 for chunk in 0..archetype.chunk_count() {
@@ -684,20 +905,35 @@ impl ECSData {
                     let mut reads = Vec::with_capacity(query.reads.len());
                     let mut writes = Vec::with_capacity(query.writes.len());
 
-                    for &cid in &query.reads {
-                        let col = archetype.component(cid).unwrap();
-                        let (ptr, bytes) = col.chunk_bytes(chunk as _, len).unwrap();
-                        reads.push((ptr, bytes));
+                    // Collect read-only component slices
+                    for &component_id in &query.reads {
+                        let locked = archetype
+                            .component_locked(component_id)
+                            .expect("component missing in archetype");
+                        let guard = locked.read();
+
+                        let (pointer, bytes) = guard
+                            .chunk_bytes(chunk as _, len)
+                            .expect("invalid chunk bounds");
+
+                        reads.push((pointer, bytes));
                     }
 
-                    for &cid in &query.writes {
-                        let col = archetype.component_mut(cid).unwrap();
-                        let (ptr, bytes) = col.chunk_bytes_mut(chunk as _, len).unwrap();
-                        writes.push((ptr, bytes));
+                    // Collect mutable component slices
+                    for &component_id in &query.writes {
+                        let locked = archetype
+                            .component_locked(component_id)
+                            .expect("component missing in archetype");
+                        let mut guard = locked.write();
+
+                        let (pointer, bytes) = guard
+                            .chunk_bytes_mut(chunk as _, len)
+                            .expect("invalid chunk bounds");
+
+                        writes.push((pointer, bytes));
                     }
 
                     jobs.push(Job {
-                        len,
                         read_pointers: reads,
                         write_pointers: writes,
                     });
@@ -706,27 +942,25 @@ impl ECSData {
                 jobs
             };
 
+            // Execute all chunk jobs in parallel
             jobs.into_par_iter().for_each(|job| unsafe {
-                let mut read_views: Vec<&[u8]> = Vec::with_capacity(job.read_pointers.len());
-                let mut write_views: Vec<&mut [u8]> = Vec::with_capacity(job.write_pointers.len());
+                let mut read_views: Vec<&[u8]> =
+                    Vec::with_capacity(job.read_pointers.len());
+                let mut write_views: Vec<&mut [u8]> =
+                    Vec::with_capacity(job.write_pointers.len());
 
-                for &(ptr, bytes) in job.read_pointers.iter() {
-                    read_views.push(std::slice::from_raw_parts(ptr, bytes));
+                for &(pointer, bytes) in &job.read_pointers {
+                    read_views.push(std::slice::from_raw_parts(pointer, bytes));
                 }
 
-                for &(ptr, bytes) in job.write_pointers.iter() {
-                    write_views.push(std::slice::from_raw_parts_mut(ptr, bytes));
+                for &(pointer, bytes) in &job.write_pointers {
+                    write_views.push(std::slice::from_raw_parts_mut(pointer, bytes));
                 }
 
+                // User callback (per chunk)
                 f(&read_views, &mut write_views);
             });
         }
-    }
-
-
-    /// Begins construction of a component query.
-    pub fn query(&mut self) -> QueryBuilder {
-        QueryBuilder::new()
     }
 
     /// Returns archetypes matching a query signature.
@@ -734,7 +968,7 @@ impl ECSData {
     /// ## Returns
     /// A list of archetype IDs and their chunk counts.
 
-    pub fn matching_archetypes(
+    fn matching_archetypes(
         &self,
         query: &QuerySignature,
     ) -> Vec<ArchetypeMatch> {
@@ -746,195 +980,5 @@ impl ECSData {
                 chunks: a.chunk_count(),
             })
             .collect()
-    }
-}
-
-impl ECSData {
-
-    /// Executes a parallel iteration over a single read-only component.
-    ///
-    /// Invokes `f` once per entity for each matching archetype chunk.
-    /// No structural ECS mutations are permitted during execution.
-    ///
-    /// ## Safety
-    /// Relies on correct query construction and chunk-level disjointness.
-    
-    pub fn for_each_read<A>(
-        &mut self,
-        query: BuiltQuery,
-        f: impl Fn(&A) + Send + Sync,
-    )
-    where
-        A: 'static + Send + Sync,
-    {
-        debug_assert_eq!(query.reads.len(), 1);
-        debug_assert_eq!(query.writes.len(), 0);
-
-        self.for_each_abstraction(query, |reads, _| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            for v in a {
-                f(v);
-            }
-        });
-    }
-
-    /// Executes a parallel iteration over a single mutable component.
-    ///
-    /// Invokes `f` once per entity, providing exclusive access to the component.
-    /// Structural ECS mutations must be deferred.
-    ///
-    /// ## Safety
-    /// Mutable slices must not overlap across chunks.
-
-    pub fn for_each_write<A>(
-        &mut self,
-        query: BuiltQuery,
-        f: impl Fn(&mut A) + Send + Sync,
-    )
-    where
-        A: 'static + Send + Sync,
-    {
-        debug_assert_eq!(query.reads.len(), 0);
-        debug_assert_eq!(query.writes.len(), 1);
-
-        self.for_each_abstraction(query, |_, writes| unsafe {
-            let a = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
-            for v in a {
-                f(v);
-            }
-        });
-    }
-
-    /// Executes a parallel iteration over two read-only components.
-    ///
-    /// Components are provided in query declaration order.
-    /// The callback is invoked once per entity.
-    ///
-    /// ## Safety
-    /// Component storage must be correctly registered and aligned.
-
-    pub fn for_each_read2<A, B>(
-        &mut self,
-        query: BuiltQuery,
-        f: impl Fn(&A, &B) + Send + Sync,
-    )
-    where
-        A: 'static + Send + Sync,
-        B: 'static + Send + Sync,
-    {
-        debug_assert_eq!(query.reads.len(), 2);
-        debug_assert_eq!(query.writes.len(), 0);
-
-        self.for_each_abstraction(query, |reads, _| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-
-            let n = a.len().min(b.len());
-            for i in 0..n {
-                f(&a[i], &b[i]);
-            }
-        });
-    }
-
-    /// Executes a parallel iteration over one read-only and one mutable component.
-    ///
-    /// The first component is read-only; the second is writable.
-    /// The callback is invoked once per entity.
-    ///
-    /// ## Safety
-    /// Mutable access relies on chunk-level non-overlap.
-
-    pub fn for_each_read_write<A, B>(
-        &mut self,
-        query: BuiltQuery,
-        f: impl Fn(&A, &mut B) + Send + Sync,
-    )
-    where
-        A: 'static + Send + Sync,
-        B: 'static + Send + Sync,
-    {
-        debug_assert_eq!(query.reads.len(), 1);
-        debug_assert_eq!(query.writes.len(), 1);
-
-        self.for_each_abstraction(query, |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
-
-            let n = a.len().min(b.len());
-            for i in 0..n {
-                f(&a[i], &mut b[i]);
-            }
-        });
-    }    
-
-    /// Executes a parallel iteration over two read-only components and one mutable component.
-    ///
-    /// The callback is invoked once per entity within each matching chunk.
-    /// Structural mutations must not occur during execution.
-    ///
-    /// ## Safety
-    /// Relies on correct query access declarations and disjoint mutable slices.
-
-    pub fn for_each_read2_write_1<A, B, C>(
-        &mut self,
-        query: BuiltQuery,
-        f: impl Fn(&A, &B, &mut C) + Send + Sync,
-    )
-    where
-        A: 'static + Send + Sync,
-        B: 'static + Send + Sync,
-        C: 'static + Send + Sync,
-    {
-        debug_assert_eq!(query.reads.len(), 2);
-        debug_assert_eq!(query.writes.len(), 1);
-
-        self.for_each_abstraction(query, |reads, writes| {
-            unsafe {
-                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-                let c =
-                    cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
-
-                let n = a.len().min(b.len()).min(c.len());
-                for i in 0..n {
-                    f(&a[i], &b[i], &mut c[i]);
-                }
-            }
-        });
-    }
-
-    /// Executes a parallel iteration over two read-only and two mutable components.
-    ///
-    /// Provides exclusive access to both writable components per entity.
-    /// The callback is invoked once per entity.
-    ///
-    /// ## Safety
-    /// Writable component slices must not alias across parallel jobs.
-
-    pub fn for_each_read2_write2<A, B, C, D>(
-        &mut self,
-        query: BuiltQuery,
-        f: impl Fn(&A, &B, &mut C, &mut D) + Send + Sync,
-    )
-    where
-        A: 'static + Send + Sync,
-        B: 'static + Send + Sync,
-        C: 'static + Send + Sync,
-        D: 'static + Send + Sync,
-    {
-        debug_assert_eq!(query.reads.len(), 2);
-        debug_assert_eq!(query.writes.len(), 2);
-
-        self.for_each_abstraction(query, |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
-            let d = cast_slice_mut::<D>(writes[1].as_mut_ptr(), writes[1].len());
-
-            let n = a.len().min(b.len()).min(c.len()).min(d.len());
-            for i in 0..n {
-                f(&a[i], &b[i], &mut c[i], &mut d[i]);
-            }
-        });
     }
 }

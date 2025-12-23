@@ -37,6 +37,7 @@ pub use engine::entity::{
 };
 
 pub use engine::component::{
+    Signature,
     register_component,
     freeze_components,
     component_id_of,
@@ -61,8 +62,7 @@ pub use engine::error::{
 pub use engine::types::{
     EntityID,
     ComponentID,
-    ArchetypeID,
-    Signature,
+    ArchetypeID
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

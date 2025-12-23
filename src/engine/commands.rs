@@ -29,10 +29,8 @@
 use std::any::Any;
 
 use crate::engine::entity::Entity;
-use crate::engine::types::{
-    ComponentID,
-    Bundle
-};
+use crate::engine::types::ComponentID;
+use crate::engine::component::Bundle;
 
 
 /// Represents a deferred ecs mutation command.

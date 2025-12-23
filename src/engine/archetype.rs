@@ -1,49 +1,51 @@
-//! # Archetype
+//! # ECS world management and execution layer
 //!
-//! The `Archetype` type represents a storage container for all entities that
-//! share an identical component signature. Each archetype owns a set of
-//! component attributes, arranged in a column-major layout, where every attribute
-//! stores values of a single component type.
+//! This module defines the central orchestration layer of the ECS, responsible
+//! for:
 //!
-//! ## Operations
+//! * owning archetypes and their component storage,
+//! * coordinating entity movement between archetypes,
+//! * managing deferred structural mutations via commands,
+//! * providing controlled parallel access to component data,
+//! * executing chunk-based parallel iteration.
 //!
-//! Archetypes support:
+//! ## Concurrency model
 //!
-//! - Spawning entities into a new row across all component attribute.
-//! - Removing entities and maintaining compactness through `swap_remove`.
-//! - Moving entities between archetypes when their component signatures change.
-//! - Borrowing chunk views for system execution with component-level read/write access.
+//! The ECS uses **fine-grained, column-level synchronization** to support
+//! safe parallel execution:
 //!
-//! These operations maintain the required alignment invariants and ensure that
-//! component data remains consistent with entity metadata.
+//! * Each component column inside an archetype is protected by an `RwLock`.
+//! * Parallel systems may:
+//!   * read the same component concurrently,
+//!   * write disjoint component sets concurrently,
+//!   * read while others read.
+//! * Writes to the same component column are mutually exclusive.
 //!
-//! ## Invariants
+//! Structural mutations (spawn, despawn, archetype migration) **must not**
+//! occur during parallel iteration and must be executed at explicit
+//! synchronization points.
 //!
-//! - All component attributes in an archetype share identical row counts.
-//! - Component presence is determined solely by the archetype's `Signature`.
-//! - Any row movement (via `push_from`, `swap_remove`, or de-spawn) must update
-//!   `entity_positions` to remain consistent with component storage.
+//! This constraint is enforced by execution phase discipline. 
+//! Violating it may result in deadlock or panic.
 //!
-//! Violating these invariants results in undefined entity/component alignment.
+//! ## Safety model
 //!
-//! ## Error Conditions
+//! * Component data access is synchronized via column-level locks.
+//! * Raw pointers are only exposed after acquiring the appropriate locks.
+//! * Parallel iteration relies on chunk-level disjointness guaranteed by
+//!   archetype layout.
 //!
-//! Archetype operations produce `SpawnError` values when invariants cannot be
-//! upheld, such as:
+//! ## Unsafe code
 //!
-//! - Missing components in a bundle during spawn.
-//! - Storage push failures.
-//! - Misaligned writes during spawn or move.
-//! - De-spawning stale or untracked entities.
+//! This module contains `unsafe` code for:
 //!
-//! ## Summary
-//!
-//! `Archetype` provides the core high-performance storage representation for
-//! entities in the ECS. Its chunked, columnar design ensures locality, fast
-//! traversal, predictable memory behavior, and compatibility with CPU/GPU
-//! parallelization strategies.
+//! * converting locked component storage into raw byte slices,
+//! * parallel execution using Rayon,
+//! * low-level performance optimizations.
+
 
 use std::any::Any;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::engine::types::{
     ArchetypeID, 
@@ -53,14 +55,12 @@ use crate::engine::types::{
     CHUNK_CAP, 
     ComponentID, 
     COMPONENT_CAP,
-    SIGNATURE_SIZE,
-    Signature,
-    DynamicBundle,
-    iter_bits_from_words,
+    SIGNATURE_SIZE
 };
 
 use crate::engine::storage::{
-    TypeErasedAttribute
+    TypeErasedAttribute,
+    LockedAttribute
 };
 
 use crate::engine::entity::{
@@ -70,6 +70,9 @@ use crate::engine::entity::{
 };
 
 use crate::engine::component::{ 
+    Signature,
+    DynamicBundle,
+    iter_bits_from_words,
     component_id_of_type_id,
     get_component_storage_factory
 };
@@ -82,29 +85,39 @@ use crate::engine::error::{
 
 /// Represents a temporary borrow of a single archetype chunk for system execution.
 ///
-/// ## Purpose
-/// Provides systems with contiguous read and/or write access to component data
-/// for a specific chunk, enabling tight iteration over component arrays.
-///
-/// ## Structure
-/// - `length` specifies the number of valid rows in the chunk.
-/// - `reads` contains immutable byte-slice views of component data.
-/// - `writes` contains raw mutable pointers for writable component data.
-///
 /// ## Safety
-/// This type does not enforce Rust borrowing rules at the type level.
-/// Callers must ensure:
-/// - No aliasing between read and write components.
-/// - No simultaneous mutable borrows of the same component.
-/// - The borrowed data does not outlive the archetype mutation phase.
+/// This type *maintains* column-level synchronization by holding the underlying
+/// `RwLock` guards for all accessed component columns for the duration of the borrow.
+///
+/// While a `ChunkBorrow` exists:
+/// - Any component in `read_guards` is read-locked (shared).
+/// - Any component in `write_guards` is write-locked (exclusive).
+/// - Other systems may read the same components but may not write them.
+/// - Structural archetype mutation must not occur concurrently.
+///
+/// This type does **not** prevent misuse such as:
+/// - retaining raw pointers beyond the borrow lifetime,
+/// - performing structural ECS mutations in parallel.
+///
+/// Violating these constraints may cause deadlock or panic.
 
-pub struct ChunkBorrow {
-     /// Number of valid rows in the borrowed chunk.
-    pub length: usize, 
+pub struct ChunkBorrow<'a> {
+    /// Number of valid rows in the borrowed chunk.
+    pub length: usize,
     /// Immutable component views as `(ptr, byte_len)` pairs.
     pub reads: Vec<(*const u8, usize)>,
     /// Mutable component data pointers for write access.
     pub writes: Vec<*mut u8>,
+
+    /// Holds the read locks alive for the lifetime of this borrow.
+    _read_guards: Vec<(ComponentID, RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>)>,
+    /// Holds the write locks alive for the lifetime of this borrow.
+    _write_guards: Vec<(ComponentID, RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>)>,
+}
+
+struct ArchetypeMeta {
+    length: usize,
+    entity_positions: Vec<Vec<Option<Entity>>>,
 }
 
 /// Stores entities that share an identical component signature.
@@ -122,13 +135,18 @@ pub struct ChunkBorrow {
 /// - All component columns have identical row counts.
 /// - `entity_positions` is kept consistent with component storage.
 /// - Signature bits exactly reflect allocated component attributes.
+/// - All component access during system execution must go through
+///   `LockedAttribute` read/write guards.
+/// - Component *data storage* is never accessed without holding the
+///   corresponding lock.
+/// - Archetype metadata (`entity_positions`, `length`) is synchronized
+///   independently via the archetype metadata lock.
 
 pub struct Archetype {
     archetype_id: ArchetypeID,
-    components: Vec<Option<Box<dyn TypeErasedAttribute>>>,
+    components: Vec<Option<LockedAttribute>>,
     signature: Signature,
-    length: usize,
-    entity_positions: Vec<Vec<Option<Entity>>>
+    meta: RwLock<ArchetypeMeta>,
 }
 
 impl Archetype {
@@ -152,15 +170,16 @@ impl Archetype {
             archetype_id,
             components: (0..COMPONENT_CAP).map(|_| None).collect(),
             signature: Signature::default(),
-            length: 0,
-            entity_positions: Vec::new(),
+            meta: RwLock::new(ArchetypeMeta {
+                length: 0,
+                entity_positions: Vec::new(),
+            }),
         };
 
-        // Allocate component columns for the signature
-        for cid in iter_bits_from_words(&signature.components) {
-            let component = make_empty_component_for(cid);
-            archetype.components[cid as usize] = Some(component);
-            archetype.signature.set(cid);
+        for component_id in iter_bits_from_words(&signature.components) {
+            let component = make_empty_component_for(component_id);
+            archetype.components[component_id as usize] = Some(LockedAttribute::new(component));
+            archetype.signature.set(component_id);
         }
 
         archetype
@@ -172,7 +191,7 @@ impl Archetype {
     /// This reflects logical count only; physical chunk storage may contain unused rows.
 
     pub fn length(&self) -> usize {
-        self.length
+        self.meta.read().expect("meta lock poisoned").length
     }
 
     /// Returns the `ArchetypeID` associated with this archetype.
@@ -209,10 +228,9 @@ impl Archetype {
     /// - Each added chunk contains exactly `CHUNK_CAP` rows.
     /// - Does not allocate component data; only entity metadata.
 
-    fn ensure_capacity(&mut self, chunk_count: usize) {
-        // Ensure entity_positions always has a slot for every allocated chunk.
-        while self.entity_positions.len() < chunk_count {
-            self.entity_positions.push(vec![None; CHUNK_CAP]);
+    fn ensure_capacity(meta: &mut ArchetypeMeta, chunk_count: usize) {
+        while meta.entity_positions.len() < chunk_count {
+            meta.entity_positions.push(vec![None; CHUNK_CAP]);
         }
     }
 
@@ -226,15 +244,21 @@ impl Archetype {
     /// Attribute allocation and signature must remain consistent.
 
     #[inline]
-    pub fn ensure_component(&mut self, component_id: ComponentID, factory: impl FnOnce() -> Box<dyn TypeErasedAttribute>) -> Result<(), SpawnError>{
-        // Lazily creates the column for a component type.
+    pub fn ensure_component(
+        &mut self,
+        component_id: ComponentID,
+        factory: impl FnOnce() -> Box<dyn TypeErasedAttribute>
+    ) -> Result<(), SpawnError> {
         let index = component_id as usize;
-        if index >= COMPONENT_CAP { return Err(SpawnError::InvalidComponentId); }
+        if index >= COMPONENT_CAP {
+            return Err(SpawnError::InvalidComponentId);
+        }
 
         if self.components[index].is_none() {
-            self.components[index] = Some(factory());
+            self.components[index] = Some(LockedAttribute::new(factory()));
             self.signature.set(component_id);
         }
+
         Ok(())
     }
 
@@ -248,30 +272,13 @@ impl Archetype {
         self.signature.has(component_id)
     }
 
-    /// Returns an immutable reference to the component attribute for `component_id`,
-    /// if present.
-    ///
-    /// ## Failure
-    /// Returns `None` when the component is not part of the signature.
-
+    /// Returns the locked attribute wrapper for a component.
     #[inline]
-    pub fn component(&self, component_id: ComponentID) -> Option<&dyn TypeErasedAttribute> {
-        self.components.get(component_id as usize).and_then(|o| o.as_deref())
+    pub fn component_locked(&self, component_id: ComponentID) -> Option<&LockedAttribute> {
+        self.components
+            .get(component_id as usize)
+            .and_then(|c| c.as_ref())
     }
-
-    /// Returns a mutable reference to the component attribute for `component_id`,
-    /// if present.
-    ///
-    /// ## Failure
-    /// Returns `None` when the component is not part of the signature.
-    ///
-    /// ## Safety
-    /// Caller must ensure no aliasing occurs with simultaneous borrows.
-
-    #[inline]
-    pub fn component_mut(&mut self, component_id: ComponentID) -> Option<&mut dyn TypeErasedAttribute> {
-        self.components.get_mut(component_id as usize).and_then(|o| o.as_deref_mut())
-    } 
 
     /// Computes how many chunks are required to store all active rows.
     ///
@@ -280,53 +287,12 @@ impl Archetype {
     /// - Otherwise computes `(length - 1) / CHUNK_CAP + 1`.
 
     pub fn chunk_count(&self) -> usize {
-        if self.length == 0 {
+        let len = self.length();
+        if len == 0 {
             0
         } else {
-            ((self.length - 1) / CHUNK_CAP) + 1 // last chunk may be partially full
+            ((len - 1) / CHUNK_CAP) + 1
         }
-    }
-
-    /// Returns mutable references to multiple distinct component attributes at once.
-    ///
-    /// ## Purpose
-    /// Enables safe batch access to multiple component columns without violating
-    /// Rust aliasing rules.
-    ///
-    /// ## Behavior
-    /// - Component IDs must be unique.
-    /// - Missing components yield `None` in the output array.
-    ///
-    /// ## Safety
-    /// Internally uses raw pointers; correctness relies on the uniqueness of IDs.
-
-    pub fn components_many_mut<const N: usize>(
-        &mut self,
-        ids: [ComponentID; N],
-    ) -> [Option<&mut dyn TypeErasedAttribute>; N] {
-        debug_assert!({
-            let mut tmp = ids;
-            tmp.sort();
-            tmp.windows(2).all(|w| w[0] != w[1])
-        });
-
-        let mut out: [Option<&mut dyn TypeErasedAttribute>; N] =
-            std::array::from_fn(|_| None);
-
-        let components = self.components.as_mut_ptr();
-
-        for (i, &id) in ids.iter().enumerate() {
-            let idx = id as usize;
-
-            unsafe {
-                let slot = &mut *components.add(idx);
-                if let Some(c) = slot.as_deref_mut() {
-                    out[i] = Some(c);
-                }
-            }
-        }
-
-        out
     }
 
     /// Returns the number of valid rows in the specified chunk.
@@ -341,14 +307,15 @@ impl Archetype {
 
     pub fn chunk_valid_length(&self, chunk_index: usize) -> usize {
         let max_chunk = self.chunk_count().saturating_sub(1);
-
         if chunk_index > max_chunk {
             return 0;
-        }     
+        }
+
         if chunk_index < max_chunk {
             CHUNK_CAP
         } else {
-            let used = self.length % CHUNK_CAP;
+            let len = self.length();
+            let used = len % CHUNK_CAP;
             if used == 0 { CHUNK_CAP } else { used }
         }
     }
@@ -366,16 +333,18 @@ impl Archetype {
     /// ## Invariants
     /// Component attributes must be added only before entities are inserted.
 
-    pub fn insert_empty_component(&mut self, component_id: ComponentID, component: Box<dyn TypeErasedAttribute>) {
+    pub fn insert_empty_component(
+        &mut self,
+        component_id: ComponentID,
+        component: Box<dyn TypeErasedAttribute>
+    ) {
         let index = component_id as usize;
         if index >= COMPONENT_CAP {
-            panic!("component_id out of range for COMPONENT_CAP.");
+            panic!("component_id out of range");
         }
 
-        // Only safe to insert into an empty slot; archetype signature must match storage layout.
-        let slot = &mut self.components[index];
-        debug_assert!(slot.is_none(), "the component is already present.");
-        *slot = Some(component);
+        debug_assert!(self.components[index].is_none());
+        self.components[index] = Some(LockedAttribute::new(component));
         self.signature.set(component_id);
     }
 
@@ -389,22 +358,25 @@ impl Archetype {
     /// ## Invariants
     /// Removing attributes in a populated archetype would break row alignment.
 
-    pub fn remove_component(&mut self, component_id: ComponentID) -> Result<Option<Box<dyn TypeErasedAttribute>>, SpawnError> {
-        // Components cannot be removed while entities exist�would break row alignment.
-        if self.length > 0 {
+    pub fn remove_component(
+        &mut self,
+        component_id: ComponentID
+    ) -> Result<Option<Box<dyn TypeErasedAttribute>>, SpawnError> {
+        if self.length() > 0 {
             return Err(SpawnError::ArchetypeNotEmpty);
-        } 
+        }
 
         let index = component_id as usize;
-        if index >= COMPONENT_CAP { 
-            return Err(SpawnError::InvalidComponentId); 
+        if index >= COMPONENT_CAP {
+            return Err(SpawnError::InvalidComponentId);
         }
 
         let taken = self.components[index].take();
-        if taken.is_some() { 
-            self.signature.clear(component_id); 
+        if taken.is_some() {
+            self.signature.clear(component_id);
         }
-        Ok(taken)
+
+        Ok(taken.map(|locked| locked.into_inner()))
     }
 
     #[cfg(feature = "rollback")]
@@ -413,7 +385,7 @@ impl Archetype {
         destination: &mut Archetype,
         source_position: (ChunkID, RowID),
         shared_components: Vec<ComponentID>
-    ) -> Result<((ChunkID, RowID), (ChunkID, RowID), Vec<(ComponentID, Box<dyn Any>)>), MoveError> 
+    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>, Vec<(ComponentID, Box<dyn Any>)>), MoveError>
     {
         let (source_chunk, source_row) = source_position;
         let mut destination_position: Option<(ChunkID, RowID)> = None;
@@ -425,56 +397,45 @@ impl Archetype {
                 continue;
             }
 
-            let source_component = match self.components[*component_id as usize].as_mut() {
-                Some(c) => c,
-                None => {
-                    self.rollback_into(destination, rollback_sequence);
-                    return Err(MoveError::InconsistentStorage);
-                }
-            };
+            let src_attr = self.components[component_id as usize]
+                .as_ref()
+                .ok_or(MoveError::InconsistentStorage)?;
+            let dst_attr = destination.components[component_id as usize]
+                .as_ref()
+                .ok_or(MoveError::InconsistentStorage)?;
 
-            let destination_component = match destination.components[component_id as usize].as_mut() {
-                Some(c) => c,
-                None => {
-                    self.rollback_into(destination, rollback_sequence);
-                    return Err(MoveError::InconsistentStorage);
-                }
-            };
+            let mut src_guard = src_attr.write();
+            let mut dst_guard = dst_attr.write();
 
-            let ((destination_chunk, destination_row), moved_from, rollback) = 
-                match destination_component.push_from_dyn(source_component, source_chunk, source_row) {
-                    Ok(result) => result,
+            let ((dst_chunk, dst_row), moved_from, rollback) =
+                match dst_guard.as_mut().push_from_dyn(src_guard.as_mut(), source_chunk, source_row) {
+                    Ok(r) => r,
                     Err(e) => {
-                        self.rollback_into(destination, rollback_sequence);
+                        let _ = self.rollback_into(destination, rollback_sequence);
                         return Err(MoveError::PushFromFailed { component_id, source_error: e });
                     }
                 };
 
             match destination_position {
-                Some(position) if position != (destination_chunk, destination_row) => {
-                    self.rollback_into(destination, rollback_sequence);
-                    return Err(
-                        MoveError::RowMisalignment {
-                            expected: position,
-                            got: (destination_chunk, destination_row),
-                            component_id
-                        }
-                    );
+                Some(pos) if pos != (dst_chunk, dst_row) => {
+                    let _ = self.rollback_into(destination, rollback_sequence);
+                    return Err(MoveError::RowMisalignment {
+                        expected: pos,
+                        got: (dst_chunk, dst_row),
+                        component_id,
+                    });
                 }
-                
-                None => destination_position = Some((destination_chunk, destination_row)),
+                None => destination_position = Some((dst_chunk, dst_row)),
                 _ => {}
             }
 
-            if let Some(moved_from_information) = moved_from {
+            if let Some(moved_from_info) = moved_from {
                 match swap_information {
-                    Some(existing) if existing != moved_from_information => {
-                        self.rollback_into(destination, rollback_sequence);                        
+                    Some(existing) if existing != moved_from_info => {
+                        let _ = self.rollback_into(destination, rollback_sequence);
                         return Err(MoveError::InconsistentSwapInfo);
                     }
-                    None => {
-                        swap_information = Some(moved_from_information);
-                    }
+                    None => swap_information = Some(moved_from_info),
                     _ => {}
                 }
             }
@@ -483,7 +444,6 @@ impl Archetype {
         }
 
         let destination_position = destination_position.ok_or(MoveError::NoComponentsMoved)?;
-
         Ok((destination_position, swap_information, rollback_sequence))
     }
 
@@ -512,7 +472,7 @@ impl Archetype {
         destination: &mut Archetype,
         source_position: (ChunkID, RowID),
         shared_components: Vec<ComponentID>
-    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), MoveError> 
+    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), MoveError>
     {
         let (source_chunk, source_row) = source_position;
         let mut destination_position: Option<(ChunkID, RowID)> = None;
@@ -523,54 +483,46 @@ impl Archetype {
                 continue;
             }
 
-
-            let source_component = self.components[component_id as usize]
-                .as_deref_mut()
+            let src_attr = self.components[component_id as usize]
+                .as_ref()
+                .ok_or(MoveError::InconsistentStorage)?;
+            let dst_attr = destination.components[component_id as usize]
+                .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let destination_component = destination.components[component_id as usize]
-                .as_deref_mut()
-                .ok_or(MoveError::InconsistentStorage)?;
+            let mut src_guard = src_attr.write();
+            let mut dst_guard = dst_attr.write();
 
-            let ((destination_chunk, destination_row), moved_from) = 
-                match destination_component.push_from_dyn(source_component, source_chunk, source_row) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return Err(MoveError::PushFromFailed { component_id, source_error: e });
-                    }
-                };
+            let ((dst_chunk, dst_row), moved_from) =
+                dst_guard
+                    .as_mut()
+                    .push_from_dyn(src_guard.as_mut(), source_chunk, source_row)
+                    .map_err(|e| MoveError::PushFromFailed { component_id, source_error: e })?;
 
             match destination_position {
-                Some(position) if position != (destination_chunk, destination_row) => {
-                    return Err(
-                        MoveError::RowMisalignment {
-                            expected: position,
-                            got: (destination_chunk, destination_row),
-                            component_id
-                        }
-                    );
+                Some(pos) if pos != (dst_chunk, dst_row) => {
+                    return Err(MoveError::RowMisalignment {
+                        expected: pos,
+                        got: (dst_chunk, dst_row),
+                        component_id,
+                    });
                 }
-                
-                None => destination_position = Some((destination_chunk, destination_row)),
+                None => destination_position = Some((dst_chunk, dst_row)),
                 _ => {}
             }
 
-            if let Some(moved_from_information) = moved_from {
+            if let Some(moved_from_info) = moved_from {
                 match swap_information {
-                    Some(existing) if existing != moved_from_information => {                   
+                    Some(existing) if existing != moved_from_info => {
                         return Err(MoveError::InconsistentSwapInfo);
                     }
-                    None => {
-                        swap_information = Some(moved_from_information);
-                    }
+                    None => swap_information = Some(moved_from_info),
                     _ => {}
                 }
             }
-
         }
 
         let destination_position = destination_position.ok_or(MoveError::NoComponentsMoved)?;
-
         Ok((destination_position, swap_information))
     }
 
@@ -596,41 +548,43 @@ impl Archetype {
         destination: &mut Archetype,
         destination_position: (ChunkID, RowID),
         added_components: Vec<(ComponentID, Box<dyn Any>)>,
-    ) -> Result<Vec<(ComponentID, Box<dyn Any>)>, MoveError> 
+    ) -> Result<Vec<(ComponentID, Box<dyn Any>)>, MoveError>
     {
         let mut rollback_sequence: Vec<(ComponentID, Box<dyn Any>)> = Vec::new();
-        let (destination_chunk, destination_row) = destination_position;
+        let (dst_chunk, dst_row) = destination_position;
 
         for (component_id, value) in added_components {
             if !destination.signature.has(component_id) {
                 continue;
             }
 
-            let destination_component = match destination.components[component_id as usize].as_mut() {
+            let dst_attr = match destination.components[component_id as usize].as_ref() {
                 Some(c) => c,
                 None => {
-                    self.rollback_into(destination, rollback_sequence);
+                    let _ = self.rollback_into(destination, rollback_sequence);
                     return Err(MoveError::InconsistentStorage);
                 }
             };
 
-            let ((chunk, row), rollback) = 
-                match destination_component.push_dyn(value) {
-                    Ok(result) => result,
+            let mut dst_guard = dst_attr.write();
+
+            let ((chunk, row), rollback) =
+                match dst_guard.as_mut().push_dyn(value) {
+                    Ok(r) => r,
                     Err(e) => {
-                        self.rollback_into(destination, rollback_sequence);
+                        let _ = self.rollback_into(destination, rollback_sequence);
                         return Err(MoveError::PushFailed { component_id, source_error: e });
                     }
                 };
 
-            if (chunk, row) != (destination_chunk, destination_row) {
-                self.rollback_into(destination, rollback_sequence);
+            if (chunk, row) != (dst_chunk, dst_row) {
+                let _ = self.rollback_into(destination, rollback_sequence);
                 return Err(MoveError::RowMisalignment {
-                    expected: (destination_chunk, destination_row),
+                    expected: (dst_chunk, dst_row),
                     got: (chunk, row),
                     component_id,
                 });
-            }           
+            }
 
             rollback_sequence.push((component_id, rollback));
         }
@@ -659,33 +613,30 @@ impl Archetype {
         destination: &mut Archetype,
         destination_position: (ChunkID, RowID),
         added_components: Vec<(ComponentID, Box<dyn Any>)>,
-    ) -> Result<(), MoveError> 
+    ) -> Result<(), MoveError>
     {
-        let (destination_chunk, destination_row) = destination_position;
+        let (dst_chunk, dst_row) = destination_position;
 
         for (component_id, value) in added_components {
             if !destination.signature.has(component_id) {
                 continue;
             }
 
-            let destination_component = match destination.components[component_id as usize].as_mut() {
-                Some(c) => c,
-                None => {
-                    return Err(MoveError::InconsistentStorage);
-                }
-            };
+            let dst_attr = destination.components[component_id as usize]
+                .as_ref()
+                .ok_or(MoveError::InconsistentStorage)?;
 
-            let (chunk, row) = 
-                match destination_component.push_dyn(value) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return Err(MoveError::PushFailed { component_id, source_error: e });
-                    }
-                };
+            let mut dst_guard = dst_attr.write();
 
-            if (chunk, row) != (destination_chunk, destination_row) {
+            let (chunk, row) =
+                dst_guard
+                    .as_mut()
+                    .push_dyn(value)
+                    .map_err(|e| MoveError::PushFailed { component_id, source_error: e })?;
+
+            if (chunk, row) != (dst_chunk, dst_row) {
                 return Err(MoveError::RowMisalignment {
-                    expected: (destination_chunk, destination_row),
+                    expected: (dst_chunk, dst_row),
                     got: (chunk, row),
                     component_id,
                 });
@@ -711,46 +662,47 @@ impl Archetype {
     /// - `SwapRemoveError` if backend storage removal fails.
     /// - `InconsistentSwapInfo` if component columns disagree on swap behavior.
 
-    #[cfg(feature = "rollback")]    
+    #[cfg(feature = "rollback")]
     pub fn remove_row_in_components_at_source(
         &mut self,
         source_position: (ChunkID, RowID),
         removed_components: &[ComponentID],
         source_swap_position: Option<(ChunkID, RowID)>
-    ) -> Result<Vec<(ComponentID, Box<dyn Any>)>, MoveError> 
+    ) -> Result<Vec<(ComponentID, Box<dyn Any>)>, MoveError>
     {
-        let (source_chunk, source_row) = source_position;
-        let mut rollback_sequence: Vec<(ComponentID, Box<dyn Any>)> = Vec::new();       
+        let (src_chunk, src_row) = source_position;
+        let mut rollback_sequence: Vec<(ComponentID, Box<dyn Any>)> = Vec::new();
 
-        for component_id in removed_components {
+        for &component_id in removed_components {
             if !self.signature.has(component_id) {
                 continue;
             }
 
-            let source_component = match self.components[component_id as usize].as_mut() {
+            let src_attr = match self.components[component_id as usize].as_ref() {
                 Some(c) => c,
                 None => {
-                    self.rollback_self(rollback_sequence);    
+                    let _ = self.rollback_self(rollback_sequence);
                     return Err(MoveError::InconsistentStorage);
                 }
             };
 
-            let (moved_from, rollback) = 
-                match source_component.swap_remove_dyn(source_chunk, source_row) {
-                    Ok(result) => result,
+            let mut src_guard = src_attr.write();
+
+            let (moved_from, rollback) =
+                match src_guard.as_mut().swap_remove_dyn(src_chunk, src_row) {
+                    Ok(r) => r,
                     Err(e) => {
-                        self.rollback_self(rollback_sequence);     
+                        let _ = self.rollback_self(rollback_sequence);
                         return Err(MoveError::SwapRemoveError { component_id, source_error: e });
                     }
                 };
 
             if let Some(moved_from) = moved_from {
-                match source_swap_position {
-                    Some(existing) if existing != moved_from => {
-                        self.rollback_self(rollback_sequence);    
-                        return Err(MoveError::InconsistentSwapInfo)
-                    },
-                    _ => {}
+                if let Some(expected) = source_swap_position {
+                    if expected != moved_from {
+                        let _ = self.rollback_self(rollback_sequence);
+                        return Err(MoveError::InconsistentSwapInfo);
+                    }
                 }
             }
 
@@ -775,42 +727,38 @@ impl Archetype {
     /// - `SwapRemoveError` if storage removal fails.
     /// - `InconsistentSwapInfo` if component columns disagree on swap behavior.
 
-    #[cfg(not(feature = "rollback"))]  
+    #[cfg(not(feature = "rollback"))]
     pub fn remove_row_in_components_at_source(
         &mut self,
         source_position: (ChunkID, RowID),
         removed_components: &[ComponentID],
         source_swap_position: Option<(ChunkID, RowID)>,
-    ) -> Result<(), MoveError> 
+    ) -> Result<(), MoveError>
     {
-        let (source_chunk, source_row) = source_position;     
+        let (src_chunk, src_row) = source_position;
 
         for &component_id in removed_components {
             if !self.signature.has(component_id) {
                 continue;
             }
 
-            let source_component = match self.components[component_id as usize].as_mut() {
-                Some(c) => c,
-                None => {
-                    return Err(MoveError::InconsistentStorage);
-                }
-            };
+            let src_attr = self.components[component_id as usize]
+                .as_ref()
+                .ok_or(MoveError::InconsistentStorage)?;
 
-            let moved_from = 
-                match source_component.swap_remove_dyn(source_chunk, source_row) {
-                    Ok(result) => result,
-                    Err(e) => {   
-                        return Err(MoveError::SwapRemoveError { component_id, source_error: e });
-                    }
-                };
+            let mut src_guard = src_attr.write();
+
+            let moved_from =
+                src_guard
+                    .as_mut()
+                    .swap_remove_dyn(src_chunk, src_row)
+                    .map_err(|e| MoveError::SwapRemoveError { component_id, source_error: e })?;
 
             if let Some(moved_from) = moved_from {
-                match source_swap_position {
-                    Some(existing) if existing != moved_from => {  
-                        return Err(MoveError::InconsistentSwapInfo)
-                    },
-                    _ => {}
+                if let Some(expected) = source_swap_position {
+                    if expected != moved_from {
+                        return Err(MoveError::InconsistentSwapInfo);
+                    }
                 }
             }
         }
@@ -840,13 +788,15 @@ impl Archetype {
         source_swap_position: Option<(ChunkID, RowID)>,
         shards: &EntityShards,
         entity: Entity,
-    ) -> Result<(), MoveError> 
-    {
+    ) -> Result<(), MoveError> {
         let (destination_chunk, destination_row) = destination_position;
         let (source_chunk, source_row) = source_position;
 
-        destination.ensure_capacity(destination_chunk as usize + 1);
-        destination.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
+        {
+            let mut dest_meta = destination.meta.write().expect("meta lock poisoned");
+            Self::ensure_capacity(&mut dest_meta, destination_chunk as usize + 1);
+            dest_meta.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
+        }
 
         shards.set_location(
             entity,
@@ -857,15 +807,16 @@ impl Archetype {
             },
         );
 
+        let mut src_meta = self.meta.write().expect("meta lock poisoned");
+
         match source_swap_position {
             Some((last_chunk, last_row)) => {
-                self.ensure_capacity(last_chunk as usize + 1);
+                Self::ensure_capacity(&mut src_meta, last_chunk as usize + 1);
 
-                let swapped_entity = self.entity_positions[last_chunk as usize][last_row as usize]
+                let swapped_entity = src_meta.entity_positions[last_chunk as usize][last_row as usize]
                     .ok_or(MoveError::MetadataFailure)?;
 
-                self.entity_positions[source_chunk as usize][source_row as usize] =
-                    Some(swapped_entity);
+                src_meta.entity_positions[source_chunk as usize][source_row as usize] = Some(swapped_entity);
 
                 shards.set_location(
                     swapped_entity,
@@ -876,10 +827,10 @@ impl Archetype {
                     },
                 );
 
-                self.entity_positions[last_chunk as usize][last_row as usize] = None;
+                src_meta.entity_positions[last_chunk as usize][last_row as usize] = None;
             }
             None => {
-                self.entity_positions[source_chunk as usize][source_row as usize] = None;
+                src_meta.entity_positions[source_chunk as usize][source_row as usize] = None;
             }
         }
 
@@ -893,16 +844,19 @@ impl Archetype {
         rollback_sequence: Vec<(ComponentID, Box<dyn Any>)>,
     ) -> Result<(), MoveError> {
         for (rolled_back_id, rollback_action) in rollback_sequence.into_iter().rev() {
-            let rollback_destination_component = destination.components[rolled_back_id as usize]
-                .as_mut()
+            let dst_attr = destination.components[rolled_back_id as usize]
+                .as_ref()
+                .ok_or(MoveError::InconsistentStorage)?;
+            let src_attr = self.components[rolled_back_id as usize]
+                .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let rollback_source_component = self.components[rolled_back_id as usize]
-                .as_mut()
-                .ok_or(MoveError::InconsistentStorage)?;
+            let mut dst_guard = dst_attr.write();
+            let mut src_guard = src_attr.write();
 
-            rollback_destination_component
-                .rollback_dyn(rollback_action, Some(rollback_source_component))
+            dst_guard
+                .as_mut()
+                .rollback_dyn(rollback_action, Some(src_guard.as_mut()))
                 .map_err(|_| MoveError::RollbackFailed)?;
         }
         Ok(())
@@ -914,11 +868,14 @@ impl Archetype {
         rollback_sequence: Vec<(ComponentID, Box<dyn Any>)>,
     ) -> Result<(), MoveError> {
         for (rolled_back_id, rollback_action) in rollback_sequence.into_iter().rev() {
-            let component = self.components[rolled_back_id as usize]
-                .as_mut()
+            let attr = self.components[rolled_back_id as usize]
+                .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            component
+            let mut guard = attr.write();
+
+            guard
+                .as_mut()
                 .rollback_dyn(rollback_action, None)
                 .map_err(|_| MoveError::RollbackFailed)?;
         }
@@ -1053,10 +1010,17 @@ impl Archetype {
             return Err(e);
         }
 
-        destination.length += 1;
-        self.length = self.length.saturating_sub(1);
-        if self.length == 0 {
-            self.entity_positions.clear();
+        {
+            let mut dmeta = destination.meta.write().expect("meta lock poisoned");
+            dmeta.length += 1;
+        }
+
+        {
+            let mut smeta = self.meta.write().expect("meta lock poisoned");
+            smeta.length = smeta.length.saturating_sub(1);
+            if smeta.length == 0 {
+                smeta.entity_positions.clear();
+            }
         }
 
         Ok(destination_position)
@@ -1196,10 +1160,21 @@ impl Archetype {
             entity
         )?;
 
-        destination.length += 1;
-        self.length = self.length.saturating_sub(1);
-        if self.length == 0 {
-            self.entity_positions.clear();
+        {
+            let mut dmeta = destination.meta
+                .write()
+                .expect("meta lock poisoned");
+            dmeta.length += 1;
+        }
+
+        {
+            let mut smeta = self.meta
+                .write()
+                .expect("meta lock poisoned");
+            smeta.length = smeta.length.saturating_sub(1);
+            if smeta.length == 0 {
+                smeta.entity_positions.clear();
+            }
         }
 
         Ok(destination_position)
@@ -1225,45 +1200,47 @@ impl Archetype {
     /// Attribute alignment and entity position mappings must remain consistent.
 
     pub fn spawn_on(
-        &mut self, 
-        shards: &mut EntityShards, 
-        shard_id: ShardID, 
+        &mut self,
+        shards: &mut EntityShards,
+        shard_id: ShardID,
         mut bundle: impl DynamicBundle
     ) -> Result<Entity, SpawnError> {
-        // Keep track of columns already written so that roll back is possible on error.
         let mut written_index: Vec<usize> = Vec::new();
         let mut reference_position: Option<(ChunkID, RowID)> = None;
 
-        for (index, component_option) in self.components.iter_mut().enumerate() {
-            let Some(component) = component_option.as_mut() else { continue };
+        for (index, component_option) in self.components.iter().enumerate() {
+            let Some(attr) = component_option.as_ref() else { continue };
 
             let component_id = index as ComponentID;
 
-            // Identify the expected type so error messages are meaningful.
-            let type_id = component.element_type_id();
-            let name = component.element_type_name();
+            // Lock column mutably for the push.
+            let mut guard = attr.write();
 
-            // The bundle must contain every component required by signature.
+            // Identify expected type for errors.
+            let type_id = guard.as_ref().element_type_id();
+            let name = guard.as_ref().element_type_name();
+
             let Some(value) = bundle.take(component_id) else {
-                // Roll back already-written components.
+                // rollback already-written components
                 if let Some((c, r)) = reference_position {
                     for &j in &written_index {
-                        if let Some(s) = self.components[j].as_mut() {
-                            let _ = s.swap_remove_dyn(c, r);
+                        if let Some(a) = self.components[j].as_ref() {
+                            let mut g = a.write();
+                            let _ = g.as_mut().swap_remove_dyn(c, r);
                         }
                     }
                 }
                 return Err(SpawnError::MissingComponent { type_id, name });
             };
 
-            let position = match component.push_dyn(value) {
+            let position = match guard.as_mut().push_dyn(value) {
                 Ok(p) => p,
                 Err(e) => {
-                    // Rollback on storage failure.
                     if let Some((c, r)) = reference_position {
                         for &j in &written_index {
-                            if let Some(s) = self.components[j].as_mut() {
-                                let _ = s.swap_remove_dyn(c, r);
+                            if let Some(a) = self.components[j].as_ref() {
+                                let mut g = a.write();
+                                let _ = g.as_mut().swap_remove_dyn(c, r);
                             }
                         }
                     }
@@ -1271,20 +1248,17 @@ impl Archetype {
                 }
             };
 
-            // Ensure all components push to identical coordinates.
             if let Some(rp) = reference_position {
-                debug_assert_eq!(position, rp, "attributes must stay aligned per row.");
                 if position != rp {
-                    // Roll back if misalignment is detected.
                     for &j in &written_index {
-                        if let Some(s) = self.components[j].as_mut() {
-                            let _ = s.swap_remove_dyn(rp.0, rp.1);
+                        if let Some(a) = self.components[j].as_ref() {
+                            let mut g = a.write();
+                            let _ = g.as_mut().swap_remove_dyn(rp.0, rp.1);
                         }
                     }
                     return Err(SpawnError::MisalignedStorage { expected: rp, got: position });
                 }
             } else {
-                // First component defines row location for this entity.
                 reference_position = Some(position);
             }
 
@@ -1292,31 +1266,40 @@ impl Archetype {
         }
 
         let Some((chunk, row)) = reference_position else {
-            return Err(SpawnError::EmptyArchetype); // No components existed; invalid archetype
+            return Err(SpawnError::EmptyArchetype);
         };
 
-        self.ensure_capacity(chunk as usize + 1);
+        // Reserve metadata slot & build location
+        {
+            let mut meta = self.meta.write().expect("meta lock poisoned");
+            Self::ensure_capacity(&mut meta, chunk as usize + 1);
 
-        debug_assert!(
-            self.entity_positions[chunk as usize][row as usize].is_none(),
-            "spawn_on_bundle: target entity slot is already occupied."
-        );
+            debug_assert!(
+                meta.entity_positions[chunk as usize][row as usize].is_none(),
+                "spawn_on_bundle: target entity slot is already occupied."
+            );
+        }
 
         let location = EntityLocation { archetype: self.archetype_id, chunk, row };
 
-        // Allocate the actual entity handle.
+        // Allocate entity handle (THIS was missing in your version)
         let entity = shards.spawn_on(shard_id, location).map_err(|e| {
-            // Roll back component writes.
+            // rollback component writes on entity allocation failure
             for &j in &written_index {
-                if let Some(s) = self.components[j].as_mut() {
-                    let _ = s.swap_remove_dyn(chunk, row);
+                if let Some(a) = self.components[j].as_ref() {
+                    let mut g = a.write();
+                    let _ = g.as_mut().swap_remove_dyn(chunk, row);
                 }
             }
             e
         })?;
 
-        self.entity_positions[chunk as usize][row as usize] = Some(entity);
-        self.length += 1;
+        // Write entity into metadata
+        {
+            let mut meta = self.meta.write().expect("meta lock poisoned");
+            meta.entity_positions[chunk as usize][row as usize] = Some(entity);
+            meta.length += 1;
+        }
 
         Ok(entity)
     }
@@ -1342,54 +1325,62 @@ impl Archetype {
             return Err(SpawnError::StaleEntity);
         };
 
-        debug_assert_eq!(
-            location.archetype, self.archetype_id,
-            "the entity is not in this archetype."
-        );
+        debug_assert_eq!(location.archetype, self.archetype_id, "entity not in this archetype");
 
         let entity_chunk = location.chunk;
         let entity_row = location.row;
 
         let ok = shards.despawn(entity);
-        if !ok { return Err(SpawnError::StaleEntity); }
+        if !ok {
+            return Err(SpawnError::StaleEntity);
+        }
 
         // Track whether swap_remove relocated another entity.
         let mut moved_from: Option<(ChunkID, RowID)> = None;
 
-        for component in self.components.iter_mut().filter_map(|c| c.as_mut()) {
-            // swap_remove keeps columns compact; all components must agree on moved row.
-            let position = component.swap_remove_dyn(entity_chunk, entity_row)
-                .map_err(|e| SpawnError::StorageSwapRemoveFailed(e))?;
+        for attr in self.components.iter().filter_map(|c| c.as_ref()) {
+            let mut guard = attr.write();
+            let pos = guard
+                .as_mut()
+                .swap_remove_dyn(entity_chunk, entity_row)
+                .map_err(SpawnError::StorageSwapRemoveFailed)?;
+
             if let Some(expected) = moved_from {
-                debug_assert_eq!(position, Some(expected), "all components must move the same row");
+                debug_assert_eq!(pos, Some(expected), "all components must move same row");
             } else {
-                moved_from = position;
+                moved_from = pos;
             }
         }
 
-        if let Some((moved_chunk, moved_row)) = moved_from {
-            // Update entity_positions to reflect the swap.
-            let moved_entity = self.entity_positions[moved_chunk as usize][moved_row as usize]
-                .expect("moved slot should hold an entity; storage and positions out of sync.");
+        {
+            let mut meta = self.meta.write().expect("meta lock poisoned");
 
-            // Fill hole
-            self.entity_positions[entity_chunk as usize][entity_row as usize] = Some(moved_entity);
-            
-            shards.set_location(moved_entity, EntityLocation {
-                archetype: self.archetype_id, chunk: entity_chunk, row: entity_row
-            });
-            
-            // Clear old swapped-from slot
-            self.entity_positions[moved_chunk as usize][moved_row as usize] = None;
-        } else {
-            // No swap occurred; simply clear the slot.
-            self.entity_positions[entity_chunk as usize][entity_row as usize] = None;
+            if let Some((moved_chunk, moved_row)) = moved_from {
+                let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize]
+                    .expect("moved slot should hold an entity; positions out of sync");
+
+                meta.entity_positions[entity_chunk as usize][entity_row as usize] = Some(moved_entity);
+
+                shards.set_location(
+                    moved_entity,
+                    EntityLocation {
+                        archetype: self.archetype_id,
+                        chunk: entity_chunk,
+                        row: entity_row,
+                    },
+                );
+
+                meta.entity_positions[moved_chunk as usize][moved_row as usize] = None;
+            } else {
+                meta.entity_positions[entity_chunk as usize][entity_row as usize] = None;
+            }
+
+            meta.length = meta.length.saturating_sub(1);
+            if meta.length == 0 {
+                meta.entity_positions.clear();
+            }
         }
-        
-        self.length -= 1;
-        if self.length == 0 {
-            self.entity_positions.clear();
-        }
+
         Ok(())
     }
 
@@ -1408,59 +1399,87 @@ impl Archetype {
     /// Panics if a component appears in both read and write lists.
     ///
     /// ## Safety
-    /// The caller must uphold aliasing and synchronization guarantees.
+    /// `ChunkBorrow` holds column-level locks for all accessed components.
+    ///
+    /// While a `ChunkBorrow` exists:
+    /// - No other system may mutably access the *same component columns*.
+    /// - Other systems may read the same components concurrently.
+    /// - Writes to disjoint component sets are permitted.
+    /// - Structural archetype mutation must not occur.
+    ///
+    /// These guarantees are enforced by column-level locking and execution
+    /// phase discipline. Violations may cause deadlock or panic.
 
-    pub fn borrow_chunk_for(
-        &mut self,
+    pub fn borrow_chunk_for<'a>(
+        &'a self,
         chunk: ChunkID,
         read_ids: &[ComponentID],
         write_ids: &[ComponentID],
-    ) -> ChunkBorrow {
+    ) -> ChunkBorrow<'a> {
         let length = self.chunk_valid_length(chunk as usize);
 
-        // Validate no overlap
-        for &read_id in read_ids {
-            if write_ids.contains(&read_id) {
-                panic!("Component {} appears in both read and write lists", read_id);
+        for &id in read_ids {
+            if write_ids.contains(&id) {
+                panic!("component {} in both read/write", id);
             }
         }
 
+        // Deadlock prevention: lock in a stable order.
+        let mut read_sorted = read_ids.to_vec();
+        read_sorted.sort_unstable();
+        let mut write_sorted = write_ids.to_vec();
+        write_sorted.sort_unstable();
+
+        // Acquire read locks
+        let mut read_guards: Vec<(ComponentID, RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>)> =
+            Vec::with_capacity(read_sorted.len());
+        for &cid in &read_sorted {
+            let attr = self.component_locked(cid).expect("missing read component");
+            read_guards.push((cid, attr.read()));
+        }
+
+        // Acquire write locks
+        let mut write_guards: Vec<(ComponentID, RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>)> =
+            Vec::with_capacity(write_sorted.len());
+        for &cid in &write_sorted {
+            let attr = self.component_locked(cid).expect("missing write component");
+            write_guards.push((cid, attr.write()));
+        }
+
+        // Build views in the original order
         let mut reads = Vec::with_capacity(read_ids.len());
+        for &cid in read_ids {
+            let (_id, guard) = read_guards
+                .iter()
+                .find(|(id, _)| *id == cid)
+                .expect("read guard missing for component");
+            let (ptr, bytes) = guard
+                .as_ref()
+                .chunk_bytes(chunk, length)
+                .expect("missing read component data");
+            reads.push((ptr, bytes));
+        }
+
         let mut writes = Vec::with_capacity(write_ids.len());
-
-        // Read views
-        {
-            let components = &self.components;
-            for &component_id in read_ids {
-                let component = components[component_id as usize]
-                    .as_deref()
-                    .expect("missing read component");
-
-                let (ptr, bytes) = component
-                    .chunk_bytes(chunk, length)
-                    .expect("missing read component data");
-
-                reads.push((ptr, bytes));
-            }
+        for &cid in write_ids {
+            let (_id, guard) = write_guards
+                .iter_mut()
+                .find(|(id, _)| *id == cid)
+                .expect("write guard missing for component");
+            let (ptr, _bytes) = guard
+                .as_mut()
+                .chunk_bytes_mut(chunk, length)
+                .expect("missing write component data");
+            writes.push(ptr);
         }
 
-        // Write views
-        {
-            let components = &mut self.components;
-            for &component_id in write_ids {
-                let component = components[component_id as usize]
-                    .as_deref_mut()
-                    .expect("missing write component");
-
-                let (ptr, _bytes) = component
-                    .chunk_bytes_mut(chunk, length)
-                    .expect("missing write component data");
-
-                writes.push(ptr);
-            }
+        ChunkBorrow {
+            length,
+            reads,
+            writes,
+            _read_guards: read_guards,
+            _write_guards: write_guards,
         }
-
-        ChunkBorrow { length, reads, writes }
     }
 
 

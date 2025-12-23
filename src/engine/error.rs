@@ -1,58 +1,90 @@
-//! Error types for entity spawning and attribute storage.
+//! Error types for ECS storage, spawning, migration, and execution.
 //!
-//! This module declares focused, composable error types used across the
-//! entity–component storage and spawning pipeline. Each error carries enough
-//! context to make failures actionable while remaining small and cheap to pass
-//! around or convert into higher-level variants like [`SpawnError`].
+//! This module defines **focused, composable error types** used across the
+//! entity–component system, covering both **structural failures** (such as
+//! storage bounds or capacity limits) and **runtime execution violations**
+//! (such as borrow conflicts or invalid query access).
 //!
-//! ## Goals
-//! * **Specificity:** Each error type models a single failure mode (e.g. shard
-//!   bound violations, insufficient capacity, stale entity handles).
-//! * **Ergonomics:** All errors implement [`std::error::Error`] and
-//!   [`fmt::Display`], and provide `From<T>` conversions into aggregate errors.
-//! * **Actionability:** Structured fields (e.g. requested vs. available
-//!   capacity, offending indices, expected vs. actual types) make logs and
-//!   telemetry useful without reproducing the issue.
+//! The errors in this module are designed to be:
+//! * **Deterministic** — the same misuse always yields the same error,
+//! * **Actionable** — errors carry structured context for diagnostics,
+//! * **Composable** — low-level errors can be promoted into higher-level ones
+//!   without losing information.
 //!
-//! ## Typical flow
-//! Low-level storage and attribute operations return small, dedicated error
-//! types (e.g. [`AttributeError`]). Higher-level orchestration code uses `?` to
-//! bubble failures into [`SpawnError`], which callers can match on for control
-//! flow or log with user-readable messages.
+//! ## Error Categories
+//!
+//! The module is broadly divided into three conceptual layers:
+//!
+//! ### 1. Storage and Structural Errors
+//!
+//! These errors arise during entity creation, component storage, or archetype
+//! migration, and typically indicate violated structural assumptions.
+//!
+//! Examples include:
+//! * insufficient entity capacity ([`CapacityError`]),
+//! * invalid shard or row indices ([`ShardBoundsError`], [`PositionOutOfBoundsError`]),
+//! * component type mismatches ([`TypeMismatchError`]),
+//! * inconsistent archetype layouts ([`MoveError`]).
+//!
+//! These errors are usually surfaced during spawning or component mutation and
+//! are aggregated into higher-level errors such as [`SpawnError`].
+//!
+//! ### 2. Runtime Execution Errors
+//!
+//! These errors occur during ECS **iteration and system execution**, when
+//! runtime safety rules are violated.
+//!
+//! Examples include:
+//! * attempting structural mutation during iteration,
+//! * conflicting component borrows across parallel systems,
+//! * invalid or contradictory query access declarations,
+//! * scheduler invariant violations.
+//!
+//! Such failures are reported via [`ExecutionError`] and represent **incorrect
+//! API usage or scheduler misconfiguration**, rather than internal corruption.
+//!
+//! ### 3. Invariant Violations
+//!
+//! Certain errors indicate serious internal inconsistencies (e.g. scheduler
+//! invariants being violated). These are still reported explicitly but are
+//! considered framework-level bugs rather than recoverable user errors.
+//!
+//! ## Typical Error Flow
+//!
+//! Lower-level operations return precise, domain-specific errors (such as
+//! [`AttributeError`] or [`MoveError`]). Higher-level orchestration code uses
+//! `From<T>` conversions and the `?` operator to promote these into aggregate
+//! error types like [`SpawnError`] or [`ExecutionError`].
 //!
 //! ## Examples
-//! Converting a low-level failure into a spawn-level error:
+//!
+//! Converting a low-level storage failure into a spawn-level error:
 //! ```ignore
 //! fn spawn_one(world: &mut World, components: Components) -> Result<Entity, SpawnError> {
-//!     // May fail due to storage attribute issues (type mismatch, position out of bounds, …)
-//!     world.storage.push_components(components)?; // converts into SpawnError via `From`
+//!     world.storage.push_components(components)?; // AttributeError → SpawnError
 //!     Ok(world.entities.alloc())
 //! }
 //! ```
 //!
-//! Handling specific error cases at the boundary:
+//! Handling execution-time safety violations:
 //! ```ignore
-//! match spawn_one(world, components) {
-//!     Ok(entity) => { /* … */ }
-//!     Err(SpawnError::Capacity(e)) => {
-//!         eprintln!("Not enough capacity: need {}, have {}", e.entities_needed, e.capacity);
+//! match world.run_systems() {
+//!     Ok(()) => {}
+//!     Err(ExecutionError::BorrowConflict { component_id, .. }) => {
+//!         eprintln!("borrow conflict on component {}", component_id);
 //!     }
-//!     Err(SpawnError::ShardBounds(e)) => {
-//!         eprintln!("Shard {} out of bounds (max index {})", e.index, e.max_index);
-//!     }
-//!     Err(SpawnError::StoragePushFailedWith(attr)) => {
-//!         eprintln!("Attribute storage failed: {attr}");
-//!     }
-//!     Err(SpawnError::StaleEntity(_)) => {
-//!         eprintln!("Tried to use a stale entity handle");
+//!     Err(e) => {
+//!         eprintln!("execution failed: {e}");
 //!     }
 //! }
 //! ```
 //!
 //! ## Display vs. Debug
-//! * [`fmt::Display`] is optimized for end-user or operator logs (short,
-//!   imperative phrasing).
-//! * [`fmt::Debug`] (derived) retains full structure for diagnostics.
+//!
+//! * [`fmt::Display`] implementations are concise and suitable for logs or
+//!   user-facing diagnostics.
+//! * [`fmt::Debug`] retains full structural detail for debugging and telemetry.
+
 
 use std::fmt;
 use std::any::TypeId;
@@ -567,3 +599,140 @@ impl fmt::Display for MoveError {
         }
     }
 }
+
+/// Kind of component access requested or held during ECS execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessKind {
+    /// Shared, read-only access to a component.
+    Read,
+
+    /// Exclusive, mutable access to a component.
+    Write,
+}
+
+/// Reason why a query’s declared component access was invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidAccessReason {
+    /// The same component was declared as both read and write.
+    ReadAndWrite,
+
+    /// The same component appeared multiple times in an access set.
+    DuplicateAccess,
+
+    /// A component was declared writable while also excluded (`without`).
+    WriteAndWithout,
+}
+
+/// Errors that occur during ECS execution and iteration.
+///
+/// These errors represent **violations of ECS runtime safety rules**
+/// detected dynamically by the engine.
+///
+/// ## Characteristics
+/// * Caused by incorrect API usage
+/// * Always deterministic
+/// * Never indicate partial ECS mutation
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionError {
+
+    /// Attempted to mutate ECS structure while iteration was active.
+    ///
+    /// This includes:
+    /// * spawning or despawning entities
+    /// * adding or removing components
+    /// * calling `with_exclusive` during iteration
+    
+    StructuralMutationDuringIteration,
+
+    /// Component borrow rules were violated at runtime.
+    ///
+    /// This occurs when:
+    /// * two systems attempt conflicting access in parallel
+    /// * a query declares incompatible read/write sets
+
+    BorrowConflict {
+        /// Component whose borrow was violated.
+        component_id: ComponentID,
+
+        /// Existing access mode already held.
+        held: AccessKind,
+
+        /// Access mode that was requested.
+        requested: AccessKind,
+    },
+
+    /// A query declared invalid or contradictory component access.
+    ///
+    /// Examples:
+    /// * component appears in both read and write sets
+    /// * duplicate component entries
+    /// * write access combined with `without`
+
+    InvalidQueryAccess {
+        /// The component whose access declaration was invalid.
+        component_id: ComponentID,
+
+        /// The specific reason the access was rejected.
+        reason: InvalidAccessReason,
+    },
+
+    /// A query attempted to access a component not present
+    /// in a matched archetype.
+    ///
+    /// This indicates a bug in query construction or execution.
+    
+    MissingComponent {
+        /// The missing component identifier.
+        component_id: ComponentID,
+    },
+
+    /// Execution was aborted because the scheduler violated
+    /// its declared access guarantees.
+
+    SchedulerInvariantViolation,
+
+    /// Unsafe execution path was invoked incorrectly.
+
+    InternalExecutionError,
+}
+
+impl fmt::Display for ExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExecutionError::StructuralMutationDuringIteration => {
+                f.write_str("structural mutation attempted during ECS iteration")
+            }
+
+            ExecutionError::BorrowConflict { component_id, held, requested } => {
+                write!(
+                    f,
+                    "borrow conflict on component {}: {:?} already held, {:?} requested",
+                    component_id, held, requested
+                )
+            }
+
+            ExecutionError::InvalidQueryAccess { component_id, reason } => {
+                write!(
+                    f,
+                    "invalid query access for component {}: {:?}",
+                    component_id, reason
+                )
+            }
+
+            ExecutionError::MissingComponent { component_id } => {
+                write!(f, "query attempted to access missing component {}", component_id)
+            }
+
+            ExecutionError::SchedulerInvariantViolation => {
+                f.write_str("scheduler violated declared access invariants")
+            }
+
+            ExecutionError::InternalExecutionError => {
+                f.write_str("internal ECS execution error")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExecutionError {}
