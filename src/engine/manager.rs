@@ -53,7 +53,8 @@ use std::sync::{
     Mutex
 };
 use std::sync::atomic::{
-    AtomicUsize, 
+    AtomicUsize,
+    AtomicBool, 
     Ordering
 };
 use std::collections::HashMap;
@@ -940,94 +941,97 @@ impl ECSData {
                 jobs
             };
 
+            let abort = Arc::new(AtomicBool::new(false));
             let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
 
             jobs.into_par_iter().for_each(|job| {
-                if let Ok(guard) = err.lock() {
-                    if guard.is_some() {
-                        return;
-                    }
-                } else {
+                if abort.load(Ordering::Acquire) {
                     return;
                 }
 
-                let mut read_guards: Vec<RwLockReadGuard<'_, Box<dyn crate::engine::storage::TypeErasedAttribute>>> =
-                    Vec::with_capacity(job.read_locks.len());
-                let mut write_guards: Vec<RwLockWriteGuard<'_, Box<dyn crate::engine::storage::TypeErasedAttribute>>> =
-                    Vec::with_capacity(job.write_locks.len());
+                let fail = |e: ExecutionError| {
+                    abort.store(true, Ordering::Release);
 
-                let mut read_views: Vec<&[u8]> = Vec::with_capacity(job.read_locks.len());
-                let mut write_views: Vec<&mut [u8]> = Vec::with_capacity(job.write_locks.len());
+                    if let Ok(mut slot) = err.lock() {
+                        if slot.is_none() {
+                            *slot = Some(e);
+                        }
+                    }
+                };
 
-                // Build read-only views
+                let mut read_guards = Vec::with_capacity(job.read_locks.len());
+                let mut write_guards = Vec::with_capacity(job.write_locks.len());
+                let mut read_views = Vec::with_capacity(job.read_locks.len());
+                let mut write_views = Vec::with_capacity(job.write_locks.len());
+
+                // Read locks
                 for lock in &job.read_locks {
                     let guard = match lock.read() {
                         Ok(g) => g,
                         Err(_) => {
-                            if let Ok(mut e) = err.lock() {
-                                *e = Some(ExecutionError::LockPoisoned { what: "component column lock (read)" });
-                            }
+                            fail(ExecutionError::LockPoisoned {
+                                what: "component column (read)",
+                            });
                             return;
                         }
                     };
 
-                    let (pointer, bytes) = match guard.chunk_bytes(job.chunk as _, job.len) {
+                    let (ptr, bytes) = match guard.chunk_bytes(job.chunk as _, job.len) {
                         Some(v) => v,
                         None => {
-                            if let Ok(mut e) = err.lock() {
-                                *e = Some(ExecutionError::LockPoisoned { what: "component column lock (read)" });
-                            }
+                            fail(ExecutionError::InternalExecutionError);
                             return;
                         }
                     };
 
                     unsafe {
-                        read_views.push(std::slice::from_raw_parts(pointer, bytes));
+                        read_views.push(std::slice::from_raw_parts(ptr, bytes));
                     }
                     read_guards.push(guard);
                 }
 
-                // Build writable views
+                // Write locks
                 for lock in &job.write_locks {
                     let mut guard = match lock.write() {
                         Ok(g) => g,
                         Err(_) => {
-                            if let Ok(mut e) = err.lock() {
-                                *e = Some(ExecutionError::InternalExecutionError);
-                            }
+                            fail(ExecutionError::LockPoisoned {
+                                what: "component column (write)",
+                            });
                             return;
                         }
                     };
 
-                    let (pointer, bytes) = match guard.chunk_bytes_mut(job.chunk as _, job.len) {
+                    let (ptr, bytes) = match guard.chunk_bytes_mut(job.chunk as _, job.len) {
                         Some(v) => v,
                         None => {
-                            if let Ok(mut e) = err.lock() {
-                                *e = Some(ExecutionError::InternalExecutionError);
-                            }
+                            fail(ExecutionError::InternalExecutionError);
                             return;
                         }
                     };
 
                     unsafe {
-                        write_views.push(std::slice::from_raw_parts_mut(pointer, bytes));
+                        write_views.push(std::slice::from_raw_parts_mut(ptr, bytes));
                     }
                     write_guards.push(guard);
                 }
 
-                // Callback (per chunk)
+                // Execute callback
                 f(&read_views, &mut write_views);
             });
 
-            let maybe_err = {
-                let guard = err
-                    .lock()
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                guard.clone()
-            };
+            if abort.load(Ordering::Acquire) {
+                let guard = err.lock().map_err(|_| {
+                    ExecutionError::LockPoisoned {
+                        what: "job error latch",
+                    }
+                })?;
 
-            if let Some(e) = maybe_err {
-                return Err(e);
+                if let Some(e) = guard.clone() {
+                    return Err(e);
+                } else {
+                    return Err(ExecutionError::InternalExecutionError);
+                }
             }
 
         }
