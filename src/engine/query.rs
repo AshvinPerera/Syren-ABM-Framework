@@ -7,6 +7,7 @@
 use crate::engine::types::{ComponentID};
 use crate::engine::component::{Signature, component_id_of};
 use crate::engine::systems::AccessSets;
+use crate::engine::error::{ExecutionError, InvalidAccessReason};
 
 
 /// Component signature used for query matching.
@@ -131,24 +132,62 @@ impl QueryBuilder {
     }
 
     /// Finalizes the query description and returns an immutable [`BuiltQuery`].  
-    pub fn build(mut self) -> BuiltQuery {
+    pub fn build(mut self) -> Result<BuiltQuery, ExecutionError> {
         self.reads.sort_unstable();
         self.writes.sort_unstable();
+
+        // Detect duplicates
+        for w in self.reads.windows(2) {
+            if w[0] == w[1] {
+                return Err(ExecutionError::InvalidQueryAccess {
+                    component_id: w[0],
+                    reason: InvalidAccessReason::DuplicateAccess,
+                });
+            }
+        }
+        for w in self.writes.windows(2) {
+            if w[0] == w[1] {
+                return Err(ExecutionError::InvalidQueryAccess {
+                    component_id: w[0],
+                    reason: InvalidAccessReason::DuplicateAccess,
+                });
+            }
+        }
 
         self.reads.dedup();
         self.writes.dedup();
 
-        for cid in &self.reads {
-            if self.writes.binary_search(cid).is_ok() {
-                panic!("Invalid query: component {cid} both read and written");
+        // Disallow overlap: read & write same component
+        for component_id in &self.reads {
+            if self.writes.binary_search(component_id).is_ok() {
+                return Err(ExecutionError::InvalidQueryAccess {
+                    component_id: *component_id,
+                    reason: InvalidAccessReason::ReadAndWrite,
+                });
             }
         }
 
-        BuiltQuery {
+        // Disallow write & without overlap
+        for (word_idx, (&w_word, &without_word)) in self.signature.write.components.iter()
+            .zip(self.signature.without.components.iter())
+            .enumerate()
+        {
+            let overlap = w_word & without_word;
+            if overlap != 0 {
+                let bit = overlap.trailing_zeros() as u32;
+                let component_id = (word_idx as u32) * 64 + bit;
+                return Err(ExecutionError::InvalidQueryAccess {
+                    component_id: component_id as ComponentID,
+                    reason: InvalidAccessReason::WriteAndWithout,
+                });
+            }
+        }
+
+        Ok(BuiltQuery {
             signature: self.signature,
             reads: self.reads,
             writes: self.writes,
-        }
+        })
     }
 
     /// Returns the declared read/write access sets for this query.

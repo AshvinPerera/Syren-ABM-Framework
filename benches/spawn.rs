@@ -11,9 +11,11 @@ use abm_framework::engine::component::{
 use abm_framework::engine::entity::EntityShards;
 use abm_framework::engine::manager::{ECSManager, ECSData};
 use abm_framework::engine::commands::Command;
+use abm_framework::engine::error::ExecutionError;
 
 mod common;
 use common::Position;
+
 
 static INIT: Once = Once::new();
 
@@ -37,17 +39,26 @@ fn spawn_benchmark(c: &mut Criterion) {
 
             let world = ecs.world_ref();
 
-            for _ in 0..common::AGENTS_MED {
-                let mut bundle = Bundle::new();
-                bundle.insert(
-                    component_id_of::<Position>(),
-                    Position { x: 0.0, y: 0.0 },
-                );
+            let _ = world
+                .with_exclusive(|_data| {
+                    for _ in 0..common::AGENTS_MED {
+                        let mut bundle = Bundle::new();
+                        bundle.insert(
+                            component_id_of::<Position>(),
+                            Position { x: 0.0, y: 0.0 },
+                        );
 
-                world.defer(Command::Spawn { bundle });
-            }
+                        world
+                            .defer(Command::Spawn { bundle })
+                            .expect("spawn defer failed in benchmark");
+                    }
 
-            ecs.apply_deferred_commands();
+                    Ok::<(), ExecutionError>(())
+                })
+                .expect("exclusive world setup failed");
+
+            ecs.apply_deferred_commands()
+                .expect("apply_deferred_commands failed");
 
             black_box(ecs);
         });

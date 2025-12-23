@@ -736,3 +736,43 @@ impl fmt::Display for ExecutionError {
 }
 
 impl std::error::Error for ExecutionError {}
+
+/// Result type used by the ECS engine.
+pub type ECSResult<T> = Result<T, ECSError>;
+
+/// Unified error type for the public ECS API.
+#[derive(Debug)]
+pub enum ECSError {
+    /// Entity spawning error
+    Spawn(SpawnError),
+    /// ECS execution error
+    Execute(ExecutionError),
+    /// Component move error
+    Move(MoveError),
+
+    /// Internal lock poisoning / invariant failures
+    Internal(&'static str),
+}
+
+impl std::fmt::Display for ECSError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ECSError::Spawn(e) => write!(f, "spawn error: {e}"),
+            ECSError::Execute(e) => write!(f, "execution error: {e}"),
+            ECSError::Move(e) => write!(f, "move error: {e}"),
+            ECSError::Internal(msg) => write!(f, "internal error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ECSError {}
+
+impl From<SpawnError> for ECSError {
+    fn from(e: SpawnError) -> Self { ECSError::Spawn(e) }
+}
+impl From<ExecutionError> for ECSError {
+    fn from(e: ExecutionError) -> Self { ECSError::Execute(e) }
+}
+impl From<MoveError> for ECSError {
+    fn from(e: MoveError) -> Self { ECSError::Move(e) }
+}

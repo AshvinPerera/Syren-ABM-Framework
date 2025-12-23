@@ -71,6 +71,7 @@
 use crate::engine::types::{SystemID};
 use crate::engine::component::{Signature};
 use crate::engine::manager::ECSReference;
+use crate::engine::error::ExecutionError;
 
 
 /// Declares the component access set of a system.
@@ -137,7 +138,7 @@ pub trait System: Send + Sync {
     }    
 
     /// Executes the system logic against the ECS world.
-    fn run(&self, world: ECSReference<'_>);
+    fn run(&self, world: ECSReference<'_>) -> Result<(), ExecutionError>;
 }
 
 /// A concrete [`System`] backed by a function or closure.
@@ -145,15 +146,14 @@ pub trait System: Send + Sync {
 /// `FnSystem` allows systems to be defined inline using a function or
 /// closure, without requiring a custom system type.
 ///
-/// It stores:
-/// - a system ID,
-/// - a human-readable name,
-/// - declared component access,
-/// - and the executable function itself.
-
+/// The function must return `Result<(), ExecutionError>` so that
+/// execution failures can be propagated through the scheduler.
 pub struct FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) + Send + Sync + 'static,
+    F: Fn(ECSReference<'_>) -> Result<(), ExecutionError>
+        + Send
+        + Sync
+        + 'static,
 {
     id: SystemID,
     name: &'static str,
@@ -163,7 +163,10 @@ where
 
 impl<F> FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) + Send + Sync + 'static,
+    F: Fn(ECSReference<'_>) -> Result<(), ExecutionError>
+        + Send
+        + Sync
+        + 'static,
 {
     /// Creates a new function-backed system.
     ///
@@ -189,7 +192,10 @@ where
 
 impl<F> System for FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) + Send + Sync + 'static,
+    F: Fn(ECSReference<'_>) -> Result<(), ExecutionError>
+        + Send
+        + Sync
+        + 'static,
 {
     fn id(&self) -> SystemID {
         self.id
@@ -199,7 +205,7 @@ where
         self.access.clone()
     }
 
-    fn run(&self, world: ECSReference<'_>) {
+    fn run(&self, world: ECSReference<'_>) -> Result<(), ExecutionError> {
         (self.f)(world)
     }
 }

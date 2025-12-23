@@ -45,8 +45,17 @@
 //! Violating these invariants results in undefined behavior.
 
 use std::cell::UnsafeCell;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard,Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc, 
+    RwLock, 
+    RwLockReadGuard, 
+    RwLockWriteGuard, 
+    Mutex
+};
+use std::sync::atomic::{
+    AtomicUsize, 
+    Ordering
+};
 use std::collections::HashMap;
 use rayon::prelude::*;
 
@@ -56,18 +65,38 @@ use crate::engine::types::{
     ArchetypeID,
     ShardID,
     SIGNATURE_SIZE,
-    
 };
-use crate::engine::query::{QuerySignature, QueryBuilder, BuiltQuery};
+use crate::engine::query::{
+    QuerySignature, 
+    QueryBuilder, 
+    BuiltQuery
+};
 use crate::engine::archetype::{
     Archetype,
     ArchetypeMatch
 };
-use crate::engine::entity::{Entity, EntityShards};
-use crate::engine::storage::{cast_slice, cast_slice_mut};
-use crate::engine::component::{Signature, make_empty_component};
+use crate::engine::entity::{
+    Entity, 
+    EntityShards
+};
+use crate::engine::storage::{
+    cast_slice, 
+    cast_slice_mut
+};
+use crate::engine::component::{
+    Signature, 
+    make_empty_component
+};
 use crate::engine::scheduler::Scheduler;
-use crate::engine::borrow::{BorrowTracker, BorrowGuard};
+use crate::engine::borrow::{
+    BorrowTracker, 
+    BorrowGuard
+};
+use crate::engine::error::{
+    ECSResult, 
+    ExecutionError
+};
+
 
 
 /// A unit of parallel work operating on a single archetype chunk.
@@ -96,12 +125,12 @@ use crate::engine::borrow::{BorrowTracker, BorrowGuard};
 
 #[derive(Clone)]
 struct Job {
-    read_pointers: Vec<(*const u8, usize)>,
-    write_pointers: Vec<(*mut u8, usize)>,
-}
+    chunk: usize,
+    len: usize,
 
-unsafe impl Send for Job {}
-unsafe impl Sync for Job {}
+    read_locks: Vec<Arc<RwLock<Box<dyn crate::engine::storage::TypeErasedAttribute>>>>,
+    write_locks: Vec<Arc<RwLock<Box<dyn crate::engine::storage::TypeErasedAttribute>>>>,
+}
 
 struct IterationScope<'a>(&'a AtomicUsize);
 
@@ -176,12 +205,15 @@ impl ECSManager {
     }
 
     /// Runs the given scheduler for one full tick.
-    pub fn run(&self, scheduler: &mut Scheduler) {
+    pub fn run(&self, scheduler: &mut Scheduler) -> ECSResult<()> {
         // one full tick
-        scheduler.run(self.world_ref());
+        scheduler.run(self.world_ref())?;
+
         // single structural sync point
-        self.apply_deferred_commands();
-    }    
+        self.apply_deferred_commands()?;
+
+        Ok(())
+    }   
 
     /// Applies all queued deferred commands.
     ///
@@ -192,33 +224,45 @@ impl ECSManager {
     /// ## Notes
     /// Commands are drained and executed in FIFO order.
 
-    pub fn apply_deferred_commands(&self) {
-        // Hard safety gate
+    pub fn apply_deferred_commands(&self) -> Result<(), ExecutionError> {
         if self.active_iters.load(Ordering::Acquire) != 0 {
-            panic!("apply_deferred_commands called during iteration");
+            return Err(ExecutionError::StructuralMutationDuringIteration);
         }
 
-        let _phase = self.phase_write();
+        let _phase = self.phase_write()?;
 
         // Drain queue outside ECSData
         let commands = {
-            let mut queue = self.deferred.lock().expect("deferred queue poisoned");
+            let mut queue = self
+                .deferred
+                .lock()
+                .map_err(|_| ExecutionError::InternalExecutionError)?;
             std::mem::take(&mut *queue)
         };
 
         // Apply to ECSData under exclusive phase
         let data = unsafe { self.data_mut_unchecked() };
         data.apply_deferred_commands(commands);
+
+        Ok(())
     }
 
     #[inline]
-    pub(crate) fn phase_read(&self) -> PhaseRead<'_> {
-        PhaseRead(self.phase.read().expect("phase lock poisoned"))
+    pub(crate) fn phase_read(&self) -> Result<PhaseRead<'_>, ExecutionError> {
+        let g = self
+            .phase
+            .read()
+            .map_err(|_| ExecutionError::InternalExecutionError)?;
+        Ok(PhaseRead(g))
     }
 
     #[inline]
-    pub(crate) fn phase_write(&self) -> PhaseWrite<'_> {
-        PhaseWrite(self.phase.write().expect("phase lock poisoned"))
+    pub(crate) fn phase_write(&self) -> Result<PhaseWrite<'_>, ExecutionError> {
+        let g = self
+            .phase
+            .write()
+            .map_err(|_| ExecutionError::InternalExecutionError)?;
+        Ok(PhaseWrite(g))
     }
 
     #[inline]
@@ -269,21 +313,26 @@ impl<'a> ECSReference<'a> {
     /// Incorrect use can easily result in undefined behavior.
     
     #[inline]
-    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut ECSData) -> R) -> R {
+    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut ECSData) -> R) -> Result<R, ExecutionError> {
         if self.manager.active_iters.load(Ordering::Acquire) != 0 {
-            panic!("Structural mutation attempted during iteration");
+            return Err(ExecutionError::StructuralMutationDuringIteration);
         }
 
-        let _phase = self.manager.phase_write();
+        let _phase = self.manager.phase_write()?;
         let data = unsafe { self.manager.data_mut_unchecked() };
-        f(data)
+        Ok(f(data))
     }
 
     /// Queue a structural command.
     #[inline]
-    pub fn defer(&self, command: Command) {
-        let mut queue = self.manager.deferred.lock().expect("deferred queue poisoned");
+    pub fn defer(&self, command: Command) -> Result<(), ExecutionError> {
+        let mut queue = self
+            .manager
+            .deferred
+            .lock()
+            .map_err(|_| ExecutionError::InternalExecutionError)?;
         queue.push(command);
+        Ok(())
     }
 
     /// Begins construction of a component query.
@@ -316,19 +365,23 @@ impl<'a> ECSReference<'a> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
-    ) {
-        let _phase = self.manager.phase_read();
+    ) -> Result<(), ExecutionError> {
+        let _phase = self.manager.phase_read()?;
         let _iter_scope = IterationScope::new(&self.manager.active_iters);
+
+        // Enforce per-component borrow rules (now fallible, no spinning/hanging).
         let _borrows = BorrowGuard::new(
             &self.manager.borrows,
             &query.reads,
             &query.writes,
-        );
+        )?;
 
-        // immutable world reference during iteration
+        // Immutable world reference during iteration
         let data = unsafe { self.manager.data_ref_unchecked() };
         data.for_each_abstraction_unchecked(query, f);
-    }   
+
+        Ok(())
+    }
 }
 
 impl ECSReference<'_> {
@@ -349,7 +402,7 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A) + Send + Sync,
-    )
+    ) -> Result<(), ExecutionError>
     where
         A: 'static + Send + Sync,
     {
@@ -361,7 +414,7 @@ impl ECSReference<'_> {
             for v in a {
                 f(v);
             }
-        });
+        })
     }
 
     /// Executes a parallel iteration over a single mutable component.
@@ -369,7 +422,7 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&mut A) + Send + Sync,
-    )
+    ) -> Result<(), ExecutionError>
     where
         A: 'static + Send + Sync,
     {
@@ -381,15 +434,16 @@ impl ECSReference<'_> {
             for v in a {
                 f(v);
             }
-        });
+        })
     }
+
 
     /// Executes a parallel iteration over two read-only components.
     pub fn for_each_read2<A, B>(
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &B) + Send + Sync,
-    )
+    ) -> Result<(), ExecutionError>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
@@ -401,12 +455,11 @@ impl ECSReference<'_> {
             let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
             let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
 
-            // These should have equal lengths, but min() avoids UB if something is wrong.
             let n = a.len().min(b.len());
             for i in 0..n {
                 f(&a[i], &b[i]);
             }
-        });
+        })
     }
 
     /// Executes a parallel iteration over one read-only and one mutable component.
@@ -414,7 +467,7 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &mut B) + Send + Sync,
-    )
+    ) -> Result<(), ExecutionError>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
@@ -430,7 +483,7 @@ impl ECSReference<'_> {
             for i in 0..n {
                 f(&a[i], &mut b[i]);
             }
-        });
+        })
     }
 
     /// Executes a parallel iteration over two read-only components and one mutable component.
@@ -438,7 +491,7 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &B, &mut C) + Send + Sync,
-    )
+    ) -> Result<(), ExecutionError>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
@@ -456,7 +509,7 @@ impl ECSReference<'_> {
             for i in 0..n {
                 f(&a[i], &b[i], &mut c[i]);
             }
-        });
+        })
     }
 
     /// Executes a parallel iteration over two read-only and two mutable components.
@@ -464,7 +517,7 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &B, &mut C, &mut D) + Send + Sync,
-    )
+    ) -> Result<(), ExecutionError>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
@@ -484,7 +537,7 @@ impl ECSReference<'_> {
             for i in 0..n {
                 f(&a[i], &b[i], &mut c[i], &mut d[i]);
             }
-        });
+        })
     }
 }
 
@@ -892,7 +945,6 @@ impl ECSData {
         for m in matches {
             // Collect jobs for this archetype
             let jobs: Vec<Job> = {
-                // immutable reference to archetype
                 let archetype = &self.archetypes[m.archetype_id as usize];
                 let mut jobs = Vec::new();
 
@@ -905,59 +957,71 @@ impl ECSData {
                     let mut reads = Vec::with_capacity(query.reads.len());
                     let mut writes = Vec::with_capacity(query.writes.len());
 
-                    // Collect read-only component slices
+                    // Collect read-only component locks
                     for &component_id in &query.reads {
                         let locked = archetype
                             .component_locked(component_id)
                             .expect("component missing in archetype");
-                        let guard = locked.read();
-
-                        let (pointer, bytes) = guard
-                            .chunk_bytes(chunk as _, len)
-                            .expect("invalid chunk bounds");
-
-                        reads.push((pointer, bytes));
+                        reads.push(locked.arc());
                     }
 
-                    // Collect mutable component slices
+                    // Collect writable component locks
                     for &component_id in &query.writes {
                         let locked = archetype
                             .component_locked(component_id)
                             .expect("component missing in archetype");
-                        let mut guard = locked.write();
-
-                        let (pointer, bytes) = guard
-                            .chunk_bytes_mut(chunk as _, len)
-                            .expect("invalid chunk bounds");
-
-                        writes.push((pointer, bytes));
+                        writes.push(locked.arc());
                     }
 
                     jobs.push(Job {
-                        read_pointers: reads,
-                        write_pointers: writes,
+                        chunk,
+                        len,
+                        read_locks: reads,
+                        write_locks: writes,
                     });
                 }
 
                 jobs
             };
 
-            // Execute all chunk jobs in parallel
-            jobs.into_par_iter().for_each(|job| unsafe {
-                let mut read_views: Vec<&[u8]> =
-                    Vec::with_capacity(job.read_pointers.len());
-                let mut write_views: Vec<&mut [u8]> =
-                    Vec::with_capacity(job.write_pointers.len());
+            // Execute all chunk jobs in parallel.
+            jobs.into_par_iter().for_each(|job| {
+                // Keep guards alive until after the callback finishes.
+                let mut read_guards: Vec<RwLockReadGuard<'_, Box<dyn crate::engine::storage::TypeErasedAttribute>>> =
+                    Vec::with_capacity(job.read_locks.len());
+                let mut write_guards: Vec<RwLockWriteGuard<'_, Box<dyn crate::engine::storage::TypeErasedAttribute>>> =
+                    Vec::with_capacity(job.write_locks.len());
 
-                for &(pointer, bytes) in &job.read_pointers {
-                    read_views.push(std::slice::from_raw_parts(pointer, bytes));
+                let mut read_views: Vec<&[u8]> = Vec::with_capacity(job.read_locks.len());
+                let mut write_views: Vec<&mut [u8]> = Vec::with_capacity(job.write_locks.len());
+
+                // Build read-only views
+                for lock in &job.read_locks {
+                    let guard = lock.read().expect("component read lock poisoned");
+                    let (pointer, bytes) = guard
+                        .chunk_bytes(job.chunk as _, job.len)
+                        .expect("invalid chunk bounds");
+
+                    unsafe {
+                        read_views.push(std::slice::from_raw_parts(pointer, bytes));
+                    }
+                    read_guards.push(guard);
                 }
 
-                for &(pointer, bytes) in &job.write_pointers {
-                    write_views.push(std::slice::from_raw_parts_mut(pointer, bytes));
+                // Build writable views
+                for lock in &job.write_locks {
+                    let mut guard = lock.write().expect("component write lock poisoned");
+                    let (pointer, bytes) = guard
+                        .chunk_bytes_mut(job.chunk as _, job.len)
+                        .expect("invalid chunk bounds");
+
+                    unsafe {
+                        write_views.push(std::slice::from_raw_parts_mut(pointer, bytes));
+                    }
+                    write_guards.push(guard);
                 }
 
-                // User callback (per chunk)
+                // Callback (per chunk)
                 f(&read_views, &mut write_views);
             });
         }

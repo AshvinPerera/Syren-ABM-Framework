@@ -9,6 +9,7 @@ use abm_framework::engine::component::{
 use abm_framework::engine::entity::EntityShards;
 use abm_framework::engine::manager::{ECSManager, ECSData};
 use abm_framework::engine::commands::Command;
+use abm_framework::engine::error::{ECSResult, ExecutionError};
 
 pub const AGENTS_SMALL: usize = 100_000;
 pub const AGENTS_MED: usize = 1_000_000;
@@ -30,7 +31,7 @@ pub struct Productivity {
     pub rate: f32,
 }
 
-pub fn setup_world(agent_count: usize) -> ECSManager {
+pub fn setup_world(agent_count: usize) -> ECSResult<ECSManager> {
     register_component::<Position>();
     register_component::<Wealth>();
     register_component::<Productivity>();
@@ -40,19 +41,30 @@ pub fn setup_world(agent_count: usize) -> ECSManager {
     let data = ECSData::new(shards);
     let ecs = ECSManager::new(data);
 
-    {
-        let world = ecs.world_ref();
+    let world = ecs.world_ref();
 
+   world.with_exclusive(|_data| {
         for _ in 0..agent_count {
             let mut bundle = Bundle::new();
-            bundle.insert(component_id_of::<Position>(), Position { x: 0.0, y: 0.0 });
-            bundle.insert(component_id_of::<Wealth>(), Wealth { value: 100.0 });
-            bundle.insert(component_id_of::<Productivity>(), Productivity { rate: 1.0 });
+            bundle.insert(
+                component_id_of::<Position>(),
+                Position { x: 0.0, y: 0.0 },
+            );
+            bundle.insert(
+                component_id_of::<Wealth>(),
+                Wealth { value: 100.0 },
+            );
+            bundle.insert(
+                component_id_of::<Productivity>(),
+                Productivity { rate: 1.0 },
+            );
 
-            world.defer(Command::Spawn { bundle });
+            world.defer(Command::Spawn { bundle })?;
         }
-    }
 
-    ecs.apply_deferred_commands();
-    ecs
+        Ok::<(), ExecutionError>(())
+    })??;
+
+    ecs.apply_deferred_commands()?;
+    Ok(ecs)
 }

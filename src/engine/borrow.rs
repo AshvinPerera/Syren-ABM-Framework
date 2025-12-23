@@ -35,6 +35,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::engine::types::{ComponentID, COMPONENT_CAP};
+use crate::engine::error::{ExecutionError, AccessKind, InvalidAccessReason};
 
 
 /// Tracks runtime read/write borrows for each component type.
@@ -70,25 +71,36 @@ impl BorrowTracker {
     /// - `0 → 2` : first reader
     /// - `N → N+1` : additional reader
   
-    pub fn acquire_read(&self, component_id: ComponentID) {
-        let component_state = &self.states[component_id as usize];
-        loop {
-            let current_state = component_state.load(Ordering::Acquire);
-            if current_state == 1 {
-                std::hint::spin_loop();
-                continue;
+    pub fn acquire_read(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
+        let s = &self.states[component_id as usize];
+        let current = s.load(Ordering::Acquire);
+
+        if current == 1 {
+            return Err(ExecutionError::BorrowConflict {
+                component_id,
+                held: AccessKind::Write,
+                requested: AccessKind::Read,
+            });
+        }
+
+        for _ in 0..32 {
+            let cur = s.load(Ordering::Acquire);
+            if cur == 1 {
+                return Err(ExecutionError::BorrowConflict {
+                    component_id,
+                    held: AccessKind::Write,
+                    requested: AccessKind::Read,
+                });
             }
-            let next_state = if current_state == 0 { 2 } else { current_state + 1 };
-            if component_state.compare_exchange_weak(
-                current_state, 
-                next_state, 
-                Ordering::AcqRel, 
-                Ordering::Relaxed
-            ).is_ok() {
-                return;
+            let next = if cur == 0 { 2 } else { cur + 1 };
+            if s.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                return Ok(());
             }
         }
+
+        Err(ExecutionError::InternalExecutionError)
     }
+
 
     /// Releases a previously acquired **shared (read) borrow**.
     ///
@@ -123,22 +135,23 @@ impl BorrowTracker {
     ///
     /// - `0 → 1`
 
-    pub fn acquire_write(&self, component_id: ComponentID) {
-        let component_state = &self.states[component_id as usize];
-        loop {
-            let current_state = component_state.load(Ordering::Acquire);
-            if current_state != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-            if component_state.compare_exchange_weak(
-                0, 
-                1, 
-                Ordering::AcqRel, 
-                Ordering::Relaxed
-            ).is_ok() {
-                return;
-            }
+    pub fn acquire_write(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
+        let s = &self.states[component_id as usize];
+        let current = s.load(Ordering::Acquire);
+
+        if current != 0 {
+            let held = if current == 1 { AccessKind::Write } else { AccessKind::Read };
+            return Err(ExecutionError::BorrowConflict {
+                component_id,
+                held,
+                requested: AccessKind::Write,
+            });
+        }
+
+        if s.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            Ok(())
+        } else {
+            Err(ExecutionError::InternalExecutionError)
         }
     }
 
@@ -185,27 +198,33 @@ impl<'a> BorrowGuard<'a> {
     /// - `reads`: Component types to borrow immutably
     /// - `writes`: Component types to borrow mutably
     
-    pub fn new(tracker: &'a BorrowTracker, reads: &[ComponentID], writes: &[ComponentID]) -> Self {
+    pub fn new(
+        tracker: &'a BorrowTracker,
+        reads: &[ComponentID],
+        writes: &[ComponentID],
+    ) -> Result<Self, ExecutionError> {
         let mut r = reads.to_vec();
         let mut w = writes.to_vec();
 
         r.sort_unstable();
         w.sort_unstable();
 
-        // 1) Dedup to avoid double-acquire (can deadlock/spin forever)
         r.dedup();
         w.dedup();
 
-        // 2) Disallow overlap
-        debug_assert!(
-            r.iter().all(|component_id| !w.binary_search(component_id).is_ok()),
-            "BorrowGuard: component cannot be both read and written"
-        );
+        for component_id in &r {
+            if w.binary_search(component_id).is_ok() {
+                return Err(ExecutionError::InvalidQueryAccess {
+                    component_id: *component_id,
+                    reason: InvalidAccessReason::ReadAndWrite,
+                });
+            }
+        }
 
-        for &component_id in &w { tracker.acquire_write(component_id); }
-        for &component_id in &r { tracker.acquire_read(component_id); }
+        for &component_id in &w { tracker.acquire_write(component_id)?; }
+        for &component_id in &r { tracker.acquire_read(component_id)?; }
 
-        Self { tracker, reads: r, writes: w }
+        Ok(Self { tracker, reads: r, writes: w })
     }
 }
 
