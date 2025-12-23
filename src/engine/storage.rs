@@ -107,8 +107,17 @@ use std::{
     convert::TryInto
 };
 
-use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
-use crate::engine::error::{PositionOutOfBoundsError, TypeMismatchError, AttributeError};
+use crate::engine::types::{
+    ChunkID, 
+    RowID, 
+    CHUNK_CAP
+};
+
+use crate::engine::error::{
+    PositionOutOfBoundsError, 
+    TypeMismatchError, 
+    AttributeError
+};
 
 
 /// Describes how to fully undo a mutating operation performed on an
@@ -1358,8 +1367,8 @@ impl<T> Attribute<T> {
             };
             
             moved_from_source = Some((
-                last_chunk.try_into().unwrap(),
-                last_row.try_into().unwrap(),
+                last_chunk.try_into().map_err(|_| AttributeError::IndexOverflow("chunk"))?,
+                last_row.try_into().map_err(|_| AttributeError::IndexOverflow("row"))?
             ));
 
             unsafe {
@@ -2026,14 +2035,22 @@ impl LockedAttribute {
 
     /// Returns a read guard to the inner attribute.
     #[inline]
-    pub fn read(&self) -> RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>> {
-        self.inner.read().expect("LockedAttribute read lock poisoned")
+    pub fn read(
+        &self,
+    ) -> Result<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
+        self.inner
+            .read()
+            .map_err(|_| AttributeError::InternalInvariant("LockedAttribute read lock poisoned"))
     }
 
     /// Returns a write guard to the inner attribute.
     #[inline]
-    pub fn write(&self) -> RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>> {
-        self.inner.write().expect("LockedAttribute write lock poisoned")
+    pub fn write(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
+        self.inner
+            .write()
+            .map_err(|_| AttributeError::InternalInvariant("LockedAttribute write lock poisoned"))
     }
 
     /// Returns a clone of the internal `Arc<RwLock<Box<dyn TypeErasedAttribute>>>`.
@@ -2043,12 +2060,16 @@ impl LockedAttribute {
     }
 
     /// Consumes the `LockedAttribute`, returning the inner attribute.
-    pub fn into_inner(self) -> Box<dyn TypeErasedAttribute> {
-        match std::sync::Arc::try_unwrap(self.inner) {
-            Ok(lock) => lock.into_inner().expect("lock poisoned"),
-            Err(_) => panic!("LockedAttribute still shared"),
+    pub fn into_inner(self) -> Result<Box<dyn TypeErasedAttribute>, AttributeError> {
+        match Arc::try_unwrap(self.inner) {
+            Ok(lock) => lock
+                .into_inner()
+                .map_err(|_| AttributeError::InternalInvariant("LockedAttribute poisoned during unwrap")),
+            Err(_) => Err(AttributeError::InternalInvariant(
+                "LockedAttribute still shared",
+            )),
         }
-    }    
+    }   
 }
 
 /// Interprets a raw byte slice as a typed slice.

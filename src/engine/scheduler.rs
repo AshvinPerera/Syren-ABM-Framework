@@ -34,7 +34,7 @@ use rayon::prelude::*;
 use crate::engine::manager::ECSReference;
 use crate::engine::systems::{AccessSets, System, SystemBackend};
 use crate::engine::component::Signature;
-use crate::engine::error::ExecutionError;
+use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 
 
 /// A logical execution stage used by [`Scheduler`] during planning.
@@ -141,7 +141,7 @@ impl Scheduler {
         system: crate::engine::systems::FnSystem<F>,
     )
     where
-        F: Fn(crate::engine::manager::ECSReference<'_>) -> Result<(), ExecutionError>
+        F: Fn(crate::engine::manager::ECSReference<'_>) -> ECSResult<()>
             + Send
             + Sync
             + 'static,
@@ -159,7 +159,7 @@ impl Scheduler {
         f: F,
     )
     where
-        F: Fn(crate::engine::manager::ECSReference<'_>) -> Result<(), ExecutionError>
+        F: Fn(crate::engine::manager::ECSReference<'_>) -> ECSResult<()>
             + Send
             + Sync
             + 'static,
@@ -183,7 +183,7 @@ impl Scheduler {
     {
         self.add_fn(id, name, access, move |world| {
             f(world);
-            Ok(())
+            Ok::<(), ECSError>(())
         });
     }
 
@@ -243,7 +243,7 @@ impl Scheduler {
     /// Structural synchronization is expected to be handled
     /// by the ECS manager at higher-level execution boundaries
     
-    pub fn run(&mut self, ecs: ECSReference<'_>) -> Result<(), ExecutionError> {
+    pub fn run(&mut self, ecs: ECSReference<'_>) -> ECSResult<()> {
         self.rebuild();
 
         for stage in &self.cpu_stages {
@@ -251,19 +251,28 @@ impl Scheduler {
                 continue;
             }
 
-            let err: Mutex<Option<ExecutionError>> = Mutex::new(None);
+            let err: Mutex<Option<ECSError>> = Mutex::new(None);
 
             stage.system_indices.par_iter().for_each(|&system_idx| {
-                if err.lock().unwrap().is_some() {
+                let already_failed = match err.lock() {
+                    Ok(g) => g.is_some(),
+                    Err(_) => true,
+                };
+                if already_failed {
                     return;
                 }
+
                 if let Err(e) = self.systems[system_idx].run(ecs) {
-                    *err.lock().unwrap() = Some(e);
+                    if let Ok(mut g) = err.lock() {
+                        *g = Some(e);
+                    }
                 }
             });
 
-            if let Some(e) = err.into_inner().unwrap() {
-                return Err(e);
+            match err.into_inner() {
+                Ok(Some(e)) => return Err(e),
+                Ok(None) => {}
+                Err(_) => return Err(ECSError::from(ExecutionError::InternalExecutionError)),
             }
         }
 

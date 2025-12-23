@@ -79,7 +79,10 @@ use crate::engine::component::{
 
 use crate::engine::error::{
     SpawnError,
-    MoveError
+    MoveError,
+    ExecutionError,
+    ECSError,
+    ECSResult,
 };
 
 
@@ -165,7 +168,7 @@ impl Archetype {
     /// ## Invariants
     /// The archetype contains no entities upon creation.
 
-    pub fn new(archetype_id: ArchetypeID, signature: Signature) -> Self {
+    pub fn new(archetype_id: ArchetypeID, signature: Signature) -> ECSResult<Self> {
         let mut archetype = Self {
             archetype_id,
             components: (0..COMPONENT_CAP).map(|_| None).collect(),
@@ -177,12 +180,12 @@ impl Archetype {
         };
 
         for component_id in iter_bits_from_words(&signature.components) {
-            let component = make_empty_component_for(component_id);
+            let component = make_empty_component_for(component_id)?;
             archetype.components[component_id as usize] = Some(LockedAttribute::new(component));
             archetype.signature.set(component_id);
         }
 
-        archetype
+        Ok(archetype)
     }
 
     /// Returns the number of active entities stored in the archetype.
@@ -190,8 +193,8 @@ impl Archetype {
     /// ## Notes
     /// This reflects logical count only; physical chunk storage may contain unused rows.
 
-    pub fn length(&self) -> usize {
-        self.meta.read().expect("meta lock poisoned").length
+    pub fn length(&self) -> ECSResult<usize> {
+        Ok(self.meta.read().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?.length)
     }
 
     /// Returns the `ArchetypeID` associated with this archetype.
@@ -280,18 +283,33 @@ impl Archetype {
             .and_then(|c| c.as_ref())
     }
 
+    #[inline]
+    fn lock_write_spawn<'a>(
+        attr: &'a LockedAttribute,
+    ) -> Result<RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>, SpawnError> {
+        attr.write().map_err(SpawnError::StoragePushFailedWith)
+    }
+
+    #[inline]
+    fn lock_write_move<'a>(
+        attr: &'a LockedAttribute,
+        component_id: ComponentID,
+    ) -> Result<RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>, MoveError> {
+        attr.write().map_err(|e| MoveError::PushFromFailed { component_id, source_error: e })
+    }
+
     /// Computes how many chunks are required to store all active rows.
     ///
     /// ## Behavior
     /// - Returns `0` if no entities exist.
     /// - Otherwise computes `(length - 1) / CHUNK_CAP + 1`.
 
-    pub fn chunk_count(&self) -> usize {
-        let len = self.length();
+    pub fn chunk_count(&self) -> ECSResult<usize> {
+        let len = self.length()?;
         if len == 0 {
-            0
+            Ok(0)
         } else {
-            ((len - 1) / CHUNK_CAP) + 1
+            Ok(((len - 1) / CHUNK_CAP) + 1)
         }
     }
 
@@ -305,18 +323,18 @@ impl Archetype {
     /// ## Invariants
     /// Must reflect row count across all component attributes.
 
-    pub fn chunk_valid_length(&self, chunk_index: usize) -> usize {
-        let max_chunk = self.chunk_count().saturating_sub(1);
+    pub fn chunk_valid_length(&self, chunk_index: usize) -> ECSResult<usize> {
+        let max_chunk = self.chunk_count()?.saturating_sub(1);
         if chunk_index > max_chunk {
-            return 0;
+            return Ok(0);
         }
 
         if chunk_index < max_chunk {
-            CHUNK_CAP
+            Ok(CHUNK_CAP)
         } else {
-            let len = self.length();
+            let len = self.length()?;
             let used = len % CHUNK_CAP;
-            if used == 0 { CHUNK_CAP } else { used }
+            Ok(if used == 0 { CHUNK_CAP } else { used })
         }
     }
 
@@ -336,39 +354,38 @@ impl Archetype {
     pub fn insert_empty_component(
         &mut self,
         component_id: ComponentID,
-        component: Box<dyn TypeErasedAttribute>
-    ) {
+        component: Box<dyn TypeErasedAttribute>,
+    ) -> ECSResult<()> {
         let index = component_id as usize;
         if index >= COMPONENT_CAP {
-            panic!("component_id out of range");
+            return Err(SpawnError::InvalidComponentId.into());
         }
 
-        debug_assert!(self.components[index].is_none());
+        if self.components[index].is_some() {
+            return Err(ECSError::Internal("insert_empty_component: component already present"));
+        }
+
         self.components[index] = Some(LockedAttribute::new(component));
         self.signature.set(component_id);
+        Ok(())
     }
 
     /// Removes a component attribute from an empty archetype.
-    ///
-    /// ## Behavior
-    /// - Panics if the archetype still contains entities.
-    /// - Clears the signature bit for the component.
-    /// - Returns the removed attribute if present.
     ///
     /// ## Invariants
     /// Removing attributes in a populated archetype would break row alignment.
 
     pub fn remove_component(
         &mut self,
-        component_id: ComponentID
-    ) -> Result<Option<Box<dyn TypeErasedAttribute>>, SpawnError> {
-        if self.length() > 0 {
-            return Err(SpawnError::ArchetypeNotEmpty);
+        component_id: ComponentID,
+    ) -> ECSResult<Option<Box<dyn TypeErasedAttribute>>> {
+        if self.length()? > 0 {
+            return Err(SpawnError::ArchetypeNotEmpty.into());
         }
 
         let index = component_id as usize;
         if index >= COMPONENT_CAP {
-            return Err(SpawnError::InvalidComponentId);
+            return Err(SpawnError::InvalidComponentId.into());
         }
 
         let taken = self.components[index].take();
@@ -376,7 +393,12 @@ impl Archetype {
             self.signature.clear(component_id);
         }
 
-        Ok(taken.map(|locked| locked.into_inner()))
+        match taken {
+            None => Ok(None),
+            Some(locked) => Ok(Some(
+                locked.into_inner().map_err(|e| SpawnError::StoragePushFailedWith(e))?
+            )),
+        }
     }
 
     #[cfg(feature = "rollback")]
@@ -404,8 +426,8 @@ impl Archetype {
                 .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let mut src_guard = src_attr.write();
-            let mut dst_guard = dst_attr.write();
+            let mut src_guard = Self::lock_write_move(src_attr, component_id)?;
+            let mut dst_guard = Self::lock_write_move(dst_attr, component_id)?;
 
             let ((dst_chunk, dst_row), moved_from, rollback) =
                 match dst_guard.as_mut().push_from_dyn(src_guard.as_mut(), source_chunk, source_row) {
@@ -490,8 +512,8 @@ impl Archetype {
                 .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let mut src_guard = src_attr.write();
-            let mut dst_guard = dst_attr.write();
+            let mut src_guard = Self::lock_write_move(src_attr, component_id)?;
+            let mut dst_guard = Self::lock_write_move(dst_attr, component_id)?;
 
             let ((dst_chunk, dst_row), moved_from) =
                 dst_guard
@@ -548,8 +570,7 @@ impl Archetype {
         destination: &mut Archetype,
         destination_position: (ChunkID, RowID),
         added_components: Vec<(ComponentID, Box<dyn Any>)>,
-    ) -> Result<Vec<(ComponentID, Box<dyn Any>)>, MoveError>
-    {
+    ) -> Result<Vec<(ComponentID, Box<dyn Any>)>, MoveError> {
         let mut rollback_sequence: Vec<(ComponentID, Box<dyn Any>)> = Vec::new();
         let (dst_chunk, dst_row) = destination_position;
 
@@ -566,7 +587,7 @@ impl Archetype {
                 }
             };
 
-            let mut dst_guard = dst_attr.write();
+            let mut dst_guard = Self::lock_write_move(dst_attr, component_id)?;
 
             let ((chunk, row), rollback) =
                 match dst_guard.as_mut().push_dyn(value) {
@@ -626,7 +647,7 @@ impl Archetype {
                 .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let mut dst_guard = dst_attr.write();
+            let mut dst_guard = Self::lock_write_move(dst_attr, component_id)?;
 
             let (chunk, row) =
                 dst_guard
@@ -686,7 +707,7 @@ impl Archetype {
                 }
             };
 
-            let mut src_guard = src_attr.write();
+            let mut src_guard = Self::lock_write_move(src_attr, component_id)?;
 
             let (moved_from, rollback) =
                 match src_guard.as_mut().swap_remove_dyn(src_chunk, src_row) {
@@ -746,7 +767,7 @@ impl Archetype {
                 .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let mut src_guard = src_attr.write();
+            let mut src_guard = Self::lock_write_move(src_attr, component_id)?;
 
             let moved_from =
                 src_guard
@@ -793,7 +814,7 @@ impl Archetype {
         let (source_chunk, source_row) = source_position;
 
         {
-            let mut dest_meta = destination.meta.write().expect("meta lock poisoned");
+            let mut dest_meta = destination.meta.write().map_err(|_| MoveError::MetadataFailure)?;
             Self::ensure_capacity(&mut dest_meta, destination_chunk as usize + 1);
             dest_meta.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
         }
@@ -807,7 +828,7 @@ impl Archetype {
             },
         );
 
-        let mut src_meta = self.meta.write().expect("meta lock poisoned");
+        let mut src_meta = self.meta.write().map_err(|_| MoveError::MetadataFailure)?;
 
         match source_swap_position {
             Some((last_chunk, last_row)) => {
@@ -851,8 +872,8 @@ impl Archetype {
                 .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let mut dst_guard = dst_attr.write();
-            let mut src_guard = src_attr.write();
+            let mut dst_guard = Self::lock_write_move(dst_attr, rolled_back_id)?;
+            let mut src_guard = Self::lock_write_move(src_attr, rolled_back_id)?;
 
             dst_guard
                 .as_mut()
@@ -872,7 +893,7 @@ impl Archetype {
                 .as_ref()
                 .ok_or(MoveError::InconsistentStorage)?;
 
-            let mut guard = attr.write();
+            let mut guard = Self::lock_write_move(attr, rolled_back_id)?;
 
             guard
                 .as_mut()
@@ -1011,12 +1032,12 @@ impl Archetype {
         }
 
         {
-            let mut dmeta = destination.meta.write().expect("meta lock poisoned");
+            let mut dmeta = destination.meta.write().map_err(|_| MoveError::MetadataFailure)?;
             dmeta.length += 1;
         }
 
         {
-            let mut smeta = self.meta.write().expect("meta lock poisoned");
+            let mut smeta = self.meta.write().map_err(|_| MoveError::MetadataFailure)?;
             smeta.length = smeta.length.saturating_sub(1);
             if smeta.length == 0 {
                 smeta.entity_positions.clear();
@@ -1101,7 +1122,7 @@ impl Archetype {
         entity: Entity,
         source_position: (ChunkID, RowID),
         mut added_components: Vec<(ComponentID, Box<dyn Any>)>,
-    ) -> Result<(ChunkID, RowID), MoveError> {
+    ) -> ECSResult<(ChunkID, RowID)> {
         let mut shared_words = [0u64; SIGNATURE_SIZE];
         let mut source_only_words = [0u64; SIGNATURE_SIZE];
         let mut destination_only_words = [0u64; SIGNATURE_SIZE];
@@ -1132,7 +1153,7 @@ impl Archetype {
                 let (_id, val) = added_components.swap_remove(pos);
                 destination_only_values.push((need_id, val));
             } else {
-                return Err(MoveError::InconsistentStorage);
+                return Err(MoveError::InconsistentStorage.into());
             }
         }
 
@@ -1161,16 +1182,12 @@ impl Archetype {
         )?;
 
         {
-            let mut dmeta = destination.meta
-                .write()
-                .expect("meta lock poisoned");
+            let mut dmeta = destination.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
             dmeta.length += 1;
         }
 
         {
-            let mut smeta = self.meta
-                .write()
-                .expect("meta lock poisoned");
+            let mut smeta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
             smeta.length = smeta.length.saturating_sub(1);
             if smeta.length == 0 {
                 smeta.entity_positions.clear();
@@ -1199,12 +1216,12 @@ impl Archetype {
     /// ## Invariants
     /// Attribute alignment and entity position mappings must remain consistent.
 
-    pub fn spawn_on(
-        &mut self,
-        shards: &mut EntityShards,
-        shard_id: ShardID,
-        mut bundle: impl DynamicBundle
-    ) -> Result<Entity, SpawnError> {
+pub fn spawn_on(
+    &mut self,
+    shards: &mut EntityShards,
+    shard_id: ShardID,
+    mut bundle: impl DynamicBundle,
+) -> ECSResult<Entity> {
         let mut written_index: Vec<usize> = Vec::new();
         let mut reference_position: Option<(ChunkID, RowID)> = None;
 
@@ -1214,7 +1231,7 @@ impl Archetype {
             let component_id = index as ComponentID;
 
             // Lock column mutably for the push.
-            let mut guard = attr.write();
+            let mut guard = Self::lock_write_spawn(attr)?;
 
             // Identify expected type for errors.
             let type_id = guard.as_ref().element_type_id();
@@ -1225,12 +1242,13 @@ impl Archetype {
                 if let Some((c, r)) = reference_position {
                     for &j in &written_index {
                         if let Some(a) = self.components[j].as_ref() {
-                            let mut g = a.write();
-                            let _ = g.as_mut().swap_remove_dyn(c, r);
+                            if let Ok(mut g) = Self::lock_write_spawn(a) {
+                                let _ = g.as_mut().swap_remove_dyn(c, r);
+                            }
                         }
                     }
                 }
-                return Err(SpawnError::MissingComponent { type_id, name });
+                return Err(SpawnError::MissingComponent { type_id, name }.into());
             };
 
             let position = match guard.as_mut().push_dyn(value) {
@@ -1239,12 +1257,14 @@ impl Archetype {
                     if let Some((c, r)) = reference_position {
                         for &j in &written_index {
                             if let Some(a) = self.components[j].as_ref() {
-                                let mut g = a.write();
-                                let _ = g.as_mut().swap_remove_dyn(c, r);
+                                if let Ok(mut g) = Self::lock_write_spawn(a) {
+                                    let _ = g.as_mut().swap_remove_dyn(c, r);
+                                }
+
                             }
                         }
                     }
-                    return Err(SpawnError::StoragePushFailedWith(e));
+                    return Err(SpawnError::StoragePushFailedWith(e).into());
                 }
             };
 
@@ -1252,11 +1272,13 @@ impl Archetype {
                 if position != rp {
                     for &j in &written_index {
                         if let Some(a) = self.components[j].as_ref() {
-                            let mut g = a.write();
-                            let _ = g.as_mut().swap_remove_dyn(rp.0, rp.1);
+                            if let Ok(mut g) = Self::lock_write_spawn(a) {
+                                let _ = g.as_mut().swap_remove_dyn(rp.0, rp.1);
+                            }
+
                         }
                     }
-                    return Err(SpawnError::MisalignedStorage { expected: rp, got: position });
+                    return Err(SpawnError::MisalignedStorage { expected: rp, got: position }.into());
                 }
             } else {
                 reference_position = Some(position);
@@ -1266,37 +1288,37 @@ impl Archetype {
         }
 
         let Some((chunk, row)) = reference_position else {
-            return Err(SpawnError::EmptyArchetype);
+            return Err(SpawnError::EmptyArchetype.into());
         };
 
         // Reserve metadata slot & build location
         {
-            let mut meta = self.meta.write().expect("meta lock poisoned");
+            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
 
-            debug_assert!(
-                meta.entity_positions[chunk as usize][row as usize].is_none(),
-                "spawn_on_bundle: target entity slot is already occupied."
-            );
+            if meta.entity_positions[chunk as usize][row as usize].is_some() {
+                return Err(ECSError::Internal("spawn_on: target entity slot already occupied"));
+            }
         }
 
         let location = EntityLocation { archetype: self.archetype_id, chunk, row };
 
-        // Allocate entity handle (THIS was missing in your version)
+        // Allocate entity handle 
         let entity = shards.spawn_on(shard_id, location).map_err(|e| {
-            // rollback component writes on entity allocation failure
             for &j in &written_index {
                 if let Some(a) = self.components[j].as_ref() {
-                    let mut g = a.write();
-                    let _ = g.as_mut().swap_remove_dyn(chunk, row);
+                    if let Ok(mut g) = Self::lock_write_spawn(a) {
+                        let _ = g.as_mut().swap_remove_dyn(chunk, row);
+                    }
                 }
             }
-            e
+            ECSError::from(e)
         })?;
 
         // Write entity into metadata
         {
-            let mut meta = self.meta.write().expect("meta lock poisoned");
+            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
             meta.entity_positions[chunk as usize][row as usize] = Some(entity);
             meta.length += 1;
         }
@@ -1320,44 +1342,50 @@ impl Archetype {
     /// ## Invariants
     /// Component storage and entity metadata must remain synchronized.
 
-    pub fn despawn_on(&mut self, shards: &mut EntityShards, entity: Entity) -> Result<(), SpawnError> {
+    pub fn despawn_on(&mut self, shards: &mut EntityShards, entity: Entity) -> ECSResult<()> {
         let Some(location) = shards.get_location(entity) else {
-            return Err(SpawnError::StaleEntity);
+            return Err(SpawnError::StaleEntity.into());
         };
 
-        debug_assert_eq!(location.archetype, self.archetype_id, "entity not in this archetype");
+        if location.archetype != self.archetype_id {
+            return Err(ECSError::Internal("despawn_on: entity not in this archetype"));
+        }
 
         let entity_chunk = location.chunk;
         let entity_row = location.row;
 
         let ok = shards.despawn(entity);
         if !ok {
-            return Err(SpawnError::StaleEntity);
+            return Err(SpawnError::StaleEntity.into());
         }
 
         // Track whether swap_remove relocated another entity.
         let mut moved_from: Option<(ChunkID, RowID)> = None;
 
         for attr in self.components.iter().filter_map(|c| c.as_ref()) {
-            let mut guard = attr.write();
+            let mut guard = Self::lock_write_spawn(attr)?;
             let pos = guard
                 .as_mut()
                 .swap_remove_dyn(entity_chunk, entity_row)
                 .map_err(SpawnError::StorageSwapRemoveFailed)?;
 
             if let Some(expected) = moved_from {
-                debug_assert_eq!(pos, Some(expected), "all components must move same row");
+                if pos != Some(expected) {
+                    return Err(ECSError::Internal("despawn_on: component swap misalignment"));
+                }
             } else {
                 moved_from = pos;
             }
         }
 
         {
-            let mut meta = self.meta.write().expect("meta lock poisoned");
+            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+            Self::ensure_capacity(&mut meta, entity_chunk as usize + 1);
 
             if let Some((moved_chunk, moved_row)) = moved_from {
+                Self::ensure_capacity(&mut meta, moved_chunk as usize + 1);
                 let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize]
-                    .expect("moved slot should hold an entity; positions out of sync");
+                    .ok_or(ECSError::Internal("despawn_on: moved slot missing entity; metadata out of sync"))?;
 
                 meta.entity_positions[entity_chunk as usize][entity_row as usize] = Some(moved_entity);
 
@@ -1415,71 +1443,93 @@ impl Archetype {
         chunk: ChunkID,
         read_ids: &[ComponentID],
         write_ids: &[ComponentID],
-    ) -> ChunkBorrow<'a> {
-        let length = self.chunk_valid_length(chunk as usize);
+    ) -> ECSResult<ChunkBorrow<'a>> {
+        let length = self.chunk_valid_length(chunk as usize)
+            .map_err(|_| ExecutionError::InternalExecutionError)?;
 
         for &id in read_ids {
             if write_ids.contains(&id) {
-                panic!("component {} in both read/write", id);
+                return Err(ECSError::Execute(
+                    ExecutionError::InvalidQueryAccess {
+                        component_id: id,
+                        reason: crate::engine::error::InvalidAccessReason::ReadAndWrite,
+                    }
+                ));
             }
         }
 
-        // Deadlock prevention: lock in a stable order.
-        let mut read_sorted = read_ids.to_vec();
-        read_sorted.sort_unstable();
-        let mut write_sorted = write_ids.to_vec();
-        write_sorted.sort_unstable();
+        // Lock in a single global order across read + write
+        let mut all: Vec<(ComponentID, bool)> =
+            Vec::with_capacity(read_ids.len() + write_ids.len());
+        for &cid in read_ids {
+            all.push((cid, false));
+        }
+        for &cid in write_ids {
+            all.push((cid, true));
+        }
 
-        // Acquire read locks
+        all.sort_unstable_by_key(|(cid, _)| *cid);
+
+        // Acquire locks in one pass
         let mut read_guards: Vec<(ComponentID, RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>)> =
-            Vec::with_capacity(read_sorted.len());
-        for &cid in &read_sorted {
-            let attr = self.component_locked(cid).expect("missing read component");
-            read_guards.push((cid, attr.read()));
-        }
-
-        // Acquire write locks
+            Vec::with_capacity(read_ids.len());
         let mut write_guards: Vec<(ComponentID, RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>)> =
-            Vec::with_capacity(write_sorted.len());
-        for &cid in &write_sorted {
-            let attr = self.component_locked(cid).expect("missing write component");
-            write_guards.push((cid, attr.write()));
+            Vec::with_capacity(write_ids.len());
+
+        for (cid, is_write) in all {
+            let attr = self.component_locked(cid)
+                .ok_or(ExecutionError::MissingComponent { component_id: cid })?;
+
+            if is_write {
+                let g = attr.write().map_err(|_| ExecutionError::InternalExecutionError)?;
+                write_guards.push((cid, g));
+            } else {
+                let g = attr.read().map_err(|_| ExecutionError::InternalExecutionError)?;
+                read_guards.push((cid, g));
+            }
         }
 
-        // Build views in the original order
+        // Build read views in the original read_ids order
         let mut reads = Vec::with_capacity(read_ids.len());
         for &cid in read_ids {
-            let (_id, guard) = read_guards
+            let guard = read_guards
                 .iter()
                 .find(|(id, _)| *id == cid)
-                .expect("read guard missing for component");
+                .map(|(_, g)| g)
+                .ok_or(ExecutionError::InternalExecutionError)?;
+
             let (ptr, bytes) = guard
                 .as_ref()
                 .chunk_bytes(chunk, length)
-                .expect("missing read component data");
+                .ok_or(ExecutionError::InternalExecutionError)?;
+
             reads.push((ptr, bytes));
         }
 
+        // Build write views in the original write_ids order
         let mut writes = Vec::with_capacity(write_ids.len());
         for &cid in write_ids {
-            let (_id, guard) = write_guards
+            let guard = write_guards
                 .iter_mut()
                 .find(|(id, _)| *id == cid)
-                .expect("write guard missing for component");
+                .map(|(_, g)| g)
+                .ok_or(ExecutionError::InternalExecutionError)?;
+
             let (ptr, _bytes) = guard
                 .as_mut()
                 .chunk_bytes_mut(chunk, length)
-                .expect("missing write component data");
+                .ok_or(ExecutionError::InternalExecutionError)?;
+
             writes.push(ptr);
         }
 
-        ChunkBorrow {
+        Ok(ChunkBorrow {
             length,
             reads,
             writes,
             _read_guards: read_guards,
             _write_guards: write_guards,
-        }
+        })
     }
 
 
@@ -1496,26 +1546,25 @@ impl Archetype {
 
     pub fn from_components<T: IntoIterator<Item = std::any::TypeId>>(
         archetype_id: ArchetypeID,
-        types: T
-    ) -> Self {
+        types: T,
+    ) -> ECSResult<Self> {
         let mut signature = Signature::default();
         let mut component_ids = Vec::new();
 
         for type_id in types {
-            let component_id = component_id_of_type_id(type_id)
-                .expect("component type must be registered before creating archetypes.");
+            let component_id = component_id_of_type_id(type_id)?
+                .ok_or(ECSError::Internal("from_components: component type not registered"))?;
             signature.set(component_id);
             component_ids.push(component_id);
         }
 
-        let archetype = Self::new(archetype_id, signature);
+        let archetype = Self::new(archetype_id, signature)?;
 
-        debug_assert!(
-            component_ids.iter().all(|&id| archetype.has(id)),
-            "archetype signature and storage must match"
-        );
+        if !component_ids.iter().all(|&id| archetype.has(id)) {
+            return Err(ECSError::Internal("from_components: archetype signature and storage mismatch"));
+        }
 
-        archetype
+        Ok(archetype)
     }
 }
 
@@ -1532,6 +1581,7 @@ pub struct ArchetypeMatch {
     pub chunks: usize,
 }
 
-fn make_empty_component_for(component_id: ComponentID) -> Box<dyn TypeErasedAttribute> {
-    get_component_storage_factory(component_id)()
+fn make_empty_component_for(component_id: ComponentID) -> ECSResult<Box<dyn TypeErasedAttribute>> {
+    let factory = get_component_storage_factory(component_id)?;
+    Ok(factory())
 }

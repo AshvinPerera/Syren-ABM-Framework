@@ -7,7 +7,12 @@
 use crate::engine::types::{ComponentID};
 use crate::engine::component::{Signature, component_id_of};
 use crate::engine::systems::AccessSets;
-use crate::engine::error::{ExecutionError, InvalidAccessReason};
+use crate::engine::error::{
+    ExecutionError,
+    InvalidAccessReason,
+    ECSError,
+    ECSResult,
+};
 
 
 /// Component signature used for query matching.
@@ -37,18 +42,24 @@ impl QuerySignature {
 }
 
 /// Marks a component type as read-only in a query signature.
-pub fn set_read<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
-    signature.read.set(component_id_of::<T>());
+pub fn set_read<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> ECSResult<()> {
+    let id = component_id_of::<T>()?;
+    signature.read.set(id);
+    Ok(())
 }
 
 /// Marks a component type as writable in a query signature.
-pub fn set_write<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
-    signature.write.set(component_id_of::<T>());
+pub fn set_write<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> ECSResult<()> {
+    let id = component_id_of::<T>()?;
+    signature.write.set(id);
+    Ok(())
 }
 
 /// Excludes a component type from a query signature.
-pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) {
-    signature.without.set(component_id_of::<T>());
+pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> ECSResult<()> {
+    let id = component_id_of::<T>()?;
+    signature.without.set(id);
+    Ok(())
 }
 
 /// An immutable, fully constructed ECS query description.
@@ -97,7 +108,13 @@ pub struct QueryBuilder {
 
 impl QueryBuilder {
     /// Creates a new, empty query builder.
-    pub fn new() -> Self { Self { signature: QuerySignature::default(), reads: vec![], writes: vec![] } }
+    pub fn new() -> Self {
+        Self {
+            signature: QuerySignature::default(),
+            reads: vec![],
+            writes: vec![],
+        }
+    }
 
     /// Declares read-only access to component `T`.
     ///
@@ -106,11 +123,12 @@ impl QueryBuilder {
     /// - records `T` as read-access for conflict analysis,
     /// - appends `T`’s component ID to the read list.
     
-    pub fn read<T: 'static + Send + Sync>(mut self) -> Self {
-        set_read::<T>(&mut self.signature);
-        self.reads.push(component_id_of::<T>());
-        self
+    pub fn read<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
+        set_read::<T>(&mut self.signature)?;
+        self.reads.push(component_id_of::<T>()?);
+        Ok(self)
     }
+
     /// Declares mutable access to component `T`.
     ///
     /// This:
@@ -118,39 +136,39 @@ impl QueryBuilder {
     /// - records `T` as write-access for conflict analysis,
     /// - appends `T`’s component ID to the write list.
 
-    pub fn write<T: 'static + Send + Sync>(mut self) -> Self {
-        set_write::<T>(&mut self.signature);
-        self.writes.push(component_id_of::<T>());
-        self
+    pub fn write<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
+        set_write::<T>(&mut self.signature)?;
+        self.writes.push(component_id_of::<T>()?);
+        Ok(self)
     }
 
 
     /// Excludes component `T` from matching archetypes. 
-    pub fn without<T: 'static + Send + Sync>(mut self) -> Self {
-        set_without::<T>(&mut self.signature);
-        self
+    pub fn without<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
+        set_without::<T>(&mut self.signature)?;
+        Ok(self)
     }
 
     /// Finalizes the query description and returns an immutable [`BuiltQuery`].  
-    pub fn build(mut self) -> Result<BuiltQuery, ExecutionError> {
+        pub fn build(mut self) -> ECSResult<BuiltQuery> {
         self.reads.sort_unstable();
         self.writes.sort_unstable();
 
         // Detect duplicates
         for w in self.reads.windows(2) {
             if w[0] == w[1] {
-                return Err(ExecutionError::InvalidQueryAccess {
+                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
                     component_id: w[0],
                     reason: InvalidAccessReason::DuplicateAccess,
-                });
+                }));
             }
         }
         for w in self.writes.windows(2) {
             if w[0] == w[1] {
-                return Err(ExecutionError::InvalidQueryAccess {
+                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
                     component_id: w[0],
                     reason: InvalidAccessReason::DuplicateAccess,
-                });
+                }));
             }
         }
 
@@ -160,15 +178,19 @@ impl QueryBuilder {
         // Disallow overlap: read & write same component
         for component_id in &self.reads {
             if self.writes.binary_search(component_id).is_ok() {
-                return Err(ExecutionError::InvalidQueryAccess {
+                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
                     component_id: *component_id,
                     reason: InvalidAccessReason::ReadAndWrite,
-                });
+                }));
             }
         }
 
         // Disallow write & without overlap
-        for (word_idx, (&w_word, &without_word)) in self.signature.write.components.iter()
+        for (word_idx, (&w_word, &without_word)) in self
+            .signature
+            .write
+            .components
+            .iter()
             .zip(self.signature.without.components.iter())
             .enumerate()
         {
@@ -176,10 +198,10 @@ impl QueryBuilder {
             if overlap != 0 {
                 let bit = overlap.trailing_zeros() as u32;
                 let component_id = (word_idx as u32) * 64 + bit;
-                return Err(ExecutionError::InvalidQueryAccess {
+                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
                     component_id: component_id as ComponentID,
                     reason: InvalidAccessReason::WriteAndWithout,
-                });
+                }));
             }
         }
 
@@ -194,8 +216,10 @@ impl QueryBuilder {
     ///
     /// This is used by schedulers to detect conflicts between
     /// queries before execution.
-
     pub fn access_sets(&self) -> AccessSets {
-        AccessSets { read: self.signature.read, write: self.signature.write }
+        AccessSets {
+            read: self.signature.read,
+            write: self.signature.write,
+        }
     }
 }
