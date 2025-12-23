@@ -680,6 +680,8 @@ impl std::error::Error for MoveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             MoveError::PushFromFailed { source_error, .. } => Some(source_error),
+            MoveError::PushFailed { source_error, .. } => Some(source_error),
+            MoveError::SwapRemoveError { source_error, .. } => Some(source_error),
             _ => None,
         }
     }
@@ -777,8 +779,13 @@ pub enum ExecutionError {
 
     SchedulerInvariantViolation,
 
-    /// Unsafe execution path was invoked incorrectly.
+    /// A synchronization primitive was poisoned (panic while held).
+    LockPoisoned {
+        /// message for the lock poisoned error
+        what: &'static str,
+    },
 
+    /// Unsafe execution path was invoked incorrectly.
     InternalExecutionError,
 }
 
@@ -813,9 +820,9 @@ impl fmt::Display for ExecutionError {
                 f.write_str("scheduler violated declared access invariants")
             }
 
-            ExecutionError::InternalExecutionError => {
-                f.write_str("internal ECS execution error")
-            }
+            ExecutionError::LockPoisoned { what } => write!(f, "lock poisoned: {}", what),
+            ExecutionError::InternalExecutionError => f.write_str("internal ECS execution error"),
+            
         }
     }
 }

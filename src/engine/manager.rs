@@ -231,7 +231,7 @@ impl ECSManager {
             let mut queue = self
                 .deferred
                 .lock()
-                .map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
+                .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "deferred command queue" }))?;
             std::mem::take(&mut *queue)
         };
 
@@ -247,16 +247,15 @@ impl ECSManager {
         let g = self
             .phase
             .read()
-            .map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
+            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "ECS phase (read)" }))?;
         Ok(PhaseRead(g))
     }
 
     #[inline]
     pub(crate) fn phase_write(&self) -> ECSResult<PhaseWrite<'_>> {
-        let g = self
-            .phase
-            .write()
-            .map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
+        let g = self.phase.write().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned { what: "ECS phase (write)" })
+        })?;
         Ok(PhaseWrite(g))
     }
 
@@ -324,11 +323,9 @@ impl<'a> ECSReference<'a> {
     /// Queue a structural command.
     #[inline]
     pub fn defer(&self, command: Command) -> ECSResult<()> {
-        let mut queue = self
-            .manager
-            .deferred
-            .lock()
-            .map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
+        let mut queue = self.manager.deferred.lock().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned { what: "deferred command queue" })
+        })?;
         queue.push(command);
         Ok(())
     }
@@ -968,7 +965,7 @@ impl ECSData {
                         Ok(g) => g,
                         Err(_) => {
                             if let Ok(mut e) = err.lock() {
-                                *e = Some(ExecutionError::InternalExecutionError);
+                                *e = Some(ExecutionError::LockPoisoned { what: "component column lock (read)" });
                             }
                             return;
                         }
@@ -978,7 +975,7 @@ impl ECSData {
                         Some(v) => v,
                         None => {
                             if let Ok(mut e) = err.lock() {
-                                *e = Some(ExecutionError::InternalExecutionError);
+                                *e = Some(ExecutionError::LockPoisoned { what: "component column lock (read)" });
                             }
                             return;
                         }

@@ -272,7 +272,7 @@ impl Scheduler {
             match err.into_inner() {
                 Ok(Some(e)) => return Err(e),
                 Ok(None) => {}
-                Err(_) => return Err(ECSError::from(ExecutionError::InternalExecutionError)),
+                Err(_) => return Err(ECSError::from(ExecutionError::LockPoisoned { what: "scheduler error latch mutex" })),
             }
         }
 
