@@ -405,7 +405,7 @@ impl ECSReference<'_> {
         A: 'static + Send + Sync,
     {
         if query.reads.len() != 1 || !query.writes.is_empty() {
-            return Err(ECSError::Internal("for_each_read: query must have exactly 1 read and 0 writes"));
+            return Err(ECSError::Internal("for_each_read: query must have exactly 1 read and 0 writes".into()));
         }
 
         self.for_each_abstraction(query, move |reads, _| unsafe {
@@ -424,7 +424,7 @@ impl ECSReference<'_> {
     ) -> ECSResult<()> {
         if !query.reads.is_empty() || query.writes.len() != 1 {
             return Err(ECSError::Internal(
-                "for_each_write: query must have exactly 0 reads and 1 write",
+                "for_each_write: query must have exactly 0 reads and 1 write".into(),
             ));
         }
 
@@ -443,7 +443,7 @@ impl ECSReference<'_> {
     ) -> ECSResult<()> {
         if query.reads.len() != 2 || !query.writes.is_empty() {
             return Err(ECSError::Internal(
-                "for_each_read2: query must have exactly 2 reads and 0 writes",
+                "for_each_read2: query must have exactly 2 reads and 0 writes".into(),
             ));
         }
 
@@ -462,7 +462,7 @@ impl ECSReference<'_> {
     ) -> ECSResult<()> {
         if query.reads.len() != 1 || query.writes.len() != 1 {
             return Err(ECSError::Internal(
-                "for_each_read_write: query must have exactly 1 read and 1 write",
+                "for_each_read_write: query must have exactly 1 read and 1 write".into(),
             ));
         }
 
@@ -481,7 +481,7 @@ impl ECSReference<'_> {
     ) -> ECSResult<()> {
         if query.reads.len() != 2 || query.writes.len() != 1 {
             return Err(ECSError::Internal(
-                "for_each_read2_write_1: query must have exactly 2 reads and 1 write",
+                "for_each_read2_write_1: query must have exactly 2 reads and 1 write".into(),
             ));
         }
 
@@ -502,7 +502,7 @@ impl ECSReference<'_> {
     ) -> ECSResult<()> {
         if query.reads.len() != 2 || query.writes.len() != 2 {
             return Err(ECSError::Internal(
-                "for_each_read2_write2: query must have exactly 2 reads and 2 writes",
+                "for_each_read2_write2: query must have exactly 2 reads and 2 writes".into(),
             ));
         }
 
@@ -619,7 +619,7 @@ impl ECSData {
         b: ArchetypeID,
     ) -> ECSResult<(&mut Archetype, &mut Archetype)> {
         if a == b {
-            return Err(ECSError::Internal("get_archetype_pair_mut: a == b"));
+            return Err(ECSError::Internal("get_archetype_pair_mut: a == b".into()));
         }
 
         let (low, high) = if a < b { (a, b) } else { (b, a) };
@@ -710,15 +710,11 @@ impl ECSData {
         let (source, destination) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        // Ensure the newly added component exists in destination storage
-        let factory = || {
-            make_empty_component(added_component_id)
-                .expect("component factory validated earlier")
-        };
+        let factory = || make_empty_component(added_component_id);
 
         destination
             .ensure_component(added_component_id, factory)
-            .map_err(|_| ECSError::Internal("add_component: destination.ensure_component failed"))?;
+            .map_err(ECSError::from)?;
 
         // Ensure all shared components exist in destination storage
         for cid in source_sig.iterate_over_components() {
@@ -726,14 +722,11 @@ impl ECSData {
                 continue;
             }
 
-            let factory = || {
-                make_empty_component(cid)
-                    .expect("component factory validated earlier")
-            };
+            let factory = || make_empty_component(cid);
 
             destination
                 .ensure_component(cid, factory)
-                .map_err(|_| ECSError::Internal("add_component: destination.ensure_component failed"))?;
+                .map_err(ECSError::from)?;
 
         }
 
@@ -824,14 +817,11 @@ impl ECSData {
                 continue;
             }
 
-            let factory = || {
-                make_empty_component(cid)
-                    .expect("component factory validated earlier")
-            };
+            let factory = || make_empty_component(cid);
 
             dest_arch
                 .ensure_component(cid, factory)
-                .map_err(|_| ECSError::Internal("remove_component: dest_arch.ensure_component failed"))?;
+                .map_err(ECSError::from)?;
         }
 
         source_arch.move_row_to_archetype(

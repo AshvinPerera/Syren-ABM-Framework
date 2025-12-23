@@ -34,7 +34,7 @@ use std::{
 
 use crate::engine::storage::{Attribute, TypeErasedAttribute};
 use crate::engine::types::{ComponentID, COMPONENT_CAP, SIGNATURE_SIZE};
-use crate::engine::error::{ECSResult, RegistryError};
+use crate::engine::error::{ECSResult, RegistryError, RegistryResult};
 
 
 /// Factory function for constructing an empty type-erased component attribute column.
@@ -535,20 +535,21 @@ impl std::fmt::Display for ComponentDesc {
 /// ## Purpose
 /// Used by archetype construction to allocate an empty attribute column for a component.
 ///
-/// ## Panics
-/// Panics if no factory was registered for this component ID.
+/// ## Errors
+/// Returns `RegistryError::MissingFactory` if the ID is out of range or no factory exists.
+/// Returns `RegistryError::PoisonedLock` if the registry lock is poisoned.
 
-pub fn get_component_storage_factory(component_id: ComponentID) -> ECSResult<FactoryFn> {
+pub fn get_component_storage_factory(component_id: ComponentID) -> RegistryResult<FactoryFn> {
     let idx = component_id as usize;
     if idx >= COMPONENT_CAP {
-        return Err(RegistryError::MissingFactory { component_id }.into());
+        return Err(RegistryError::MissingFactory { component_id });
     }
 
     let factories = component_factories()
         .read()
         .map_err(|_| RegistryError::PoisonedLock)?;
 
-    factories[idx].ok_or_else(|| RegistryError::MissingFactory { component_id }.into())
+    factories[idx].ok_or_else(|| RegistryError::MissingFactory { component_id })
 }
 
 /// Creates an empty type-erased storage column for `component_id`.
@@ -556,10 +557,9 @@ pub fn get_component_storage_factory(component_id: ComponentID) -> ECSResult<Fac
 /// ## Purpose
 /// Convenience wrapper around `get_component_storage_factory`.
 ///
-/// ## Panics
-/// Panics if no factory exists for the provided ID.
-
-pub fn make_empty_component(component_id: ComponentID) -> ECSResult<Box<dyn TypeErasedAttribute>> {
+/// ## Errors
+/// Propagates `RegistryError` if the factory is missing or the registry is poisoned.
+pub fn make_empty_component(component_id: ComponentID) -> RegistryResult<Box<dyn TypeErasedAttribute>> {
     let factory = get_component_storage_factory(component_id)?;
     Ok(factory())
 }

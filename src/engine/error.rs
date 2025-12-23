@@ -85,7 +85,7 @@
 //!   user-facing diagnostics.
 //! * [`fmt::Debug`] retains full structural detail for debugging and telemetry.
 
-
+use std::borrow::Cow;
 use std::fmt;
 use std::any::TypeId;
 
@@ -493,6 +493,9 @@ pub enum SpawnError {
 
     /// An invalid or unregistered component ID was encountered.
     InvalidComponentId,
+
+    /// Component registry / factory error encountered during spawn or structural mutation.
+    Registry(RegistryError),
 }
 
 impl fmt::Display for SpawnError {
@@ -514,11 +517,23 @@ impl fmt::Display for SpawnError {
             ),
             SpawnError::ShardLockPoisoned => write!(f, "shard lock poisoned"),
             SpawnError::InvalidComponentId => write!(f, "invalid component id"),
+            SpawnError::Registry(e) => write!(f, "registry error: {e}"),
         }
     }
 }
 
-impl std::error::Error for SpawnError {}
+impl std::error::Error for SpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SpawnError::Capacity(e) => Some(e),
+            SpawnError::ShardBounds(e) => Some(e),
+            SpawnError::StorageSwapRemoveFailed(e) => Some(e),
+            SpawnError::StoragePushFailedWith(e) => Some(e),
+            SpawnError::Registry(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<CapacityError> for SpawnError {
     fn from(e: CapacityError) -> Self { SpawnError::Capacity(e) }
@@ -528,6 +543,9 @@ impl From<ShardBoundsError> for SpawnError {
 }
 impl From<AttributeError> for SpawnError {
     fn from(e: AttributeError) -> Self { SpawnError::StoragePushFailedWith(e) }
+}
+impl From<RegistryError> for SpawnError {
+    fn from(e: RegistryError) -> Self { SpawnError::Registry(e) }
 }
 
 
@@ -658,7 +676,14 @@ impl fmt::Display for MoveError {
     }
 }
 
-impl std::error::Error for MoveError {}
+impl std::error::Error for MoveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MoveError::PushFromFailed { source_error, .. } => Some(source_error),
+            _ => None,
+        }
+    }
+}
 
 /// Kind of component access requested or held during ECS execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,6 +825,9 @@ impl std::error::Error for ExecutionError {}
 /// Result type used by the ECS engine.
 pub type ECSResult<T> = Result<T, ECSError>;
 
+/// Result type used by the component registry and factories.
+pub type RegistryResult<T> = Result<T, RegistryError>;
+
 /// Unified error type for the public ECS API.
 #[derive(Debug)]
 pub enum ECSError {
@@ -813,8 +841,8 @@ pub enum ECSError {
     /// Component registry and component factory errors
     Registry(RegistryError),
 
-    /// Internal lock poisoning / invariant failures
-    Internal(&'static str),
+    /// Internal lock poisoning / invariant failures.
+    Internal(Cow<'static, str>),
 }
 
 impl std::fmt::Display for ECSError {
@@ -829,7 +857,17 @@ impl std::fmt::Display for ECSError {
     }
 }
 
-impl std::error::Error for ECSError {}
+impl std::error::Error for ECSError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ECSError::Spawn(e) => Some(e),
+            ECSError::Execute(e) => Some(e),
+            ECSError::Move(e) => Some(e),
+            ECSError::Registry(e) => Some(e),
+            ECSError::Internal(_) => None,
+        }
+    }
+}
 
 impl From<SpawnError> for ECSError {
     fn from(e: SpawnError) -> Self { ECSError::Spawn(e) }

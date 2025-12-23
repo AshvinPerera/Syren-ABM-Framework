@@ -83,6 +83,7 @@ use crate::engine::error::{
     ExecutionError,
     ECSError,
     ECSResult,
+    RegistryError
 };
 
 
@@ -194,7 +195,7 @@ impl Archetype {
     /// This reflects logical count only; physical chunk storage may contain unused rows.
 
     pub fn length(&self) -> ECSResult<usize> {
-        Ok(self.meta.read().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?.length)
+        Ok(self.meta.read().map_err(|_| ECSError::Internal("archetype meta lock poisoned".into()))?.length)
     }
 
     /// Returns the `ArchetypeID` associated with this archetype.
@@ -250,7 +251,7 @@ impl Archetype {
     pub fn ensure_component(
         &mut self,
         component_id: ComponentID,
-        factory: impl FnOnce() -> Box<dyn TypeErasedAttribute>
+        factory: impl FnOnce() -> Result<Box<dyn TypeErasedAttribute>, RegistryError>,
     ) -> Result<(), SpawnError> {
         let index = component_id as usize;
         if index >= COMPONENT_CAP {
@@ -258,7 +259,8 @@ impl Archetype {
         }
 
         if self.components[index].is_none() {
-            self.components[index] = Some(LockedAttribute::new(factory()));
+            let col = factory()?;
+            self.components[index] = Some(LockedAttribute::new(col));
             self.signature.set(component_id);
         }
 
@@ -362,7 +364,7 @@ impl Archetype {
         }
 
         if self.components[index].is_some() {
-            return Err(ECSError::Internal("insert_empty_component: component already present"));
+            return Err(ECSError::Internal("insert_empty_component: component already present".into()));
         }
 
         self.components[index] = Some(LockedAttribute::new(component));
@@ -1182,12 +1184,12 @@ impl Archetype {
         )?;
 
         {
-            let mut dmeta = destination.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+            let mut dmeta = destination.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned".into()))?;
             dmeta.length += 1;
         }
 
         {
-            let mut smeta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+            let mut smeta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned".into()))?;
             smeta.length = smeta.length.saturating_sub(1);
             if smeta.length == 0 {
                 smeta.entity_positions.clear();
@@ -1293,12 +1295,12 @@ pub fn spawn_on(
 
         // Reserve metadata slot & build location
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned".into()))?;
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
 
             if meta.entity_positions[chunk as usize][row as usize].is_some() {
-                return Err(ECSError::Internal("spawn_on: target entity slot already occupied"));
+                return Err(ECSError::Internal("spawn_on: target entity slot already occupied".into()));
             }
         }
 
@@ -1318,7 +1320,7 @@ pub fn spawn_on(
 
         // Write entity into metadata
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned".into()))?;
             meta.entity_positions[chunk as usize][row as usize] = Some(entity);
             meta.length += 1;
         }
@@ -1348,7 +1350,7 @@ pub fn spawn_on(
         };
 
         if location.archetype != self.archetype_id {
-            return Err(ECSError::Internal("despawn_on: entity not in this archetype"));
+            return Err(ECSError::Internal("despawn_on: entity not in this archetype".into()));
         }
 
         let entity_chunk = location.chunk;
@@ -1371,7 +1373,7 @@ pub fn spawn_on(
 
             if let Some(expected) = moved_from {
                 if pos != Some(expected) {
-                    return Err(ECSError::Internal("despawn_on: component swap misalignment"));
+                    return Err(ECSError::Internal("despawn_on: component swap misalignment".into()));
                 }
             } else {
                 moved_from = pos;
@@ -1379,13 +1381,13 @@ pub fn spawn_on(
         }
 
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned"))?;
+            let mut meta = self.meta.write().map_err(|_| ECSError::Internal("archetype meta lock poisoned".into()))?;
             Self::ensure_capacity(&mut meta, entity_chunk as usize + 1);
 
             if let Some((moved_chunk, moved_row)) = moved_from {
                 Self::ensure_capacity(&mut meta, moved_chunk as usize + 1);
                 let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize]
-                    .ok_or(ECSError::Internal("despawn_on: moved slot missing entity; metadata out of sync"))?;
+                    .ok_or(ECSError::Internal("despawn_on: moved slot missing entity; metadata out of sync".into()))?;
 
                 meta.entity_positions[entity_chunk as usize][entity_row as usize] = Some(moved_entity);
 
@@ -1553,7 +1555,7 @@ pub fn spawn_on(
 
         for type_id in types {
             let component_id = component_id_of_type_id(type_id)?
-                .ok_or(ECSError::Internal("from_components: component type not registered"))?;
+                .ok_or(ECSError::Internal("from_components: component type not registered".into()))?;
             signature.set(component_id);
             component_ids.push(component_id);
         }
@@ -1561,7 +1563,7 @@ pub fn spawn_on(
         let archetype = Self::new(archetype_id, signature)?;
 
         if !component_ids.iter().all(|&id| archetype.has(id)) {
-            return Err(ECSError::Internal("from_components: archetype signature and storage mismatch"));
+            return Err(ECSError::Internal("from_components: archetype signature and storage mismatch".into()));
         }
 
         Ok(archetype)
