@@ -35,7 +35,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::engine::types::{ComponentID, COMPONENT_CAP};
-use crate::engine::error::{ExecutionError, AccessKind, InvalidAccessReason};
+use crate::engine::error::{ExecutionError, InvalidAccessReason};
 
 
 /// Tracks runtime read/write borrows for each component type.
@@ -56,6 +56,14 @@ impl BorrowTracker {
         Self { states: std::array::from_fn(|_| AtomicUsize::new(0)) }
     }
 
+    /// 
+    #[inline]
+    pub fn clear(&self) {
+        for state in &self.states {
+            state.store(0, Ordering::Release);
+        }
+    }
+
     /// Acquires a **shared (read) borrow** for the given component.
     ///
     /// This method spins until no writer is present, then atomically
@@ -72,33 +80,24 @@ impl BorrowTracker {
     /// - `N → N+1` : additional reader
   
     pub fn acquire_read(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
-        let s = &self.states[component_id as usize];
-        let current = s.load(Ordering::Acquire);
+        let state = &self.states[component_id as usize];
 
-        if current == 1 {
-            return Err(ExecutionError::BorrowConflict {
-                component_id,
-                held: AccessKind::Write,
-                requested: AccessKind::Read,
-            });
-        }
+        loop {
+            let current_state = state.load(Ordering::Acquire);
 
-        for _ in 0..32 {
-            let cur = s.load(Ordering::Acquire);
-            if cur == 1 {
-                return Err(ExecutionError::BorrowConflict {
-                    component_id,
-                    held: AccessKind::Write,
-                    requested: AccessKind::Read,
-                });
+            if current_state == 1 {
+                std::hint::spin_loop();
+                continue;
             }
-            let next = if cur == 0 { 2 } else { cur + 1 };
-            if s.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+
+            let next = if current_state == 0 { 2 } else { current_state + 1 };
+
+            if state.compare_exchange_weak(current_state, next, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
                 return Ok(());
             }
-        }
 
-        Err(ExecutionError::InternalExecutionError)
+            std::hint::spin_loop();
+        }
     }
 
 
@@ -136,22 +135,21 @@ impl BorrowTracker {
     /// - `0 → 1`
 
     pub fn acquire_write(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
-        let s = &self.states[component_id as usize];
-        let current = s.load(Ordering::Acquire);
+        let state = &self.states[component_id as usize];
 
-        if current != 0 {
-            let held = if current == 1 { AccessKind::Write } else { AccessKind::Read };
-            return Err(ExecutionError::BorrowConflict {
-                component_id,
-                held,
-                requested: AccessKind::Write,
-            });
-        }
+        loop {
+            let current_state = state.load(Ordering::Acquire);
 
-        if s.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            Ok(())
-        } else {
-            Err(ExecutionError::InternalExecutionError)
+            if current_state != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+
+            if state.compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                return Ok(());
+            }
+
+            std::hint::spin_loop();
         }
     }
 
