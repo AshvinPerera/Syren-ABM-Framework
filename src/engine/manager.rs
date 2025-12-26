@@ -955,50 +955,45 @@ impl ECSData {
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
     ) -> Result<(), ExecutionError> {
-        let f = Arc::new(f);
         let matches = self.matching_archetypes(&query.signature)?;
+
+        // Share callback across spawned tasks without moving it.
+        let f = Arc::new(f);
 
         for matched_archetype in matches {
             let archetype = &self.archetypes[matched_archetype.archetype_id as usize];
 
-            // acquire guards once per archetype
-
+            // ---- Acquire guards once per archetype ----
             let mut read_guards: Vec<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>> =
                 Vec::with_capacity(query.reads.len());
-
             let mut write_guards: Vec<RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>> =
                 Vec::with_capacity(query.writes.len());
 
-            // Collect read guards
             for &component_id in &query.reads {
                 let locked = archetype
                     .component_locked(component_id)
                     .ok_or(ExecutionError::MissingComponent { component_id })?;
 
-                let guard = locked
-                .read()
-                .map_err(|_| ExecutionError::LockPoisoned {
+                let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
                     what: "component column (read)",
                 })?;
 
                 read_guards.push(guard);
             }
 
-            // Collect write guards
             for &component_id in &query.writes {
                 let locked = archetype
                     .component_locked(component_id)
                     .ok_or(ExecutionError::MissingComponent { component_id })?;
 
-                let guard = locked
-                .write()
-                .map_err(|_| ExecutionError::LockPoisoned {
+                let guard = locked.write().map_err(|_| ExecutionError::LockPoisoned {
                     what: "component column (write)",
                 })?;
 
                 write_guards.push(guard);
             }
 
+            // ---- Discover chunk sizes ----
             let chunk_count = archetype
                 .chunk_count()
                 .map_err(|_| ExecutionError::InternalExecutionError)?;
@@ -1015,16 +1010,16 @@ impl ECSData {
                 chunk_lens.push(len);
             }
 
-            // Precompute pointers
+            // ---- Precompute pointers (address as usize is Send/Sync) ----
             let n_reads = read_guards.len();
             let n_writes = write_guards.len();
 
             let mut read_ptrs: Vec<(usize, usize)> = Vec::with_capacity(chunk_count * n_reads);
             let mut write_ptrs: Vec<(usize, usize)> = Vec::with_capacity(chunk_count * n_writes);
 
-            // Build pointer tables
             for chunk in 0..chunk_count {
                 let len = chunk_lens[chunk];
+
                 if len == 0 {
                     for _ in 0..n_reads {
                         read_ptrs.push((0usize, 0));
@@ -1039,7 +1034,6 @@ impl ECSData {
                     .try_into()
                     .map_err(|_| ExecutionError::InternalExecutionError)?;
 
-                // Read pointers
                 for g in &read_guards {
                     let (ptr, bytes) = g
                         .chunk_bytes(chunk_id, len)
@@ -1047,7 +1041,6 @@ impl ECSData {
                     read_ptrs.push((ptr as usize, bytes));
                 }
 
-                // Write pointers
                 for g in &mut write_guards {
                     let (ptr, bytes) = g
                         .chunk_bytes_mut(chunk_id, len)
@@ -1065,74 +1058,95 @@ impl ECSData {
                 write_ptrs,
             };
 
-            let views_ref = &views;
-
+            // ---- Error latch (rare path) ----
             let abort = Arc::new(AtomicBool::new(false));
             let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
 
+            // ---- Phase 2/3 performance fix: batch chunks into fewer tasks ----
+            //
+            // Use a coarse grainsize so each task does enough work to amortize
+            // Rayon scheduling overhead. This is the main reason your run got slower.
+            let threads = rayon::current_num_threads().max(1);
+
+            // heuristic: at least 8 chunks per task, or distribute evenly
+            let grainsize = (views.chunk_count / threads).max(8);
+
+            // Borrow views by reference (avoid moving Vecs into closures).
+            let views_ref = &views;
+
             rayon::scope(|s| {
-                for chunk in 0..views_ref.chunk_count {
+                let mut start = 0usize;
+                while start < views_ref.chunk_count {
+                    let end = (start + grainsize).min(views_ref.chunk_count);
+
                     let abort = abort.clone();
                     let err = err.clone();
                     let f = f.clone();
                     let views = views_ref;
-                    let chunk = chunk;
 
                     s.spawn(move |_| {
-                        if abort.load(Ordering::Acquire) {
-                            return;
-                        }
-
-                        let fail = |e: ExecutionError| {
-                            abort.store(true, Ordering::Release);
-                            if let Ok(mut slot) = err.lock() {
-                                if slot.is_none() {
-                                    *slot = Some(e);
-                                }
-                            }
-                        };
-
-                        let len = views.chunk_lens[chunk];
-                        if len == 0 {
-                            return;
-                        }
-
+                        // Allocate these ONCE per task (not per chunk).
                         let mut read_views: Vec<&[u8]> = Vec::with_capacity(views.n_reads);
                         let mut write_views: Vec<&mut [u8]> = Vec::with_capacity(views.n_writes);
 
-                        let read_base = chunk * views.n_reads;
-                        for i in 0..views.n_reads {
-                            let (addr, bytes) = views.read_ptrs[read_base + i];
-                            if addr == 0 || bytes == 0 {
-                                fail(ExecutionError::InternalExecutionError);
+                        for chunk in start..end {
+                            if abort.load(Ordering::Acquire) {
                                 return;
                             }
-                            let ptr = addr as *const u8;
-                            unsafe {
-                                read_views.push(std::slice::from_raw_parts(ptr, bytes));
-                            }
-                        }
 
-                        let write_base = chunk * views.n_writes;
-                        for i in 0..views.n_writes {
-                            let (addr, bytes) = views.write_ptrs[write_base + i];
-                            if addr == 0 || bytes == 0 {
-                                fail(ExecutionError::InternalExecutionError);
-                                return;
-                            }
-                            let ptr = addr as *mut u8;
-                            unsafe {
-                                write_views.push(std::slice::from_raw_parts_mut(ptr, bytes));
-                            }
-                        }
+                            let fail = |e: ExecutionError| {
+                                abort.store(true, Ordering::Release);
+                                if let Ok(mut slot) = err.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(e);
+                                    }
+                                }
+                            };
 
-                        // Call function
-                        f(&read_views, &mut write_views);
+                            let len = views.chunk_lens[chunk];
+                            if len == 0 {
+                                continue;
+                            }
+
+                            // Reuse Vec allocations (no heap alloc here).
+                            read_views.clear();
+                            write_views.clear();
+
+                            let read_base = chunk * views.n_reads;
+                            for i in 0..views.n_reads {
+                                let (addr, bytes) = views.read_ptrs[read_base + i];
+                                if addr == 0 || bytes == 0 {
+                                    fail(ExecutionError::InternalExecutionError);
+                                    return;
+                                }
+                                let ptr = addr as *const u8;
+                                unsafe {
+                                    read_views.push(std::slice::from_raw_parts(ptr, bytes));
+                                }
+                            }
+
+                            let write_base = chunk * views.n_writes;
+                            for i in 0..views.n_writes {
+                                let (addr, bytes) = views.write_ptrs[write_base + i];
+                                if addr == 0 || bytes == 0 {
+                                    fail(ExecutionError::InternalExecutionError);
+                                    return;
+                                }
+                                let ptr = addr as *mut u8;
+                                unsafe {
+                                    write_views.push(std::slice::from_raw_parts_mut(ptr, bytes));
+                                }
+                            }
+
+                            // Call user callback
+                            f(&read_views, &mut write_views);
+                        }
                     });
+
+                    start = end;
                 }
             });
 
-            // If any chunk failed, return first error
             if abort.load(Ordering::Acquire) {
                 let guard = err.lock().map_err(|_| ExecutionError::LockPoisoned {
                     what: "job error latch",
@@ -1145,7 +1159,7 @@ impl ECSData {
                 }
             }
 
-            // Drop Guards 
+            // Guards drop here after scope ends => pointers valid for duration
             drop(read_guards);
             drop(write_guards);
         }
