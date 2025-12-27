@@ -53,11 +53,11 @@ use std::sync::{
     Mutex
 };
 use std::sync::atomic::{
-    AtomicUsize, 
+    AtomicUsize,
+    AtomicBool, 
     Ordering
 };
 use std::collections::HashMap;
-use rayon::prelude::*;
 
 use crate::engine::commands::Command;
 use crate::engine::types::{ 
@@ -80,9 +80,8 @@ use crate::engine::entity::{
     EntityShards
 };
 use crate::engine::storage::{
-    cast_slice, 
-    cast_slice_mut
-};
+    cast_slice,
+    TypeErasedAttribute};
 use crate::engine::component::{
     Signature, 
     make_empty_component
@@ -93,44 +92,38 @@ use crate::engine::borrow::{
     BorrowGuard
 };
 use crate::engine::error::{
-    ECSResult, 
-    ExecutionError
+    ECSResult,
+    ECSError,
+    ExecutionError,
+    SpawnError
 };
 
 
 
-/// A unit of parallel work operating on a single archetype chunk.
+/// Per-archetype precomputed view into chunk memory.
 ///
-/// ## Purpose
-/// `Job` packages raw pointers and byte lengths for component columns
-/// (read-only and writable) so they can be processed in parallel by Rayon
-/// without holding Rust references into archetype storage.
-///
-/// ## Safety
-/// The pointers contained in a `Job` are valid only under the following
-/// invariants:
-///
-/// * All pointers originate from valid component storage.
-/// * Component storage is not structurally modified for the lifetime of the job.
-/// * No two jobs contain overlapping mutable regions.
-/// * All jobs execute within the ECS **iteration phase**, during which
-///   structural mutation is prohibited.
-///
-/// These invariants are enforced by:
-/// * execution phase discipline (read/write phase locking),
-/// * `IterationScope` (prevents structural mutation),
-/// * `BorrowTracker` (runtime read/write conflict detection),
-/// * archetype chunk partitioning.
+/// Layout:
+/// - read_ptrs[(chunk * n_reads) + i]  => (ptr, bytes) for read component i in that chunk
+/// - write_ptrs[(chunk * n_writes) + i] => (ptr, bytes) for write component i in that chunk
 
-
-#[derive(Clone)]
-struct Job {
-    chunk: usize,
-    len: usize,
-
-    read_locks: Vec<Arc<RwLock<Box<dyn crate::engine::storage::TypeErasedAttribute>>>>,
-    write_locks: Vec<Arc<RwLock<Box<dyn crate::engine::storage::TypeErasedAttribute>>>>,
+struct ChunkView {
+    chunk_count: usize,
+    chunk_lens: Vec<usize>,
+    n_reads: usize,
+    n_writes: usize,
+    read_ptrs: Vec<(*const u8, usize)>,
+    write_ptrs: Vec<(*mut u8, usize)>,
 }
+
+// ChunkView contains raw pointers into archetype-owned component storage.
+// These pointers are:
+// - valid for the duration of for_each_abstraction_unchecked
+// - protected by phase discipline (no structural mutation)
+// - protected by BorrowGuard (no aliasing violations)
+// - chunk-disjoint across parallel tasks
+
+unsafe impl Send for ChunkView {}
+unsafe impl Sync for ChunkView {}
 
 struct IterationScope<'a>(&'a AtomicUsize);
 
@@ -206,14 +199,13 @@ impl ECSManager {
 
     /// Runs the given scheduler for one full tick.
     pub fn run(&self, scheduler: &mut Scheduler) -> ECSResult<()> {
-        // one full tick
-        scheduler.run(self.world_ref())?;
+        let world = self.world_ref();
 
-        // single structural sync point
+        scheduler.run(world).map_err(ECSError::from)?;
+        world.clear_borrows();
         self.apply_deferred_commands()?;
-
         Ok(())
-    }   
+    }
 
     /// Applies all queued deferred commands.
     ///
@@ -224,9 +216,9 @@ impl ECSManager {
     /// ## Notes
     /// Commands are drained and executed in FIFO order.
 
-    pub fn apply_deferred_commands(&self) -> Result<(), ExecutionError> {
+    pub fn apply_deferred_commands(&self) -> ECSResult<()> {
         if self.active_iters.load(Ordering::Acquire) != 0 {
-            return Err(ExecutionError::StructuralMutationDuringIteration);
+            return Err(ECSError::from(ExecutionError::StructuralMutationDuringIteration));
         }
 
         let _phase = self.phase_write()?;
@@ -236,32 +228,31 @@ impl ECSManager {
             let mut queue = self
                 .deferred
                 .lock()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
+                .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "deferred command queue" }))?;
             std::mem::take(&mut *queue)
         };
 
         // Apply to ECSData under exclusive phase
         let data = unsafe { self.data_mut_unchecked() };
-        data.apply_deferred_commands(commands);
+        data.apply_deferred_commands(commands)?;
 
         Ok(())
     }
 
     #[inline]
-    pub(crate) fn phase_read(&self) -> Result<PhaseRead<'_>, ExecutionError> {
+    pub(crate) fn phase_read(&self) -> ECSResult<PhaseRead<'_>> {
         let g = self
             .phase
             .read()
-            .map_err(|_| ExecutionError::InternalExecutionError)?;
+            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "ECS phase (read)" }))?;
         Ok(PhaseRead(g))
     }
 
     #[inline]
-    pub(crate) fn phase_write(&self) -> Result<PhaseWrite<'_>, ExecutionError> {
-        let g = self
-            .phase
-            .write()
-            .map_err(|_| ExecutionError::InternalExecutionError)?;
+    pub(crate) fn phase_write(&self) -> ECSResult<PhaseWrite<'_>> {
+        let g = self.phase.write().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned { what: "ECS phase (write)" })
+        })?;
         Ok(PhaseWrite(g))
     }
 
@@ -293,6 +284,16 @@ pub struct ECSReference<'a> {
 
 impl<'a> ECSReference<'a> {
 
+    /// Clears all component borrows.
+    ///
+    /// ## Semantics
+    /// This marks the end of a scheduler execution stage.
+    /// Must only be called when no systems are running.
+    #[inline]
+    pub(crate) fn clear_borrows(&self) {
+        self.manager.borrows.clear();
+    }
+
     /// Executes a closure with **exclusive access** to the ECS world.
     ///
     /// ## Purpose
@@ -313,32 +314,33 @@ impl<'a> ECSReference<'a> {
     /// Incorrect use can easily result in undefined behavior.
     
     #[inline]
-    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut ECSData) -> R) -> Result<R, ExecutionError> {
+    pub fn with_exclusive<R>(
+        &self,
+        f: impl FnOnce(&mut ECSData) -> ECSResult<R>,
+    ) -> ECSResult<R> {
         if self.manager.active_iters.load(Ordering::Acquire) != 0 {
-            return Err(ExecutionError::StructuralMutationDuringIteration);
+            return Err(ECSError::from(ExecutionError::StructuralMutationDuringIteration));
         }
 
         let _phase = self.manager.phase_write()?;
         let data = unsafe { self.manager.data_mut_unchecked() };
-        Ok(f(data))
+        f(data)
     }
 
     /// Queue a structural command.
     #[inline]
-    pub fn defer(&self, command: Command) -> Result<(), ExecutionError> {
-        let mut queue = self
-            .manager
-            .deferred
-            .lock()
-            .map_err(|_| ExecutionError::InternalExecutionError)?;
+    pub fn defer(&self, command: Command) -> ECSResult<()> {
+        let mut queue = self.manager.deferred.lock().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned { what: "deferred command queue" })
+        })?;
         queue.push(command);
         Ok(())
     }
 
     /// Begins construction of a component query.
     #[inline]
-    pub fn query(&self) -> QueryBuilder {
-        QueryBuilder::new()
+    pub fn query(&self) -> ECSResult<QueryBuilder> {
+        Ok(QueryBuilder::new())
     }
 
     /// Executes a generic, parallel, chunk-oriented ECS query.
@@ -365,20 +367,20 @@ impl<'a> ECSReference<'a> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
-    ) -> Result<(), ExecutionError> {
+    ) -> ECSResult<()> {
         let _phase = self.manager.phase_read()?;
         let _iter_scope = IterationScope::new(&self.manager.active_iters);
 
-        // Enforce per-component borrow rules (now fallible, no spinning/hanging).
+        // BorrowGuard returns ExecutionError, map into ECSError
         let _borrows = BorrowGuard::new(
             &self.manager.borrows,
             &query.reads,
             &query.writes,
-        )?;
+        ).map_err(ECSError::from)?;
 
-        // Immutable world reference during iteration
         let data = unsafe { self.manager.data_ref_unchecked() };
-        data.for_each_abstraction_unchecked(query, f);
+        data.for_each_abstraction_unchecked(query, f)
+            .map_err(ECSError::from)?;
 
         Ok(())
     }
@@ -402,12 +404,13 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A) + Send + Sync,
-    ) -> Result<(), ExecutionError>
+    ) -> ECSResult<()>
     where
         A: 'static + Send + Sync,
     {
-        debug_assert_eq!(query.reads.len(), 1);
-        debug_assert_eq!(query.writes.len(), 0);
+        if query.reads.len() != 1 || !query.writes.is_empty() {
+            return Err(ECSError::Internal("for_each_read: query must have exactly 1 read and 0 writes".into()));
+        }
 
         self.for_each_abstraction(query, move |reads, _| unsafe {
             let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
@@ -422,17 +425,23 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&mut A) + Send + Sync,
-    ) -> Result<(), ExecutionError>
+    ) -> ECSResult<()>
     where
         A: 'static + Send + Sync,
     {
-        debug_assert_eq!(query.reads.len(), 0);
-        debug_assert_eq!(query.writes.len(), 1);
+        if !query.reads.is_empty() || query.writes.len() != 1 {
+            return Err(ECSError::Internal(
+                "for_each_write: expected exactly 0 reads and 1 write".into(),
+            ));
+        }
 
         self.for_each_abstraction(query, move |_, writes| unsafe {
-            let a = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
-            for v in a {
-                f(v);
+            let bytes = writes[0].len();
+            let slice =
+                crate::engine::storage::cast_slice_mut::<A>(writes[0].as_mut_ptr(), bytes);
+
+            for item in slice {
+                f(item);
             }
         })
     }
@@ -443,20 +452,26 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &B) + Send + Sync,
-    ) -> Result<(), ExecutionError>
+    ) -> ECSResult<()>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
     {
-        debug_assert_eq!(query.reads.len(), 2);
-        debug_assert_eq!(query.writes.len(), 0);
+        if query.reads.len() != 2 || !query.writes.is_empty() {
+            return Err(ECSError::Internal(
+                "for_each_read2: expected exactly 2 reads and 0 writes".into(),
+            ));
+        }
 
         self.for_each_abstraction(query, move |reads, _| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+            let a =
+                crate::engine::storage::cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b =
+                crate::engine::storage::cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
 
-            let n = a.len().min(b.len());
-            for i in 0..n {
+            debug_assert_eq!(a.len(), b.len());
+
+            for i in 0..a.len() {
                 f(&a[i], &b[i]);
             }
         })
@@ -467,78 +482,112 @@ impl ECSReference<'_> {
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &mut B) + Send + Sync,
-    ) -> Result<(), ExecutionError>
+    ) -> ECSResult<()>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
     {
-        debug_assert_eq!(query.reads.len(), 1);
-        debug_assert_eq!(query.writes.len(), 1);
+        if query.reads.len() != 1 || query.writes.len() != 1 {
+            return Err(ECSError::Internal(
+                "for_each_read_write: expected exactly 1 read and 1 write".into(),
+            ));
+        }
 
         self.for_each_abstraction(query, move |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
+            let a =
+                crate::engine::storage::cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b = crate::engine::storage::cast_slice_mut::<B>(
+                writes[0].as_mut_ptr(),
+                writes[0].len(),
+            );
 
-            let n = a.len().min(b.len());
-            for i in 0..n {
+            debug_assert_eq!(a.len(), b.len());
+
+            for i in 0..a.len() {
                 f(&a[i], &mut b[i]);
             }
         })
     }
 
     /// Executes a parallel iteration over two read-only components and one mutable component.
-    pub fn for_each_read2_write_1<A, B, C>(
+    pub fn for_each_read2_write1<A, B, C>(
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &B, &mut C) + Send + Sync,
-    ) -> Result<(), ExecutionError>
+    ) -> ECSResult<()>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
         C: 'static + Send + Sync,
     {
-        debug_assert_eq!(query.reads.len(), 2);
-        debug_assert_eq!(query.writes.len(), 1);
+        if query.reads.len() != 2 || query.writes.len() != 1 {
+            return Err(ECSError::Internal(
+                "for_each_read2_write1: expected exactly 2 reads and 1 write".into(),
+            ));
+        }
 
         self.for_each_abstraction(query, move |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
+            let a =
+                crate::engine::storage::cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b =
+                crate::engine::storage::cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+            let c = crate::engine::storage::cast_slice_mut::<C>(
+                writes[0].as_mut_ptr(),
+                writes[0].len(),
+            );
 
-            let n = a.len().min(b.len()).min(c.len());
-            for i in 0..n {
+            debug_assert_eq!(a.len(), b.len());
+            debug_assert_eq!(a.len(), c.len());
+
+            for i in 0..a.len() {
                 f(&a[i], &b[i], &mut c[i]);
             }
         })
     }
+
 
     /// Executes a parallel iteration over two read-only and two mutable components.
     pub fn for_each_read2_write2<A, B, C, D>(
         &self,
         query: BuiltQuery,
         f: impl Fn(&A, &B, &mut C, &mut D) + Send + Sync,
-    ) -> Result<(), ExecutionError>
+    ) -> ECSResult<()>
     where
         A: 'static + Send + Sync,
         B: 'static + Send + Sync,
         C: 'static + Send + Sync,
         D: 'static + Send + Sync,
     {
-        debug_assert_eq!(query.reads.len(), 2);
-        debug_assert_eq!(query.writes.len(), 2);
+        if query.reads.len() != 2 || query.writes.len() != 2 {
+            return Err(ECSError::Internal(
+                "for_each_read2_write2: expected exactly 2 reads and 2 writes".into(),
+            ));
+        }
 
         self.for_each_abstraction(query, move |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
-            let d = cast_slice_mut::<D>(writes[1].as_mut_ptr(), writes[1].len());
+            let a =
+                crate::engine::storage::cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b =
+                crate::engine::storage::cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+            let c = crate::engine::storage::cast_slice_mut::<C>(
+                writes[0].as_mut_ptr(),
+                writes[0].len(),
+            );
+            let d = crate::engine::storage::cast_slice_mut::<D>(
+                writes[1].as_mut_ptr(),
+                writes[1].len(),
+            );
 
-            let n = a.len().min(b.len()).min(c.len()).min(d.len());
-            for i in 0..n {
+            debug_assert_eq!(a.len(), b.len());
+            debug_assert_eq!(a.len(), c.len());
+            debug_assert_eq!(a.len(), d.len());
+
+            for i in 0..a.len() {
                 f(&a[i], &b[i], &mut c[i], &mut d[i]);
             }
         })
     }
+
 }
 
 /// RAII guard representing the ECS read phase.
@@ -610,16 +659,19 @@ impl ECSData {
     /// ## Safety
     /// Relies on slice splitting to ensure disjoint mutable borrows.
 
-    fn get_or_create_archetype(&mut self, signature: &Signature) -> ArchetypeID {
+    fn get_or_create_archetype(&mut self, signature: &Signature) -> ECSResult<ArchetypeID> {
         let key = signature.components;
         if let Some(&id) = self.signature_map.get(&key) {
-            return id;
+            return Ok(id);
         }
 
         let id = self.archetypes.len() as ArchetypeID;
         self.signature_map.insert(key, id);
-        self.archetypes.push(Archetype::new(id, *signature));
-        id
+
+        let arch = Archetype::new(id, *signature)?;
+        self.archetypes.push(arch);
+
+        Ok(id)
     }
 
     /// Adds a component to an entity, migrating it to a new archetype if required.
@@ -638,8 +690,10 @@ impl ECSData {
         archetypes: &mut [Archetype],
         a: ArchetypeID,
         b: ArchetypeID,
-    ) -> (&mut Archetype, &mut Archetype) {
-        assert!(a != b);
+    ) -> ECSResult<(&mut Archetype, &mut Archetype)> {
+        if a == b {
+            return Err(ECSError::Internal("get_archetype_pair_mut: a == b".into()));
+        }
 
         let (low, high) = if a < b { (a, b) } else { (b, a) };
         let (head, tail) = archetypes.split_at_mut(high as usize);
@@ -647,7 +701,7 @@ impl ECSData {
         let left = &mut head[low as usize];
         let right = &mut tail[0];
 
-        if a < b { (left, right) } else { (right, left) }
+        Ok(if a < b { (left, right) } else { (right, left) })
     }
 
     /// Adds a component to an existing entity, migrating it to a new archetype if necessary.
@@ -713,69 +767,52 @@ impl ECSData {
         entity: Entity,
         added_component_id: ComponentID,
         added_value: Box<dyn std::any::Any>,
-    ) {
-        let Some(location) = self.shards.get_location(entity) else { return; };
+    ) -> ECSResult<()> {
+        let Some(location) = self.shards.get_location(entity) else {
+            return Err(SpawnError::StaleEntity.into());
+        };
         let source_id = location.archetype;
 
         let mut new_signature = self.archetypes[source_id as usize].signature().clone();
         new_signature.set(added_component_id);
 
-        let destination_id = self.get_or_create_archetype(&new_signature);
+        let destination_id = self.get_or_create_archetype(&new_signature)?;
         let source_sig = self.archetypes[source_id as usize].signature().clone();
-
         let shards = &self.shards;
+
         let (source, destination) =
-            Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id);
+            Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let result = destination.ensure_component(added_component_id, || make_empty_component(added_component_id));
-        debug_assert!(
-            result.is_ok(),
-            "ECS invariant violation during add_component: {:?}",
-            result
-        );
+        let factory = || make_empty_component(added_component_id);
 
-        if cfg!(not(debug_assertions)) {
-            if let Err(e) = result {
-                panic!("ECS corruption detected: {e}");
-            }
-        }
-        
+        destination
+            .ensure_component(added_component_id, factory)
+            .map_err(ECSError::from)?;
+
+        // Ensure all shared components exist in destination storage
         for cid in source_sig.iterate_over_components() {
-            if cid == added_component_id { continue; }
-            
-            let result = destination.ensure_component(cid, || make_empty_component(cid));
-            debug_assert!(
-                result.is_ok(),
-                "ECS invariant violation during add_component: {:?}",
-                result
-            );   
+            if cid == added_component_id {
+                continue;
+            }
 
-            if cfg!(not(debug_assertions)) {
-                if let Err(e) = result {
-                    panic!("ECS corruption detected: {e}");
-                }
-            }         
+            let factory = || make_empty_component(cid);
+
+            destination
+                .ensure_component(cid, factory)
+                .map_err(ECSError::from)?;
+
         }
 
-        let result = source.move_row_to_archetype(
+        // Move row + insert new value
+        source.move_row_to_archetype(
             destination,
             shards,
             entity,
             (location.chunk, location.row),
             vec![(added_component_id, added_value)],
-        );
+        )?;
 
-        debug_assert!(
-            result.is_ok(),
-            "ECS invariant violation during add_component: {:?}",
-            result
-        );
-
-        if cfg!(not(debug_assertions)) {
-            if let Err(e) = result {
-                panic!("ECS corruption detected: {e}");
-            }
-        }
+        Ok(())
     }
 
     /// Removes a component from an entity, migrating it to a new archetype if needed.
@@ -823,65 +860,52 @@ impl ECSData {
     /// world.remove_component(entity, Velocity::ID);
     /// ```
 
-    pub fn remove_component(&mut self, entity: Entity, removed_component_id: ComponentID) {
-        let Some(location) = self.shards.get_location(entity) else { return; };
+    pub fn remove_component(&mut self, entity: Entity, removed_component_id: ComponentID) -> ECSResult<()> {
+        let Some(location) = self.shards.get_location(entity) else {
+            return Err(SpawnError::StaleEntity.into());
+        };
         let source_id = location.archetype;
 
         if !self.archetypes[source_id as usize].has(removed_component_id) {
-            return;
+            return Ok(());
         }
 
         let mut new_signature = self.archetypes[source_id as usize].signature().clone();
         new_signature.clear(removed_component_id);
 
         if new_signature.components.iter().all(|&bits| bits == 0) {
-            let _ = self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity);
-            return;
+            self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity)?;
+            return Ok(());
         }
 
-        let destination_id = self.get_or_create_archetype(&new_signature);
+        let destination_id = self.get_or_create_archetype(&new_signature)?;
         let source_sig = self.archetypes[source_id as usize].signature().clone();
-
         let shards = &self.shards;
+
         let (source_arch, dest_arch) =
-            Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id);
+            Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
         for cid in source_sig.iterate_over_components() {
-            if cid == removed_component_id { continue; }
-
-            let result = dest_arch.ensure_component(cid, || make_empty_component(cid));
-            debug_assert!(
-                result.is_ok(),
-                "ECS invariant violation during add_component: {:?}",
-                result
-            );
-
-            if cfg!(not(debug_assertions)) {
-                if let Err(e) = result {
-                    panic!("ECS corruption detected: {e}");
-                }
+            if cid == removed_component_id {
+                continue;
             }
+
+            let factory = || make_empty_component(cid);
+
+            dest_arch
+                .ensure_component(cid, factory)
+                .map_err(ECSError::from)?;
         }
 
-        let result = source_arch.move_row_to_archetype(
+        source_arch.move_row_to_archetype(
             dest_arch,
             shards,
             entity,
             (location.chunk, location.row),
             Vec::new(),
-        );
+        )?;
 
-        debug_assert!(
-            result.is_ok(),
-            "ECS invariant violation during add_component: {:?}",
-            result
-        );
-
-        if cfg!(not(debug_assertions)) {
-            if let Err(e) = result {
-                panic!("ECS corruption detected: {e}");
-            }
-        }        
+        Ok(())
     }
 
     /// Applies all queued deferred commands.
@@ -890,34 +914,35 @@ impl ECSData {
     /// This method is expected to evolve as command execution is implemented.
     /// Currently acts as a structural synchronization point.
 
-    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) {
+    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) -> ECSResult<()> {
         for command in commands {
             match command {
                 Command::Spawn { bundle } => {
                     let signature = bundle.signature();
-                    let archetype_id = self.get_or_create_archetype(&signature);
+                    let archetype_id = self.get_or_create_archetype(&signature)?;
                     let shard_id = self.pick_spawn_shard();
 
                     let archetype = &mut self.archetypes[archetype_id as usize];
-                    let _ = archetype.spawn_on(&mut self.shards, shard_id, bundle);
+                    let _entity = archetype.spawn_on(&mut self.shards, shard_id, bundle)?;
                 }
 
                 Command::Despawn { entity } => {
-                    if let Some(loc) = self.shards.get_location(entity) {
-                        let archetype = &mut self.archetypes[loc.archetype as usize];
-                        let _ = archetype.despawn_on(&mut self.shards, entity);
-                    }
+                    let loc = self.shards.get_location(entity).ok_or(SpawnError::StaleEntity)?;
+                    let archetype = &mut self.archetypes[loc.archetype as usize];
+                    archetype.despawn_on(&mut self.shards, entity)?;
                 }
 
                 Command::Add { entity, component_id, value } => {
-                    self.add_component(entity, component_id, value);
+                    self.add_component(entity, component_id, value)?;
                 }
 
                 Command::Remove { entity, component_id } => {
-                    self.remove_component(entity, component_id);
+                    self.remove_component(entity, component_id)?;
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Executes a generic, parallel, chunk-oriented ECS query **without safety checks**.
@@ -939,92 +964,198 @@ impl ECSData {
         &self,
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
-    ) {
-        let matches = self.matching_archetypes(&query.signature);
+    ) -> Result<(), ExecutionError> {
+        let matches = self.matching_archetypes(&query.signature)?;
 
-        for m in matches {
-            // Collect jobs for this archetype
-            let jobs: Vec<Job> = {
-                let archetype = &self.archetypes[m.archetype_id as usize];
-                let mut jobs = Vec::new();
+        // Share callback across spawned tasks
+        let f = Arc::new(f);
 
-                for chunk in 0..archetype.chunk_count() {
-                    let len = archetype.chunk_valid_length(chunk);
-                    if len == 0 {
-                        continue;
+        for matched_archetype in matches {
+            let archetype = &self.archetypes[matched_archetype.archetype_id as usize];
+
+            // Acquire guards
+            let mut read_guards: Vec<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>> =
+                Vec::with_capacity(query.reads.len());
+            let mut write_guards: Vec<RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>> =
+                Vec::with_capacity(query.writes.len());
+
+            for &component_id in &query.reads {
+                let locked = archetype
+                    .component_locked(component_id)
+                    .ok_or(ExecutionError::MissingComponent { component_id })?;
+
+                let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
+                    what: "component column (read)",
+                })?;
+
+                read_guards.push(guard);
+            }
+
+            for &component_id in &query.writes {
+                let locked = archetype
+                    .component_locked(component_id)
+                    .ok_or(ExecutionError::MissingComponent { component_id })?;
+
+                let guard = locked.write().map_err(|_| ExecutionError::LockPoisoned {
+                    what: "component column (write)",
+                })?;
+
+                write_guards.push(guard);
+            }
+
+            let chunk_count = archetype
+                .chunk_count()
+                .map_err(|_| ExecutionError::InternalExecutionError)?;
+
+            if chunk_count == 0 {
+                continue;
+            }
+
+            let mut chunk_lens = Vec::with_capacity(chunk_count);
+            for chunk in 0..chunk_count {
+                let len = archetype
+                    .chunk_valid_length(chunk)
+                    .map_err(|_| ExecutionError::InternalExecutionError)?;
+                chunk_lens.push(len);
+            }
+
+            // Precompute pointers
+            let n_reads = read_guards.len();
+            let n_writes = write_guards.len();
+
+            let mut read_ptrs: Vec<(*const u8, usize)> = Vec::with_capacity(chunk_count * n_reads);
+            let mut write_ptrs: Vec<(*mut u8, usize)> = Vec::with_capacity(chunk_count * n_writes);
+
+            for chunk in 0..chunk_count {
+                let len = chunk_lens[chunk];
+
+                if len == 0 {
+                    for _ in 0..n_reads {
+                        read_ptrs.push((std::ptr::null(), 0));
                     }
-
-                    let mut reads = Vec::with_capacity(query.reads.len());
-                    let mut writes = Vec::with_capacity(query.writes.len());
-
-                    // Collect read-only component locks
-                    for &component_id in &query.reads {
-                        let locked = archetype
-                            .component_locked(component_id)
-                            .expect("component missing in archetype");
-                        reads.push(locked.arc());
+                    for _ in 0..n_writes {
+                        write_ptrs.push((std::ptr::null_mut(), 0));
                     }
-
-                    // Collect writable component locks
-                    for &component_id in &query.writes {
-                        let locked = archetype
-                            .component_locked(component_id)
-                            .expect("component missing in archetype");
-                        writes.push(locked.arc());
-                    }
-
-                    jobs.push(Job {
-                        chunk,
-                        len,
-                        read_locks: reads,
-                        write_locks: writes,
-                    });
+                    continue;
                 }
 
-                jobs
+                let chunk_id: crate::engine::types::ChunkID = chunk
+                    .try_into()
+                    .map_err(|_| ExecutionError::InternalExecutionError)?;
+
+                for g in &read_guards {
+                    let (ptr, bytes) = g
+                        .chunk_bytes(chunk_id, len)
+                        .ok_or(ExecutionError::InternalExecutionError)?;
+                    read_ptrs.push((ptr as *const u8, bytes));
+                }
+
+                for g in &mut write_guards {
+                    let (ptr, bytes) = g
+                        .chunk_bytes_mut(chunk_id, len)
+                        .ok_or(ExecutionError::InternalExecutionError)?;
+                    write_ptrs.push((ptr as *mut u8, bytes));
+                }
+            }
+
+            let views = ChunkView {
+                chunk_count,
+                chunk_lens,
+                n_reads,
+                n_writes,
+                read_ptrs,
+                write_ptrs,
             };
 
-            // Execute all chunk jobs in parallel.
-            jobs.into_par_iter().for_each(|job| {
-                // Keep guards alive until after the callback finishes.
-                let mut read_guards: Vec<RwLockReadGuard<'_, Box<dyn crate::engine::storage::TypeErasedAttribute>>> =
-                    Vec::with_capacity(job.read_locks.len());
-                let mut write_guards: Vec<RwLockWriteGuard<'_, Box<dyn crate::engine::storage::TypeErasedAttribute>>> =
-                    Vec::with_capacity(job.write_locks.len());
+            let abort = Arc::new(AtomicBool::new(false));
+            let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
+            let threads = rayon::current_num_threads().max(1);
+            let grainsize = (views.chunk_count / threads).max(8);
+            let views_ref = &views;
 
-                let mut read_views: Vec<&[u8]> = Vec::with_capacity(job.read_locks.len());
-                let mut write_views: Vec<&mut [u8]> = Vec::with_capacity(job.write_locks.len());
+            rayon::scope(|s| {
+                let mut start = 0usize;
+                while start < views_ref.chunk_count {
+                    let end = (start + grainsize).min(views_ref.chunk_count);
 
-                // Build read-only views
-                for lock in &job.read_locks {
-                    let guard = lock.read().expect("component read lock poisoned");
-                    let (pointer, bytes) = guard
-                        .chunk_bytes(job.chunk as _, job.len)
-                        .expect("invalid chunk bounds");
+                    let abort = abort.clone();
+                    let err = err.clone();
+                    let f = f.clone();
+                    let views = views_ref;
 
-                    unsafe {
-                        read_views.push(std::slice::from_raw_parts(pointer, bytes));
-                    }
-                    read_guards.push(guard);
+                    s.spawn(move |_| {
+                        let mut read_views: Vec<&[u8]> = Vec::with_capacity(views.n_reads);
+                        let mut write_views: Vec<&mut [u8]> = Vec::with_capacity(views.n_writes);
+
+                        for chunk in start..end {
+                            if abort.load(Ordering::Acquire) {
+                                return;
+                            }
+
+                            let fail = |e: ExecutionError| {
+                                abort.store(true, Ordering::Release);
+                                if let Ok(mut slot) = err.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(e);
+                                    }
+                                }
+                            };
+
+                            let len = views.chunk_lens[chunk];
+                            if len == 0 {
+                                continue;
+                            }
+
+                            read_views.clear();
+                            write_views.clear();
+
+                            let read_base = chunk * views.n_reads;
+                            for i in 0..views.n_reads {
+                                let (ptr, bytes) = views.read_ptrs[read_base + i];
+                                if ptr.is_null() || bytes == 0 {
+                                    fail(ExecutionError::InternalExecutionError);
+                                    return;
+                                }
+                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
+                            }
+
+                            let write_base = chunk * views.n_writes;
+                            for i in 0..views.n_writes {
+                                let (ptr, bytes) = views.write_ptrs[write_base + i];
+                                if ptr.is_null() || bytes == 0 {
+                                    fail(ExecutionError::InternalExecutionError);
+                                    return;
+                                }
+                                unsafe { write_views.push(std::slice::from_raw_parts_mut(ptr, bytes)); }
+                            }
+
+                            // Call user callback
+                            f(&read_views, &mut write_views);
+                        }
+                    });
+
+                    start = end;
                 }
-
-                // Build writable views
-                for lock in &job.write_locks {
-                    let mut guard = lock.write().expect("component write lock poisoned");
-                    let (pointer, bytes) = guard
-                        .chunk_bytes_mut(job.chunk as _, job.len)
-                        .expect("invalid chunk bounds");
-
-                    unsafe {
-                        write_views.push(std::slice::from_raw_parts_mut(pointer, bytes));
-                    }
-                    write_guards.push(guard);
-                }
-
-                // Callback (per chunk)
-                f(&read_views, &mut write_views);
             });
+
+            if abort.load(Ordering::Acquire) {
+                let guard = err.lock().map_err(|_| ExecutionError::LockPoisoned {
+                    what: "job error latch",
+                })?;
+
+                if let Some(e) = guard.clone() {
+                    return Err(e);
+                } else {
+                    return Err(ExecutionError::InternalExecutionError);
+                }
+            }
+
+            // Guards drop
+            drop(read_guards);
+            drop(write_guards);
         }
+
+        Ok(())
     }
 
     /// Returns archetypes matching a query signature.
@@ -1035,14 +1166,24 @@ impl ECSData {
     fn matching_archetypes(
         &self,
         query: &QuerySignature,
-    ) -> Vec<ArchetypeMatch> {
-        self.archetypes
-            .iter()
-            .filter(|a| query.requires_all(a.signature()))
-            .map(|a| ArchetypeMatch {
+    ) -> Result<Vec<ArchetypeMatch>, ExecutionError> {
+        let mut out = Vec::new();
+
+        for a in &self.archetypes {
+            if !query.requires_all(a.signature()) {
+                continue;
+            }
+
+            let chunks = a
+                .chunk_count()
+                .map_err(|_| ExecutionError::InternalExecutionError)?;
+
+            out.push(ArchetypeMatch {
                 archetype_id: a.archetype_id(),
-                chunks: a.chunk_count(),
-            })
-            .collect()
+                chunks,
+            });
+        }
+
+        Ok(out)
     }
 }

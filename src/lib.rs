@@ -16,6 +16,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 #![allow(clippy::module_inception)]
+#![deny(dead_code)]
 
 pub mod engine;
 

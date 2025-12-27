@@ -71,7 +71,7 @@
 use crate::engine::types::{SystemID};
 use crate::engine::component::{Signature};
 use crate::engine::manager::ECSReference;
-use crate::engine::error::ExecutionError;
+use crate::engine::error::{ECSResult};
 
 
 /// Declares the component access set of a system.
@@ -138,7 +138,7 @@ pub trait System: Send + Sync {
     }    
 
     /// Executes the system logic against the ECS world.
-    fn run(&self, world: ECSReference<'_>) -> Result<(), ExecutionError>;
+    fn run(&self, world: ECSReference<'_>) -> ECSResult<()>;
 }
 
 /// A concrete [`System`] backed by a function or closure.
@@ -146,11 +146,11 @@ pub trait System: Send + Sync {
 /// `FnSystem` allows systems to be defined inline using a function or
 /// closure, without requiring a custom system type.
 ///
-/// The function must return `Result<(), ExecutionError>` so that
+/// The function must return `ECSResult<()>` so that
 /// execution failures can be propagated through the scheduler.
 pub struct FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) -> Result<(), ExecutionError>
+    F: Fn(ECSReference<'_>) -> ECSResult<()>
         + Send
         + Sync
         + 'static,
@@ -163,7 +163,7 @@ where
 
 impl<F> FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) -> Result<(), ExecutionError>
+    F: Fn(ECSReference<'_>) -> ECSResult<()>
         + Send
         + Sync
         + 'static,
@@ -192,7 +192,7 @@ where
 
 impl<F> System for FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) -> Result<(), ExecutionError>
+    F: Fn(ECSReference<'_>) -> ECSResult<()>
         + Send
         + Sync
         + 'static,
@@ -205,7 +205,7 @@ where
         self.access.clone()
     }
 
-    fn run(&self, world: ECSReference<'_>) -> Result<(), ExecutionError> {
+    fn run(&self, world: ECSReference<'_>) -> ECSResult<()> {
         (self.f)(world)
     }
 }

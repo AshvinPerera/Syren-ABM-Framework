@@ -11,18 +11,19 @@ use abm_framework::engine::component::{
 use abm_framework::engine::entity::EntityShards;
 use abm_framework::engine::manager::{ECSManager, ECSData};
 use abm_framework::engine::commands::Command;
-use abm_framework::engine::error::ExecutionError;
+use abm_framework::engine::error::ECSError;
 
 mod common;
 use common::Position;
-
 
 static INIT: Once = Once::new();
 
 fn init_components() {
     INIT.call_once(|| {
-        register_component::<Position>();
-        freeze_components();
+        register_component::<Position>()
+            .expect("failed to register Position component");
+        freeze_components()
+            .expect("failed to freeze components");
     });
 }
 
@@ -39,21 +40,20 @@ fn spawn_benchmark(c: &mut Criterion) {
 
             let world = ecs.world_ref();
 
-            let _ = world
-                .with_exclusive(|_data| {
+            world
+                .with_exclusive(|_| {
                     for _ in 0..common::AGENTS_MED {
                         let mut bundle = Bundle::new();
+
                         bundle.insert(
-                            component_id_of::<Position>(),
+                            component_id_of::<Position>()?,
                             Position { x: 0.0, y: 0.0 },
                         );
 
-                        world
-                            .defer(Command::Spawn { bundle })
-                            .expect("spawn defer failed in benchmark");
+                        world.defer(Command::Spawn { bundle })?;
                     }
 
-                    Ok::<(), ExecutionError>(())
+                    Ok::<(), ECSError>(())
                 })
                 .expect("exclusive world setup failed");
 

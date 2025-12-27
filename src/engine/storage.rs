@@ -107,8 +107,17 @@ use std::{
     convert::TryInto
 };
 
-use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
-use crate::engine::error::{PositionOutOfBoundsError, TypeMismatchError, AttributeError};
+use crate::engine::types::{
+    ChunkID, 
+    RowID, 
+    CHUNK_CAP
+};
+
+use crate::engine::error::{
+    PositionOutOfBoundsError, 
+    TypeMismatchError, 
+    AttributeError
+};
 
 
 /// Describes how to fully undo a mutating operation performed on an
@@ -1358,8 +1367,8 @@ impl<T> Attribute<T> {
             };
             
             moved_from_source = Some((
-                last_chunk.try_into().unwrap(),
-                last_row.try_into().unwrap(),
+                last_chunk.try_into().map_err(|_| AttributeError::IndexOverflow("chunk"))?,
+                last_row.try_into().map_err(|_| AttributeError::IndexOverflow("row"))?
             ));
 
             unsafe {
@@ -2026,14 +2035,22 @@ impl LockedAttribute {
 
     /// Returns a read guard to the inner attribute.
     #[inline]
-    pub fn read(&self) -> RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>> {
-        self.inner.read().expect("LockedAttribute read lock poisoned")
+    pub fn read(
+        &self,
+    ) -> Result<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
+        self.inner
+            .read()
+            .map_err(|_| AttributeError::InternalInvariant("LockedAttribute read lock poisoned"))
     }
 
     /// Returns a write guard to the inner attribute.
     #[inline]
-    pub fn write(&self) -> RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>> {
-        self.inner.write().expect("LockedAttribute write lock poisoned")
+    pub fn write(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
+        self.inner
+            .write()
+            .map_err(|_| AttributeError::InternalInvariant("LockedAttribute write lock poisoned"))
     }
 
     /// Returns a clone of the internal `Arc<RwLock<Box<dyn TypeErasedAttribute>>>`.
@@ -2043,38 +2060,48 @@ impl LockedAttribute {
     }
 
     /// Consumes the `LockedAttribute`, returning the inner attribute.
-    pub fn into_inner(self) -> Box<dyn TypeErasedAttribute> {
-        match std::sync::Arc::try_unwrap(self.inner) {
-            Ok(lock) => lock.into_inner().expect("lock poisoned"),
-            Err(_) => panic!("LockedAttribute still shared"),
+    pub fn into_inner(self) -> Result<Box<dyn TypeErasedAttribute>, AttributeError> {
+        match Arc::try_unwrap(self.inner) {
+            Ok(lock) => lock
+                .into_inner()
+                .map_err(|_| AttributeError::InternalInvariant("LockedAttribute poisoned during unwrap")),
+            Err(_) => Err(AttributeError::InternalInvariant(
+                "LockedAttribute still shared",
+            )),
         }
-    }    
+    }   
 }
 
 /// Interprets a raw byte slice as a typed slice.
 ///
 /// # Safety
-/// - `ptr` must be properly aligned for `T`
+/// - `pointer` must be properly aligned for `T`
 /// - `bytes` must be a multiple of `size_of::<T>()`
 /// - the memory region must contain fully initialized `T` values
 /// - the returned slice must not outlive the backing storage
 
 #[inline]
-pub unsafe fn cast_slice<'a, T>(ptr: *const u8, bytes: usize) -> &'a [T] {
-    let len = bytes / std::mem::size_of::<T>();
-    unsafe{slice::from_raw_parts(ptr as *const T, len)}
+pub unsafe fn cast_slice<'a, T>(pointer: *const u8, bytes: usize) -> &'a [T] {
+    let size = std::mem::size_of::<T>();
+    if size == 0 { return &[]; }
+    debug_assert_eq!(bytes % size, 0, "bytes not multiple of element size");
+    let len = bytes / size;
+    unsafe { slice::from_raw_parts(pointer as *const T, len) }
 }
 
 /// Interprets a mutable raw byte slice as a mutable typed slice.
 ///
 /// # Safety
-/// - `ptr` must be properly aligned for `T`
+/// - `pointer` must be properly aligned for `T`
 /// - `bytes` must be a multiple of `size_of::<T>()`
 /// - the memory region must contain fully initialized `T` values
 /// - no aliasing mutable references may exist
 
 #[inline]
-pub unsafe fn cast_slice_mut<'a, T>(ptr: *mut u8, bytes: usize) -> &'a mut [T] {
-    let len = bytes / std::mem::size_of::<T>();
-    unsafe{slice::from_raw_parts_mut(ptr as *mut T, len)}
+pub unsafe fn cast_slice_mut<'a, T>(pointer: *mut u8, bytes: usize) -> &'a mut [T] {
+    let size = std::mem::size_of::<T>();
+    if size == 0 { return &mut []; }
+    debug_assert_eq!(bytes % size, 0, "bytes not multiple of element size");
+    let len = bytes / size;
+    unsafe { slice::from_raw_parts_mut(pointer as *mut T, len) }
 }

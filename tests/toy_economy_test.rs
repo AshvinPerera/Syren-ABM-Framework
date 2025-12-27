@@ -1,26 +1,43 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use abm_framework::engine::component::{Bundle, register_component, freeze_components, component_id_of};
+use abm_framework::engine::component::{
+    Bundle, register_component, freeze_components, component_id_of,
+};
 use abm_framework::engine::entity::EntityShards;
 use abm_framework::engine::manager::{ECSManager, ECSReference, ECSData};
 use abm_framework::engine::systems::{AccessSets, System};
 use abm_framework::engine::scheduler::Scheduler;
 use abm_framework::engine::commands::Command;
-use abm_framework::engine::error::{ExecutionError, ECSResult};
-
-
-#[allow(dead_code)]
-#[derive(Clone, Copy)] struct AgentTag(pub u8);
-#[derive(Clone, Copy)] struct Cash(pub f32);
-#[derive(Clone, Copy)] struct Hunger(pub f32);
+use abm_framework::engine::error::{ECSError, ECSResult};
 
 #[allow(dead_code)]
-#[derive(Clone, Copy)] struct FirmTag(pub u8);
-#[derive(Clone, Copy)] struct Inventory(pub f32);
-#[derive(Clone, Copy)] struct Production(pub f32);
-#[derive(Clone, Copy)] struct Wage(pub f32);
-#[derive(Clone, Copy)] struct TargetInventory(pub f32);
-#[derive(Clone, Copy)] struct Price(pub f32);
+#[derive(Clone, Copy)]
+struct AgentTag(pub u8);
+
+#[derive(Clone, Copy)]
+struct Cash(pub f32);
+
+#[derive(Clone, Copy)]
+struct Hunger(pub f32);
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct FirmTag(pub u8);
+
+#[derive(Clone, Copy)]
+struct Inventory(pub f32);
+
+#[derive(Clone, Copy)]
+struct Production(pub f32);
+
+#[derive(Clone, Copy)]
+struct Wage(pub f32);
+
+#[derive(Clone, Copy)]
+struct TargetInventory(pub f32);
+
+#[derive(Clone, Copy)]
+struct Price(pub f32);
 
 struct ProductionSystem;
 
@@ -29,21 +46,21 @@ impl System for ProductionSystem {
 
     fn access(&self) -> AccessSets {
         let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Production>());
-        a.read.set(component_id_of::<TargetInventory>());
-        a.write.set(component_id_of::<Inventory>());
+        a.read.set(component_id_of::<Production>().unwrap());
+        a.read.set(component_id_of::<TargetInventory>().unwrap());
+        a.write.set(component_id_of::<Inventory>().unwrap());
         a
     }
 
-    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ExecutionError> {
-        let query = ecs
-            .query()
-            .read::<Production>()
-            .read::<TargetInventory>()
-            .write::<Inventory>()
+    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
+        let qb = ecs.query()?;
+        let query = qb
+            .read::<Production>()?
+            .read::<TargetInventory>()?
+            .write::<Inventory>()?
             .build()?;
 
-        ecs.for_each_read2_write_1::<Production, TargetInventory, Inventory>(
+        ecs.for_each_read2_write1::<Production, TargetInventory, Inventory>(
             query,
             |prod, target, inv| {
                 if inv.0 < target.0 {
@@ -63,20 +80,21 @@ impl System for WagePaymentSystem {
 
     fn access(&self) -> AccessSets {
         let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Production>());
-        a.read.set(component_id_of::<Wage>());
-        a.write.set(component_id_of::<Cash>());
+        a.read.set(component_id_of::<Production>().unwrap());
+        a.read.set(component_id_of::<Wage>().unwrap());
+        a.write.set(component_id_of::<Cash>().unwrap());
         a
     }
 
-    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ExecutionError> {
-        let query = ecs.query()
-            .read::<Production>()
-            .read::<Wage>()
-            .write::<Cash>()
+    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
+        let qb = ecs.query()?;
+        let query = qb
+            .read::<Production>()?
+            .read::<Wage>()?
+            .write::<Cash>()?
             .build()?;
 
-        ecs.for_each_read2_write_1::<Production, Wage, Cash>(
+        ecs.for_each_read2_write1::<Production, Wage, Cash>(
             query,
             |prod, wage, cash| {
                 cash.0 -= prod.0 * wage.0;
@@ -94,15 +112,16 @@ impl System for SpendingSystem {
 
     fn access(&self) -> AccessSets {
         let mut a = AccessSets::default();
-        a.read.set(component_id_of::<AgentTag>());
-        a.write.set(component_id_of::<Cash>());
+        a.read.set(component_id_of::<AgentTag>().unwrap());
+        a.write.set(component_id_of::<Cash>().unwrap());
         a
     }
 
-    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ExecutionError> {
-        let query = ecs.query()
-            .read::<AgentTag>()
-            .write::<Cash>()
+    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
+        let qb = ecs.query()?;
+        let query = qb
+            .read::<AgentTag>()?
+            .write::<Cash>()?
             .build()?;
 
         ecs.for_each_read_write::<AgentTag, Cash>(
@@ -125,20 +144,21 @@ impl System for PriceSystem {
 
     fn access(&self) -> AccessSets {
         let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Inventory>());
-        a.read.set(component_id_of::<TargetInventory>());
-        a.write.set(component_id_of::<Price>());
+        a.read.set(component_id_of::<Inventory>().unwrap());
+        a.read.set(component_id_of::<TargetInventory>().unwrap());
+        a.write.set(component_id_of::<Price>().unwrap());
         a
     }
 
-    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ExecutionError> {
-        let query = ecs.query()
-            .read::<Inventory>()
-            .read::<TargetInventory>()
-            .write::<Price>()
+    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
+        let qb = ecs.query()?;
+        let query = qb
+            .read::<Inventory>()?
+            .read::<TargetInventory>()?
+            .write::<Price>()?
             .build()?;
 
-        ecs.for_each_read2_write_1::<Inventory, TargetInventory, Price>(
+        ecs.for_each_read2_write1::<Inventory, TargetInventory, Price>(
             query,
             |inv, target, price| {
                 if inv.0 < target.0 {
@@ -160,15 +180,16 @@ impl System for HungerSystem {
 
     fn access(&self) -> AccessSets {
         let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Cash>());
-        a.write.set(component_id_of::<Hunger>());
+        a.read.set(component_id_of::<Cash>().unwrap());
+        a.write.set(component_id_of::<Hunger>().unwrap());
         a
     }
 
-    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ExecutionError> {
-        let query = ecs.query()
-            .read::<Cash>()
-            .write::<Hunger>()
+    fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
+        let qb = ecs.query()?;
+        let query = qb
+            .read::<Cash>()?
+            .write::<Hunger>()?
             .build()?;
 
         ecs.for_each_read_write::<Cash, Hunger>(
@@ -188,53 +209,49 @@ impl System for HungerSystem {
 
 #[test]
 fn toy_economy_ecs_abm() -> ECSResult<()> {
-    register_component::<Cash>();
-    register_component::<Hunger>();
-    register_component::<AgentTag>();
-    register_component::<FirmTag>();
-    register_component::<Inventory>();
-    register_component::<Production>();
-    register_component::<Wage>();
-    register_component::<TargetInventory>();
-    register_component::<Price>();
-    freeze_components();
+    let _ = register_component::<Cash>();
+    let _ = register_component::<Hunger>();
+    let _ = register_component::<AgentTag>();
+    let _ = register_component::<FirmTag>();
+    let _ = register_component::<Inventory>();
+    let _ = register_component::<Production>();
+    let _ = register_component::<Wage>();
+    let _ = register_component::<TargetInventory>();
+    let _ = register_component::<Price>();
+    let _ = freeze_components();
 
     let shards = EntityShards::new(4);
-    let data = ECSData::new(shards);
-    let ecs = ECSManager::new(data);
+    let ecs = ECSManager::new(ECSData::new(shards));
 
     let world = ecs.world_ref();
 
-    world.with_exclusive(|_data| {
-        for _ in 0..10 {
+    world.with_exclusive(|_| -> Result<(), ECSError> {
+        for _ in 0..100 {
             let mut b = Bundle::new();
-            b.insert(component_id_of::<FirmTag>(), FirmTag(0));
-            b.insert(component_id_of::<Cash>(), Cash(10_000.0));
-            b.insert(component_id_of::<Inventory>(), Inventory(100.0));
-            b.insert(component_id_of::<Production>(), Production(5.0));
-            b.insert(component_id_of::<Wage>(), Wage(1.0));
-            b.insert(component_id_of::<TargetInventory>(), TargetInventory(200.0));
-            b.insert(component_id_of::<Price>(), Price(1.0));
-
+            b.insert(component_id_of::<FirmTag>()?, FirmTag(0));
+            b.insert(component_id_of::<Cash>()?, Cash(10_000.0));
+            b.insert(component_id_of::<Inventory>()?, Inventory(100.0));
+            b.insert(component_id_of::<Production>()?, Production(5.0));
+            b.insert(component_id_of::<Wage>()?, Wage(1.0));
+            b.insert(component_id_of::<TargetInventory>()?, TargetInventory(200.0));
+            b.insert(component_id_of::<Price>()?, Price(1.0));
             world.defer(Command::Spawn { bundle: b })?;
         }
 
-        for _ in 0..10_000 {
+        for _ in 0..1_000_000 {
             let mut b = Bundle::new();
-            b.insert(component_id_of::<AgentTag>(), AgentTag(0));
-            b.insert(component_id_of::<Cash>(), Cash(100.0));
-            b.insert(component_id_of::<Hunger>(), Hunger(0.0));
-
+            b.insert(component_id_of::<AgentTag>()?, AgentTag(0));
+            b.insert(component_id_of::<Cash>()?, Cash(100.0));
+            b.insert(component_id_of::<Hunger>()?, Hunger(0.0));
             world.defer(Command::Spawn { bundle: b })?;
         }
 
-        Ok::<(), ExecutionError>(())
-    })??;
+        Ok(())
+    })?;
 
     ecs.apply_deferred_commands()?;
 
     let mut scheduler = Scheduler::new();
-
     scheduler.add_system(ProductionSystem);
     scheduler.add_system(WagePaymentSystem);
     scheduler.add_system(PriceSystem);
@@ -245,26 +262,26 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
         ecs.run(&mut scheduler)?;
 
         let world = ecs.world_ref();
-
-        let sum_bits = AtomicU32::new(0);
+        let sum = AtomicU64::new(0);
         let count = AtomicU32::new(0);
 
-        let query = world
-            .query()
-            .read::<Price>()
-            .read::<FirmTag>()
+        let qb = world.query()?;
+        let query = qb
+            .read::<Price>()?
+            .read::<FirmTag>()?
             .build()?;
 
         world.for_each_read2::<Price, FirmTag>(
             query,
             |price, _| {
-                sum_bits.fetch_add(price.0.to_bits(), Ordering::Relaxed);
+                let scaled = (price.0 * 1_000_000.0) as u64;
+                sum.fetch_add(scaled, Ordering::Relaxed);
                 count.fetch_add(1, Ordering::Relaxed);
             },
         )?;
 
-        let total = f32::from_bits(sum_bits.load(Ordering::Relaxed));
-        let avg = total / count.load(Ordering::Relaxed) as f32;
+        let avg = (sum.load(Ordering::Relaxed) as f64 / 1_000_000.0)
+            / count.load(Ordering::Relaxed) as f64;
 
         println!("{step},{avg}");
     }
