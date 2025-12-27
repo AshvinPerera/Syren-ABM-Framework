@@ -2075,27 +2075,33 @@ impl LockedAttribute {
 /// Interprets a raw byte slice as a typed slice.
 ///
 /// # Safety
-/// - `ptr` must be properly aligned for `T`
+/// - `pointer` must be properly aligned for `T`
 /// - `bytes` must be a multiple of `size_of::<T>()`
 /// - the memory region must contain fully initialized `T` values
 /// - the returned slice must not outlive the backing storage
 
 #[inline]
-pub unsafe fn cast_slice<'a, T>(ptr: *const u8, bytes: usize) -> &'a [T] {
-    let len = bytes / std::mem::size_of::<T>();
-    unsafe{slice::from_raw_parts(ptr as *const T, len)}
+pub unsafe fn cast_slice<'a, T>(pointer: *const u8, bytes: usize) -> &'a [T] {
+    let size = std::mem::size_of::<T>();
+    if size == 0 { return &[]; }
+    debug_assert_eq!(bytes % size, 0, "bytes not multiple of element size");
+    let len = bytes / size;
+    unsafe { slice::from_raw_parts(pointer as *const T, len) }
 }
 
 /// Interprets a mutable raw byte slice as a mutable typed slice.
 ///
 /// # Safety
-/// - `ptr` must be properly aligned for `T`
+/// - `pointer` must be properly aligned for `T`
 /// - `bytes` must be a multiple of `size_of::<T>()`
 /// - the memory region must contain fully initialized `T` values
 /// - no aliasing mutable references may exist
 
 #[inline]
-pub unsafe fn cast_slice_mut<'a, T>(ptr: *mut u8, bytes: usize) -> &'a mut [T] {
-    let len = bytes / std::mem::size_of::<T>();
-    unsafe{slice::from_raw_parts_mut(ptr as *mut T, len)}
+pub unsafe fn cast_slice_mut<'a, T>(pointer: *mut u8, bytes: usize) -> &'a mut [T] {
+    let size = std::mem::size_of::<T>();
+    if size == 0 { return &mut []; }
+    debug_assert_eq!(bytes % size, 0, "bytes not multiple of element size");
+    let len = bytes / size;
+    unsafe { slice::from_raw_parts_mut(pointer as *mut T, len) }
 }

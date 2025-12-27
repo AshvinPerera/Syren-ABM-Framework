@@ -390,6 +390,11 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
     let mut registry = registry
         .write()
         .map_err(|_| RegistryError::PoisonedLock)?;
+
+    if std::mem::size_of::<T>() == 0 {
+        return Err(RegistryError::ZeroSizedComponent { type_id: TypeId::of::<T>() }.into());
+    }
+    
     Ok(registry.register::<T>()?)
 }
 

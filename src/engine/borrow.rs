@@ -81,6 +81,7 @@ impl BorrowTracker {
   
     pub fn acquire_read(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
         let state = &self.states[component_id as usize];
+        let mut spins = 0u32;
 
         loop {
             let current_state = state.load(Ordering::Acquire);
@@ -96,7 +97,12 @@ impl BorrowTracker {
                 return Ok(());
             }
 
-            std::hint::spin_loop();
+            spins += 1;
+            if spins % 1024 == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
         }
     }
 
@@ -136,6 +142,7 @@ impl BorrowTracker {
 
     pub fn acquire_write(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
         let state = &self.states[component_id as usize];
+        let mut spins = 0u32;
 
         loop {
             let current_state = state.load(Ordering::Acquire);
@@ -149,7 +156,12 @@ impl BorrowTracker {
                 return Ok(());
             }
 
-            std::hint::spin_loop();
+            spins += 1;
+            if spins % 1024 == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
         }
     }
 

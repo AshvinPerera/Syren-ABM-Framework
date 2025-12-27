@@ -125,6 +125,12 @@ pub enum RegistryError {
         component_id: ComponentID
     },
 
+    /// Zero sized component registered
+    ZeroSizedComponent { 
+        /// type id of the zero sized component
+        type_id: TypeId 
+    },
+
     /// Registry or factory table lock was poisoned.
     PoisonedLock,
 }
@@ -136,6 +142,7 @@ impl fmt::Display for RegistryError {
             RegistryError::CapacityExceeded { cap } => write!(f, "component registry capacity exceeded (cap {cap})"),
             RegistryError::NotRegistered { type_id } => write!(f, "component type is not registered: {:?}", type_id),
             RegistryError::MissingFactory { component_id } => write!(f, "missing component factory for component id {}", component_id),
+            RegistryError::ZeroSizedComponent { type_id } => write!(f, "zero-sized component is not allowed: {:?}", type_id),
             RegistryError::PoisonedLock => f.write_str("component registry lock poisoned"),
         }
     }
