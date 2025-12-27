@@ -111,9 +111,19 @@ struct ChunkView {
     chunk_lens: Vec<usize>,
     n_reads: usize,
     n_writes: usize,
-    read_ptrs: Vec<(usize, usize)>,
-    write_ptrs: Vec<(usize, usize)>,
+    read_ptrs: Vec<(*const u8, usize)>,
+    write_ptrs: Vec<(*mut u8, usize)>,
 }
+
+// ChunkView contains raw pointers into archetype-owned component storage.
+// These pointers are:
+// - valid for the duration of for_each_abstraction_unchecked
+// - protected by phase discipline (no structural mutation)
+// - protected by BorrowGuard (no aliasing violations)
+// - chunk-disjoint across parallel tasks
+
+unsafe impl Send for ChunkView {}
+unsafe impl Sync for ChunkView {}
 
 struct IterationScope<'a>(&'a AtomicUsize);
 
@@ -1013,18 +1023,18 @@ impl ECSData {
             let n_reads = read_guards.len();
             let n_writes = write_guards.len();
 
-            let mut read_ptrs: Vec<(usize, usize)> = Vec::with_capacity(chunk_count * n_reads);
-            let mut write_ptrs: Vec<(usize, usize)> = Vec::with_capacity(chunk_count * n_writes);
+            let mut read_ptrs: Vec<(*const u8, usize)> = Vec::with_capacity(chunk_count * n_reads);
+            let mut write_ptrs: Vec<(*mut u8, usize)> = Vec::with_capacity(chunk_count * n_writes);
 
             for chunk in 0..chunk_count {
                 let len = chunk_lens[chunk];
 
                 if len == 0 {
                     for _ in 0..n_reads {
-                        read_ptrs.push((0usize, 0));
+                        read_ptrs.push((std::ptr::null(), 0));
                     }
                     for _ in 0..n_writes {
-                        write_ptrs.push((0usize, 0));
+                        write_ptrs.push((std::ptr::null_mut(), 0));
                     }
                     continue;
                 }
@@ -1037,14 +1047,14 @@ impl ECSData {
                     let (ptr, bytes) = g
                         .chunk_bytes(chunk_id, len)
                         .ok_or(ExecutionError::InternalExecutionError)?;
-                    read_ptrs.push((ptr as usize, bytes));
+                    read_ptrs.push((ptr as *const u8, bytes));
                 }
 
                 for g in &mut write_guards {
                     let (ptr, bytes) = g
                         .chunk_bytes_mut(chunk_id, len)
                         .ok_or(ExecutionError::InternalExecutionError)?;
-                    write_ptrs.push((ptr as usize, bytes));
+                    write_ptrs.push((ptr as *mut u8, bytes));
                 }
             }
 
@@ -1101,28 +1111,22 @@ impl ECSData {
 
                             let read_base = chunk * views.n_reads;
                             for i in 0..views.n_reads {
-                                let (addr, bytes) = views.read_ptrs[read_base + i];
-                                if addr == 0 || bytes == 0 {
+                                let (ptr, bytes) = views.read_ptrs[read_base + i];
+                                if ptr.is_null() || bytes == 0 {
                                     fail(ExecutionError::InternalExecutionError);
                                     return;
                                 }
-                                let ptr = addr as *const u8;
-                                unsafe {
-                                    read_views.push(std::slice::from_raw_parts(ptr, bytes));
-                                }
+                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
                             }
 
                             let write_base = chunk * views.n_writes;
                             for i in 0..views.n_writes {
-                                let (addr, bytes) = views.write_ptrs[write_base + i];
-                                if addr == 0 || bytes == 0 {
+                                let (ptr, bytes) = views.write_ptrs[write_base + i];
+                                if ptr.is_null() || bytes == 0 {
                                     fail(ExecutionError::InternalExecutionError);
                                     return;
                                 }
-                                let ptr = addr as *mut u8;
-                                unsafe {
-                                    write_views.push(std::slice::from_raw_parts_mut(ptr, bytes));
-                                }
+                                unsafe { write_views.push(std::slice::from_raw_parts_mut(ptr, bytes)); }
                             }
 
                             // Call user callback
@@ -1146,7 +1150,7 @@ impl ECSData {
                 }
             }
 
-            // Guards drop here after scope ends => pointers valid for duration
+            // Guards drop
             drop(read_guards);
             drop(write_guards);
         }
