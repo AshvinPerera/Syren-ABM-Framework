@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use abm_framework::engine::component::{
     Bundle, register_component, freeze_components, component_id_of,
@@ -262,7 +262,7 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
         ecs.run(&mut scheduler)?;
 
         let world = ecs.world_ref();
-        let sum = AtomicU32::new(0);
+        let sum = AtomicU64::new(0);
         let count = AtomicU32::new(0);
 
         let qb = world.query()?;
@@ -274,13 +274,14 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
         world.for_each_read2::<Price, FirmTag>(
             query,
             |price, _| {
-                sum.fetch_add(price.0.to_bits(), Ordering::Relaxed);
+                let scaled = (price.0 * 1_000_000.0) as u64;
+                sum.fetch_add(scaled, Ordering::Relaxed);
                 count.fetch_add(1, Ordering::Relaxed);
             },
         )?;
 
-        let avg = f32::from_bits(sum.load(Ordering::Relaxed))
-            / count.load(Ordering::Relaxed) as f32;
+        let avg = (sum.load(Ordering::Relaxed) as f64 / 1_000_000.0)
+            / count.load(Ordering::Relaxed) as f64;
 
         println!("{step},{avg}");
     }
