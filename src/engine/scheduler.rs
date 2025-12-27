@@ -28,13 +28,12 @@
 //! appropriate ECS execution phases; violating phase discipline
 //! may result in undefined behavior.
 
-use std::sync::Mutex;
 use rayon::prelude::*;
 
 use crate::engine::manager::ECSReference;
 use crate::engine::systems::{AccessSets, System, SystemBackend};
 use crate::engine::component::Signature;
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
+use crate::engine::error::{ECSResult, ECSError};
 
 
 /// A logical execution stage used by [`Scheduler`] during planning.
@@ -206,6 +205,11 @@ impl Scheduler {
             if sys.backend() == SystemBackend::GPU {
                 // Flush any pending CPU stage and create a boundary stage.
                 self.cpu_stages.push(Stage::default());
+
+                let mut stage = Stage::default();
+                stage.push(idx, &sys.access());
+                self.cpu_stages.push(stage);
+
                 continue;
             }
 
@@ -251,33 +255,12 @@ impl Scheduler {
                 continue;
             }
 
-            let err: Mutex<Option<ECSError>> = Mutex::new(None);
-
-            stage.system_indices.par_iter().for_each(|&system_idx| {
-                let already_failed = match err.lock() {
-                    Ok(g) => g.is_some(),
-                    Err(_) => true,
-                };
-                if already_failed {
-                    return;
-                }
-
-                if let Err(e) = self.systems[system_idx].run(ecs) {
-                    if let Ok(mut g) = err.lock() {
-                        *g = Some(e);
-                    }
-                }
-            });
-
-            match err.into_inner() {
-                Ok(Some(e)) => return Err(e),
-                Ok(None) => {}
-                Err(_) => {
-                    return Err(ECSError::from(ExecutionError::LockPoisoned {
-                        what: "scheduler error latch mutex",
-                    }))
-                }
-            }
+            stage
+                .system_indices
+                .par_iter()
+                .try_for_each(|&system_idx| -> ECSResult<()> {
+                    self.systems[system_idx].run(ecs)
+                })?;
 
             ecs.clear_borrows();
         }
