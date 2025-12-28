@@ -34,6 +34,7 @@ use std::{
 
 use crate::engine::storage::{Attribute, TypeErasedAttribute};
 use crate::engine::types::{ComponentID, COMPONENT_CAP, SIGNATURE_SIZE};
+use crate::engine::error::{ECSResult, RegistryError, RegistryResult};
 
 
 /// Factory function for constructing an empty type-erased component attribute column.
@@ -288,11 +289,13 @@ impl ComponentRegistry {
     /// ## Panics
     /// Panics if `COMPONENT_CAP` is exceeded.
 
-    fn alloc_id(&mut self) -> ComponentID {
+    fn alloc_id(&mut self) -> Result<ComponentID, RegistryError> {
         let component_id = self.next_id;
-        assert!((component_id as usize) < COMPONENT_CAP, "Exceeded configured component capacity.");
+        if (component_id as usize) >= COMPONENT_CAP {
+            return Err(RegistryError::CapacityExceeded { cap: COMPONENT_CAP });
+        }
         self.next_id = component_id.wrapping_add(1);
-        component_id
+        Ok(component_id)
     }
 
     /// Freezes the registry, preventing further component registrations.
@@ -334,19 +337,28 @@ impl ComponentRegistry {
     /// - Panics if the registry is frozen.
     /// - Panics if `COMPONENT_CAP` is exceeded.    
 
-    pub fn register<T: 'static + Send + Sync>(&mut self) -> ComponentID {
+    pub fn register<T: 'static + Send + Sync>(&mut self) -> Result<ComponentID, RegistryError> {
         let type_id = TypeId::of::<T>();
-        if let Some(&existing) = self.by_type.get(&type_id) { 
-            return existing; 
+        if let Some(&existing) = self.by_type.get(&type_id) {
+            return Ok(existing);
         }
-        
-        assert!(!self.frozen, "Registry frozen");
-        let id = self.alloc_id();
+
+        if self.frozen {
+            return Err(RegistryError::Frozen);
+        }
+
+        let id = self.alloc_id()?;
         self.by_type.insert(type_id, id);
         self.by_id[id as usize] = Some(ComponentDesc::of::<T>().with_id(id));
-        
-        component_factories().write().unwrap()[id as usize] = Some(new_attribute_storage::<T>);
-        id
+
+        {
+            let mut factories = component_factories()
+                .write()
+                .map_err(|_| RegistryError::PoisonedLock)?;
+            factories[id as usize] = Some(new_attribute_storage::<T>);
+        }
+
+        Ok(id)
     }
 
     /// Returns the `ComponentID` for `T`, if registered.    
@@ -359,8 +371,9 @@ impl ComponentRegistry {
     /// ## Panics
     /// Panics if `T` was not registered.
 
-    pub fn require_id_of<T: 'static>(&self) -> ComponentID {
-        self.id_of::<T>().expect("component not registered.")
+    pub fn require_id_of<T: 'static>(&self) -> Result<ComponentID, RegistryError> {
+        self.id_of::<T>()
+            .ok_or(RegistryError::NotRegistered { type_id: TypeId::of::<T>() })
     }
 }
 
@@ -372,11 +385,19 @@ impl ComponentRegistry {
 /// ## Panics
 /// Panics if the registry is frozen or capacity is exceeded.
 
-pub fn register_component<T: 'static + Send + Sync>() -> ComponentID {
+pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> {
     let registry = component_registry();
-    let mut registry = registry.write().unwrap();
-    registry.register::<T>()
+    let mut registry = registry
+        .write()
+        .map_err(|_| RegistryError::PoisonedLock)?;
+
+    if std::mem::size_of::<T>() == 0 {
+        return Err(RegistryError::ZeroSizedComponent { type_id: TypeId::of::<T>() }.into());
+    }
+    
+    Ok(registry.register::<T>()?)
 }
+
 
 /// Freezes the global component registry.
 ///
@@ -387,36 +408,51 @@ pub fn register_component<T: 'static + Send + Sync>() -> ComponentID {
 /// ## Panics
 /// Panics if the registry lock is poisoned.
 
-pub fn freeze_components() {
+pub fn freeze_components() -> ECSResult<()> {
     let registry = component_registry();
-    let mut registry = registry.write().unwrap();
+    let mut registry = registry
+        .write()
+        .map_err(|_| RegistryError::PoisonedLock)?;
     registry.freeze();
+    Ok(())
 }
+
 
 /// Returns the registered `ComponentID` for type `T`.
 ///
 /// ## Panics
 /// Panics if `T` is not registered.
 
-pub fn component_id_of<T: 'static>() -> ComponentID {
+pub fn component_id_of<T: 'static>() -> ECSResult<ComponentID> {
     let registry = component_registry();
-    let registry = registry.read().unwrap();
-    registry.require_id_of::<T>()
+    let registry = registry
+        .read()
+        .map_err(|_| RegistryError::PoisonedLock)?;
+    Ok(registry.require_id_of::<T>()?)
 }
+
 
 /// Returns the `ComponentID` associated with a runtime `TypeId`, if registered.
-pub fn component_id_of_type_id(type_id: TypeId) -> Option<ComponentID> {
+pub fn component_id_of_type_id(type_id: TypeId) -> ECSResult<Option<ComponentID>> {
     let registry = component_registry();
-    let registry = registry.read().unwrap();
-    registry.component_id_of_type_id(type_id)
+    let registry = registry
+        .read()
+        .map_err(|_| RegistryError::PoisonedLock)?;
+    Ok(registry.component_id_of_type_id(type_id))
 }
 
+
 /// Returns a copy of the descriptor for `component_id`, if registered.
-pub fn component_description_by_component_id(component_id: ComponentID) -> Option<ComponentDesc> {
+pub fn component_description_by_component_id(
+    component_id: ComponentID,
+) -> ECSResult<Option<ComponentDesc>> {
     let registry = component_registry();
-    let registry = registry.read().unwrap();
-    registry.description_by_component_id(component_id).cloned()
+    let registry = registry
+        .read()
+        .map_err(|_| RegistryError::PoisonedLock)?;
+    Ok(registry.description_by_component_id(component_id).cloned())
 }
+
 
 /// Describes a registered component type.
 ///
@@ -504,13 +540,21 @@ impl std::fmt::Display for ComponentDesc {
 /// ## Purpose
 /// Used by archetype construction to allocate an empty attribute column for a component.
 ///
-/// ## Panics
-/// Panics if no factory was registered for this component ID.
+/// ## Errors
+/// Returns `RegistryError::MissingFactory` if the ID is out of range or no factory exists.
+/// Returns `RegistryError::PoisonedLock` if the registry lock is poisoned.
 
-pub fn get_component_storage_factory(component_id: ComponentID) -> FactoryFn {
-    component_factories()
-        .read().unwrap()[component_id as usize]
-        .expect("no factory registered for this component id")
+pub fn get_component_storage_factory(component_id: ComponentID) -> RegistryResult<FactoryFn> {
+    let idx = component_id as usize;
+    if idx >= COMPONENT_CAP {
+        return Err(RegistryError::MissingFactory { component_id });
+    }
+
+    let factories = component_factories()
+        .read()
+        .map_err(|_| RegistryError::PoisonedLock)?;
+
+    factories[idx].ok_or_else(|| RegistryError::MissingFactory { component_id })
 }
 
 /// Creates an empty type-erased storage column for `component_id`.
@@ -518,9 +562,9 @@ pub fn get_component_storage_factory(component_id: ComponentID) -> FactoryFn {
 /// ## Purpose
 /// Convenience wrapper around `get_component_storage_factory`.
 ///
-/// ## Panics
-/// Panics if no factory exists for the provided ID.
-
-pub fn make_empty_component(component_id: ComponentID) -> Box<dyn TypeErasedAttribute> {
-    get_component_storage_factory(component_id)()
+/// ## Errors
+/// Propagates `RegistryError` if the factory is missing or the registry is poisoned.
+pub fn make_empty_component(component_id: ComponentID) -> RegistryResult<Box<dyn TypeErasedAttribute>> {
+    let factory = get_component_storage_factory(component_id)?;
+    Ok(factory())
 }

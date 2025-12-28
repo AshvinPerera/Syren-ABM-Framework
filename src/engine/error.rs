@@ -85,12 +85,70 @@
 //!   user-facing diagnostics.
 //! * [`fmt::Debug`] retains full structural detail for debugging and telemetry.
 
-
+use std::borrow::Cow;
 use std::fmt;
 use std::any::TypeId;
 
 use crate::engine::types::{ShardID, ChunkID, RowID, ComponentID};
 
+
+/// Errors from the global component registry and its factories.
+///
+/// These cover:
+/// - attempting to register after freeze
+/// - exceeding the component ID capacity
+/// - missing registrations / factories
+/// - lock poisoning within the registry internals
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+
+    /// Registry has been frozen; registrations are not allowed.
+    Frozen,
+
+    /// Component capacity exceeded (no more IDs available).
+    CapacityExceeded { 
+        /// Capacity
+        cap: usize 
+    },
+
+    /// A type was requested but never registered.
+    NotRegistered { 
+        /// Type ID
+        type_id: TypeId 
+    },
+
+    /// A factory for a registered component ID is missing.
+    MissingFactory { 
+        /// Component ID of missing factory
+        component_id: ComponentID
+    },
+
+    /// Zero sized component registered
+    ZeroSizedComponent { 
+        /// type id of the zero sized component
+        type_id: TypeId 
+    },
+
+    /// Registry or factory table lock was poisoned.
+    PoisonedLock,
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegistryError::Frozen => f.write_str("component registry is frozen"),
+            RegistryError::CapacityExceeded { cap } => write!(f, "component registry capacity exceeded (cap {cap})"),
+            RegistryError::NotRegistered { type_id } => write!(f, "component type is not registered: {:?}", type_id),
+            RegistryError::MissingFactory { component_id } => write!(f, "missing component factory for component id {}", component_id),
+            RegistryError::ZeroSizedComponent { type_id } => write!(f, "zero-sized component is not allowed: {:?}", type_id),
+            RegistryError::PoisonedLock => f.write_str("component registry lock poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
 
 /// Returned when the system cannot satisfy a request to create or place
 /// additional entities because the target container has insufficient capacity.
@@ -323,6 +381,7 @@ impl std::error::Error for TypeMismatchError {}
 /// }
 /// ```
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeError {
     
@@ -336,6 +395,9 @@ pub enum AttributeError {
     ///
     /// The string identifies which index overflowed (e.g. `"row"` or `"chunk"`).
     IndexOverflow(&'static str),
+
+    /// An internal storage invariant was violated.
+    InternalInvariant(&'static str),
 }
 
 impl fmt::Display for AttributeError {
@@ -344,6 +406,7 @@ impl fmt::Display for AttributeError {
             AttributeError::Position(e) => write!(f, "{e}"),
             AttributeError::TypeMismatch(e) => write!(f, "{e}"),
             AttributeError::IndexOverflow(which) => write!(f, "index overflow constructing {}", which),
+            AttributeError::InternalInvariant(msg) => write!(f, "internal storage invariant violated: {}", msg),
         }
     }
 }
@@ -387,6 +450,7 @@ impl From<TypeMismatchError> for AttributeError {
 /// ### Display
 /// Human-readable, single-line messages suitable for logs.
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
 
@@ -435,8 +499,14 @@ pub enum SpawnError {
         got: (ChunkID, RowID) 
     },
     
+    /// A shard mutex was poisoned (panic occurred while holding it).
+    ShardLockPoisoned,
+
     /// An invalid or unregistered component ID was encountered.
     InvalidComponentId,
+
+    /// Component registry / factory error encountered during spawn or structural mutation.
+    Registry(RegistryError),
 }
 
 impl fmt::Display for SpawnError {
@@ -456,12 +526,25 @@ impl fmt::Display for SpawnError {
                 "component storages became misaligned; expected position {:?}, got {:?}",
                 expected, got
             ),
+            SpawnError::ShardLockPoisoned => write!(f, "shard lock poisoned"),
             SpawnError::InvalidComponentId => write!(f, "invalid component id"),
+            SpawnError::Registry(e) => write!(f, "registry error: {e}"),
         }
     }
 }
 
-impl std::error::Error for SpawnError {}
+impl std::error::Error for SpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SpawnError::Capacity(e) => Some(e),
+            SpawnError::ShardBounds(e) => Some(e),
+            SpawnError::StorageSwapRemoveFailed(e) => Some(e),
+            SpawnError::StoragePushFailedWith(e) => Some(e),
+            SpawnError::Registry(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<CapacityError> for SpawnError {
     fn from(e: CapacityError) -> Self { SpawnError::Capacity(e) }
@@ -472,6 +555,10 @@ impl From<ShardBoundsError> for SpawnError {
 impl From<AttributeError> for SpawnError {
     fn from(e: AttributeError) -> Self { SpawnError::StoragePushFailedWith(e) }
 }
+impl From<RegistryError> for SpawnError {
+    fn from(e: RegistryError) -> Self { SpawnError::Registry(e) }
+}
+
 
 /// Errors that can occur while moving an entity between archetypes.
 ///
@@ -483,7 +570,8 @@ impl From<AttributeError> for SpawnError {
 /// These errors generally indicate internal inconsistencies or violated
 /// invariants rather than recoverable user-facing failures.
 
-#[derive(Debug)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
 
     /// Component storage layouts were inconsistent between archetypes.
@@ -600,7 +688,19 @@ impl fmt::Display for MoveError {
     }
 }
 
+impl std::error::Error for MoveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MoveError::PushFromFailed { source_error, .. } => Some(source_error),
+            MoveError::PushFailed { source_error, .. } => Some(source_error),
+            MoveError::SwapRemoveError { source_error, .. } => Some(source_error),
+            _ => None,
+        }
+    }
+}
+
 /// Kind of component access requested or held during ECS execution.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessKind {
     /// Shared, read-only access to a component.
@@ -633,6 +733,7 @@ pub enum InvalidAccessReason {
 /// * Always deterministic
 /// * Never indicate partial ECS mutation
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
 
@@ -692,8 +793,13 @@ pub enum ExecutionError {
 
     SchedulerInvariantViolation,
 
-    /// Unsafe execution path was invoked incorrectly.
+    /// A synchronization primitive was poisoned (panic while held).
+    LockPoisoned {
+        /// message for the lock poisoned error
+        what: &'static str,
+    },
 
+    /// Unsafe execution path was invoked incorrectly.
     InternalExecutionError,
 }
 
@@ -728,9 +834,9 @@ impl fmt::Display for ExecutionError {
                 f.write_str("scheduler violated declared access invariants")
             }
 
-            ExecutionError::InternalExecutionError => {
-                f.write_str("internal ECS execution error")
-            }
+            ExecutionError::LockPoisoned { what } => write!(f, "lock poisoned: {}", what),
+            ExecutionError::InternalExecutionError => f.write_str("internal ECS execution error"),
+            
         }
     }
 }
@@ -740,7 +846,11 @@ impl std::error::Error for ExecutionError {}
 /// Result type used by the ECS engine.
 pub type ECSResult<T> = Result<T, ECSError>;
 
+/// Result type used by the component registry and factories.
+pub type RegistryResult<T> = Result<T, RegistryError>;
+
 /// Unified error type for the public ECS API.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ECSError {
     /// Entity spawning error
@@ -749,9 +859,15 @@ pub enum ECSError {
     Execute(ExecutionError),
     /// Component move error
     Move(MoveError),
+    
+    /// Component registry and component factory errors
+    Registry(RegistryError),
 
-    /// Internal lock poisoning / invariant failures
-    Internal(&'static str),
+    /// Low-level component storage access error
+    Attribute(AttributeError),
+
+    /// Internal lock poisoning / invariant failures.
+    Internal(Cow<'static, str>),
 }
 
 impl std::fmt::Display for ECSError {
@@ -760,12 +876,25 @@ impl std::fmt::Display for ECSError {
             ECSError::Spawn(e) => write!(f, "spawn error: {e}"),
             ECSError::Execute(e) => write!(f, "execution error: {e}"),
             ECSError::Move(e) => write!(f, "move error: {e}"),
+            ECSError::Registry(e) => write!(f, "registry error: {e}"),
+            ECSError::Attribute(e) => write!(f, "attribute error: {e}"),
             ECSError::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
 }
 
-impl std::error::Error for ECSError {}
+impl std::error::Error for ECSError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ECSError::Spawn(e) => Some(e),
+            ECSError::Execute(e) => Some(e),
+            ECSError::Move(e) => Some(e),
+            ECSError::Registry(e) => Some(e),
+            ECSError::Attribute(e) => Some(e),
+            ECSError::Internal(_) => None,
+        }
+    }
+}
 
 impl From<SpawnError> for ECSError {
     fn from(e: SpawnError) -> Self { ECSError::Spawn(e) }
@@ -775,4 +904,10 @@ impl From<ExecutionError> for ECSError {
 }
 impl From<MoveError> for ECSError {
     fn from(e: MoveError) -> Self { ECSError::Move(e) }
+}
+impl From<RegistryError> for ECSError {
+    fn from(e: RegistryError) -> Self { ECSError::Registry(e) }
+}
+impl From<AttributeError> for ECSError {
+    fn from(e: AttributeError) -> Self { ECSError::Attribute(e) }
 }

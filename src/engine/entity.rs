@@ -47,7 +47,7 @@
 //! - Never mutating entity metadata while systems hold archetype borrows
 //! - Applying structural changes only at synchronization points
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::engine::types::{
@@ -223,7 +223,14 @@ impl Entities {
             i
         } else {
             self.ensure_capacity(1024)?;
-            self.free_store.pop().expect("capacity added must yield a slot.")
+            match self.free_store.pop() {
+                Some(i) => i,
+                None => {
+                    let entities_needed = (self.versions.len() as u64).saturating_add(1);
+                    let capacity = (INDEX_CAP as u64).saturating_add(1);
+                    return Err(CapacityError { entities_needed, capacity });
+                }
+            }
         };
 
         let version = self.versions[index as usize];
@@ -263,7 +270,7 @@ impl Entities {
         }
     }
 
-     /// Returns `true` if the entity is alive and not stale.
+    /// Returns `true` if the entity is alive and not stale.
     pub fn is_alive(&self, entity: Entity) -> bool {
         let (_, i, v) = split_entity(entity);
         let index = i as usize; 
@@ -365,6 +372,15 @@ impl EntityShards {
     /// Returns the total number of entity shards.
     #[inline] pub fn shard_count(&self) -> usize { self.shards.len() }
 
+    /// Lock a shard's entity pool.
+    #[inline]
+    fn lock_entities(&self, shard_id: ShardID) -> Result<MutexGuard<'_, Entities>, SpawnError> {
+        self.shards[shard_id as usize]
+            .entities
+            .lock()
+            .map_err(|_| SpawnError::ShardLockPoisoned)
+    }
+
     /// Creates a new sharded entity manager.
     ///
     /// ## Purpose
@@ -416,54 +432,60 @@ impl EntityShards {
     /// The returned entity is alive and has a valid location.
 
     pub fn spawn_on(&self, shard_id: ShardID, location: EntityLocation) -> Result<Entity, SpawnError> {
-        if (shard_id as usize) >= self.shard_count() {
-            return Err(
-                SpawnError::ShardBounds(
-                    ShardBoundsError {
-                        index: shard_id,
-                        max_index: (self.shard_count() - 1) as u32,
-                    }
-                )
-            );
+        let shard_count = self.shard_count();
+        if (shard_id as usize) >= shard_count {
+            return Err(SpawnError::ShardBounds(ShardBoundsError {
+                index: shard_id,
+                max_index: shard_count.saturating_sub(1) as u32,
+            }));
         }
-        
-        let mut entities = self.shards[shard_id as usize].entities.lock().unwrap();
-        let before = entities.free_store.len();
+
+        // Lock shard entities.
+        let mut entities = self.lock_entities(shard_id)?;
+
+        let before_free = entities.free_store.len();
         let entity = entities.spawn(shard_id, location)?;
-        
-        self.shards[shard_id as usize]
-            .live_entity_count
-            .fetch_add(1, Ordering::Relaxed);
-        
-        if before > 0 {
-            self.shards[shard_id as usize]
-                .approximate_free_store_length
-                .fetch_sub(1, Ordering::Relaxed);
+
+        // Update counters.
+        let shard = &self.shards[shard_id as usize];
+        shard.live_entity_count.fetch_add(1, Ordering::Relaxed);
+
+        if before_free > 0 {
+            shard.approximate_free_store_length.fetch_sub(1, Ordering::Relaxed);
         } else {
-            let after = entities.free_store.len();
-            let added_slots = after as u32;
-            self.shards[shard_id as usize]
-                .approximate_free_store_length
-                .fetch_add(added_slots, Ordering::Relaxed);
+            let after_free = entities.free_store.len();
+            shard.approximate_free_store_length
+                .fetch_add(after_free as u32, Ordering::Relaxed);
         }
 
         Ok(entity)
     }
 
+
     /// Returns `true` if the entity is alive.
     pub fn is_alive(&self, entity: Entity) -> bool {
         let shard_id = entity.shard() as usize;
-        if shard_id >= self.shard_count() { return false; }
-        let entities = self.shards[shard_id].entities.lock().unwrap();
-        entities.is_alive(entity)
+        if shard_id >= self.shard_count() {
+            return false;
+        }
+
+        match self.shards[shard_id].entities.lock() {
+            Ok(entities) => entities.is_alive(entity),
+            Err(_) => false,
+        }
     }
 
     /// Returns the location of an entity, if alive.
     pub fn get_location(&self, entity: Entity) -> Option<EntityLocation> {
         let shard_id = entity.shard() as usize;
-        if shard_id >= self.shard_count(){ return None; }
-        let entities = self.shards[shard_id].entities.lock().unwrap();
-        entities.get_location(entity)
+        if shard_id >= self.shard_count() {
+            return None;
+        }
+
+        match self.shards[shard_id].entities.lock() {
+            Ok(entities) => entities.get_location(entity),
+            Err(_) => None,
+        }
     }
 
     /// Updates the archetype location metadata for an entity.
@@ -479,24 +501,32 @@ impl EntityShards {
 
     pub fn set_location(&self, entity: Entity, location: EntityLocation) {
         let shard_id = entity.shard() as usize;
-        if shard_id >= self.shard_count() { return; }
-        let mut entities = self.shards[shard_id].entities.lock().unwrap();
-        entities.set_location(entity, location);
+        if shard_id >= self.shard_count() {
+            return;
+        }
+
+        if let Ok(mut entities) = self.shards[shard_id].entities.lock() {
+            entities.set_location(entity, location);
+        }
     }
 
     /// Despawns an entity.
     pub fn despawn(&self, entity: Entity) -> bool {
         let shard_id = entity.shard() as usize;
-        if shard_id >= self.shard_count() { return false; }
-        let mut entities = self.shards[shard_id as usize].entities.lock().unwrap();
-        if entities.despawn(entity) {
-            self.shards[shard_id]
-                .approximate_free_store_length
-                .fetch_add(1, Ordering::Relaxed);
+        if shard_id >= self.shard_count() {
+            return false;
+        }
 
-            self.shards[shard_id]
-                .live_entity_count
-                .fetch_sub(1, Ordering::Relaxed);
+        let shard = &self.shards[shard_id];
+
+        let mut entities = match shard.entities.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+
+        if entities.despawn(entity) {
+            shard.approximate_free_store_length.fetch_add(1, Ordering::Relaxed);
+            shard.live_entity_count.fetch_sub(1, Ordering::Relaxed);
             true
         } else {
             false
