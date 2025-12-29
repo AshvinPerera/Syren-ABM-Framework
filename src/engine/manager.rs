@@ -384,6 +384,80 @@ impl<'a> ECSReference<'a> {
 
         Ok(())
     }
+
+    /// Executes a parallel, read-only reduction over ECS component data.
+    ///
+    /// ## Purpose
+    /// This function computes a **single aggregated result** from all entities
+    /// matching the given query, without mutating ECS state. It is intended for
+    /// summary statistics, diagnostics, and global observations (e.g. counts,
+    /// sums, means, variances).
+    ///
+    /// ## Execution model
+    /// The reduction proceeds in two phases:
+    /// 1. **Parallel accumulation** — each worker thread processes a disjoint
+    ///    subset of archetype chunks and accumulates results into a thread-local
+    ///    accumulator of type `R`.
+    /// 2. **Deterministic combination** — all partial results are combined
+    ///    serially using the provided `combine` function to produce the final
+    ///    result.
+    ///
+    /// ## Concurrency and safety
+    /// Runtime safety is enforced by:
+    /// * phase discipline (read phase only),
+    /// * [`IterationScope`] (prevents structural mutation),
+    /// * [`BorrowGuard`] (enforces read-only component access).
+    ///
+    /// Structural ECS mutations and component writes are **not permitted** during
+    /// a reduction. Queries containing write components will be rejected.
+    ///
+    /// ## Parameters
+    /// * `query` — A built ECS query specifying which components to read.
+    /// * `init` — Constructs a fresh accumulator value for each worker thread.
+    /// * `fold_chunk` — Updates an accumulator using the raw component slices
+    ///   for a single chunk.
+    /// * `combine` — Merges two accumulator values; must be associative.
+    ///
+    /// ## Determinism
+    /// Partial results are combined in a deterministic order independent of
+    /// thread scheduling.
+    ///
+    /// ## Errors
+    /// Returns an error if:
+    /// * the query requests write access,
+    /// * required components are missing,
+    /// * a runtime safety invariant is violated.
+
+    pub fn reduce_abstraction<R>(
+        &self,
+        query: BuiltQuery,
+        init: impl Fn() -> R + Send + Sync,
+        fold_chunk: impl Fn(&mut R, &[&[u8]], usize) + Send + Sync,
+        combine: impl Fn(&mut R, R) + Send + Sync,
+    ) -> ECSResult<R>
+    where
+        R: Send + 'static,
+    {
+        if !query.writes.is_empty() {
+            return Err(ECSError::Internal(
+                "reduce_abstraction: writes not allowed".into(),
+            ));
+        }
+
+        let _phase = self.manager.phase_read()?;
+        let _iter = IterationScope::new(&self.manager.active_iters);
+
+        let _borrows = BorrowGuard::new(
+            &self.manager.borrows,
+            &query.reads,
+            &query.writes,
+        )
+        .map_err(ECSError::from)?;
+
+        let data = unsafe { self.manager.data_ref_unchecked() };
+        data.reduce_abstraction_unchecked(query, init, fold_chunk, combine)
+            .map_err(ECSError::from)
+    }   
 }
 
 impl ECSReference<'_> {
@@ -586,6 +660,69 @@ impl ECSReference<'_> {
                 f(&a[i], &b[i], &mut c[i], &mut d[i]);
             }
         })
+    }
+
+    /// Executes a typed, parallel reduction over a single read-only component.
+    ///
+    /// ## Purpose
+    /// This is a convenience wrapper around [`reduce_abstraction`] that provides
+    /// typed access to a single component column. The supplied `fold` function
+    /// is invoked once per entity to update a thread-local accumulator.
+    ///
+    /// ## Execution model
+    /// * Each worker thread processes disjoint chunks of entities.
+    /// * The accumulator is updated locally using `fold`.
+    /// * All partial accumulators are combined deterministically using `combine`.
+    ///
+    /// ## Safety and concurrency
+    /// This function is safe to call from systems. Runtime safety is enforced via:
+    /// * read-only phase discipline,
+    /// * iteration scope tracking,
+    /// * component borrow checking.
+    ///
+    /// The query must specify **exactly one read component** and no writes.
+    ///
+    /// ## Parameters
+    /// * `query` — A built query reading exactly one component of type `A`.
+    /// * `init` — Constructs a fresh accumulator for each worker thread.
+    /// * `fold` — Updates the accumulator for each entity.
+    /// * `combine` — Merges two accumulator values; must be associative.
+    ///
+    /// ## Typical use cases
+    /// * Counting entities
+    /// * Summing numeric component fields
+    /// * Computing means or variances
+    /// * Global diagnostics and convergence checks
+
+    pub fn reduce_read<A, R>(
+        &self,
+        query: BuiltQuery,
+        init: impl Fn() -> R + Send + Sync,
+        fold: impl Fn(&mut R, &A) + Send + Sync,
+        combine: impl Fn(&mut R, R) + Send + Sync,
+    ) -> ECSResult<R>
+    where
+        A: 'static + Send + Sync,
+        R: Send + 'static,
+    {
+        if query.reads.len() != 1 || !query.writes.is_empty() {
+            return Err(ECSError::Internal(
+                "reduce_read: requires exactly 1 read and 0 writes".into(),
+            ));
+        }
+
+        self.reduce_abstraction(
+            query,
+            init,
+            move |acc, cols, _| unsafe {
+                let slice =
+                    crate::engine::storage::cast_slice::<A>(cols[0].as_ptr(), cols[0].len());
+                for v in slice {
+                    fold(acc, v);
+                }
+            },
+            combine,
+        )
     }
 
 }
@@ -1156,6 +1293,157 @@ impl ECSData {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn reduce_abstraction_unchecked<R>(
+        &self,
+        query: BuiltQuery,
+        init: impl Fn() -> R + Send + Sync,
+        fold_chunk: impl Fn(&mut R, &[&[u8]], usize) + Send + Sync,
+        combine: impl Fn(&mut R, R) + Send + Sync,
+    ) -> Result<R, ExecutionError>
+    where
+        R: Send + 'static,
+    {
+        let matches = self.matching_archetypes(&query.signature)?;
+
+        let init = Arc::new(init);
+        let fold_chunk = Arc::new(fold_chunk);
+        let combine = Arc::new(combine);
+
+        // (start_chunk, partial)
+        let partials: Arc<Mutex<Vec<(usize, R)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        for matched in matches {
+            let archetype = &self.archetypes[matched.archetype_id as usize];
+
+            // Acquire read guards
+            let mut read_guards: Vec<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>> =
+                Vec::with_capacity(query.reads.len());
+
+            for &cid in &query.reads {
+                let locked = archetype
+                    .component_locked(cid)
+                    .ok_or(ExecutionError::MissingComponent { component_id: cid })?;
+
+                let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
+                    what: "component column (read)",
+                })?;
+
+                read_guards.push(guard);
+            }
+
+            let chunk_count = archetype
+                .chunk_count()
+                .map_err(|_| ExecutionError::InternalExecutionError)?;
+            if chunk_count == 0 {
+                continue;
+            }
+
+            // Precompute chunk lengths
+            let mut chunk_lens = Vec::with_capacity(chunk_count);
+            for c in 0..chunk_count {
+                let len = archetype
+                    .chunk_valid_length(c)
+                    .map_err(|_| ExecutionError::InternalExecutionError)?;
+                chunk_lens.push(len);
+            }
+
+            // Precompute read pointers
+            let n_reads = read_guards.len();
+            let mut read_ptrs: Vec<(*const u8, usize)> =
+                Vec::with_capacity(chunk_count * n_reads);
+
+            for chunk in 0..chunk_count {
+                let len = chunk_lens[chunk];
+
+                if len == 0 {
+                    for _ in 0..n_reads {
+                        read_ptrs.push((std::ptr::null(), 0));
+                    }
+                    continue;
+                }
+
+                let chunk_id: crate::engine::types::ChunkID = chunk
+                    .try_into()
+                    .map_err(|_| ExecutionError::InternalExecutionError)?;
+
+                for g in &read_guards {
+                    let (ptr, bytes) = g
+                        .chunk_bytes(chunk_id, len)
+                        .ok_or(ExecutionError::InternalExecutionError)?;
+                    read_ptrs.push((ptr as *const u8, bytes));
+                }
+            }
+
+            let views = ChunkView {
+                chunk_count,
+                chunk_lens,
+                n_reads,
+                n_writes: 0,
+                read_ptrs,
+                write_ptrs: Vec::new(),
+            };
+
+            let threads = rayon::current_num_threads().max(1);
+            let grainsize = (views.chunk_count / threads).max(8);
+            let views_ref = &views;
+
+            rayon::scope(|s| {
+                let mut start = 0usize;
+                while start < views_ref.chunk_count {
+                    let end = (start + grainsize).min(views_ref.chunk_count);
+
+                    let init = init.clone();
+                    let fold_chunk = fold_chunk.clone();
+                    let partials = partials.clone();
+                    let views = views_ref;
+
+                    s.spawn(move |_| {
+                        let mut local = init();
+                        let mut read_views: Vec<&[u8]> =
+                            Vec::with_capacity(views.n_reads);
+
+                        for chunk in start..end {
+                            let len = views.chunk_lens[chunk];
+                            if len == 0 {
+                                continue;
+                            }
+
+                            read_views.clear();
+                            let base = chunk * views.n_reads;
+
+                            for i in 0..views.n_reads {
+                                let (ptr, bytes) = views.read_ptrs[base + i];
+                                unsafe {
+                                    read_views.push(std::slice::from_raw_parts(ptr, bytes));
+                                }
+                            }
+
+                            fold_chunk(&mut local, &read_views, len);
+                        }
+
+                        partials.lock().unwrap().push((start, local));
+                    });
+
+                    start = end;
+                }
+            });
+
+            drop(read_guards);
+        }
+
+        // Deterministic combine
+        let mut parts = partials.lock().unwrap();
+        parts.sort_by_key(|(start, _)| *start);
+
+        let mut out = init();
+        for (_, p) in parts.drain(..) {
+            combine(&mut out, p);
+        }
+
+        Ok(out)
     }
 
     /// Returns archetypes matching a query signature.
