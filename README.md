@@ -86,10 +86,9 @@ The included examples demonstrate these steps end-to-end.
 - Phase-based scheduling
 
 ## In Development
-- Component validation using a component registry
+- GPU backend integration
 
 ## Future Development
-- GPU integration
 - Scripting language for quick simulation design
 - Message passing
 - Social networks 
