@@ -405,7 +405,7 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
 /// Marker trait for component types that are safe to transfer to and from the GPU.
 ///
 /// ## Purpose
-/// `GpuPod` marks a component as **plain-old-data (POD)** suitable for:
+/// `GPUPod` marks a component as **plain-old-data (POD)** suitable for:
 /// * direct byte-wise copying into GPU buffers,
 /// * use inside GPU storage or uniform buffers,
 /// * round-tripping between CPU and GPU without transformation.
@@ -430,7 +430,7 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
 ///     y: f32,
 /// }
 ///
-/// unsafe impl GpuPod for Position {}
+/// unsafe impl GPUPod for Position {}
 
 #[cfg(feature = "gpu")]
 pub unsafe trait GPUPod: Copy + Send + Sync + 'static {}
@@ -447,13 +447,13 @@ pub unsafe trait GPUPod: Copy + Send + Sync + 'static {}
 /// [`ComponentDesc`].
 ///
 /// ## Requirements
-/// * The component type must implement [`GpuPod`].
+/// * The component type must implement [`GPUPod`].
 /// * The component must already satisfy all normal ECS component constraints
 ///   (non-zero-sized, `'static`, `Send`, `Sync`).
 ///
 /// ## Safety model
 /// This function is safe to call, but relies on the **unsafe contract**
-/// of [`GpuPod`] being upheld by the caller.
+/// of [`GPUPod`] being upheld by the caller.
 ///
 /// ## Freezing behavior
 /// This function must be called **before** [`freeze_components`].
