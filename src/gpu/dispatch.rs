@@ -81,6 +81,19 @@ struct Runtime {
     context: GPUContext,
     mirror: Mirror,
     pipelines: PipelineCache,
+    pending_download: Signature,
+}
+
+impl Runtime {
+    #[inline]
+    fn download_pending_into(
+        &mut self,
+        archetypes_mut: &mut [Archetype],
+        pending: &Signature,
+    ) -> ECSResult<()> {
+        let ctx = &self.context;
+        self.mirror.download_signature(ctx, archetypes_mut, pending)
+    }
 }
 
 static RUNTIME: OnceLock<ECSResult<Mutex<Runtime>>> = OnceLock::new();
@@ -104,6 +117,7 @@ fn runtime() -> ECSResult<MutexGuard<'static, Runtime>> {
             context: GPUContext::new()?,
             mirror: Mirror::new(),
             pipelines: PipelineCache::new(),
+            pending_download: Signature::default(),
         };
         Ok(Mutex::new(run_time))
     });
@@ -121,6 +135,33 @@ fn runtime() -> ECSResult<MutexGuard<'static, Runtime>> {
         ECSError::from(ExecutionError::LockPoisoned { what: "gpu runtime" })
     })
 }
+
+/// Barrier that makes CPU storage consistent by downloading all pending GPU writes.
+pub fn sync_pending_to_cpu(ecs: ECSReference<'_>) -> ECSResult<()> {
+    ecs.with_exclusive(|data| {
+        let mut run_time = runtime()?;
+
+        // Extract pending signature
+        let pending = {
+            let p = run_time.pending_download.clone();
+            if is_signature_empty(&p) {
+                return Ok(());
+            }
+            p
+        };
+
+        // Download pending GPU writes
+        let archetypes_mut: &mut [Archetype] = data.archetypes_mut();
+        run_time.download_pending_into(archetypes_mut, &pending)?;
+
+        // Clear pending set
+        run_time.pending_download = Signature::default();
+
+        Ok(())
+    })
+}
+
+
 
 /// Executes a GPU-backed ECS system.
 ///
@@ -156,29 +197,28 @@ pub fn execute_gpu_system(
         let read_signature = &access.read;
         let write_signature = &access.write;
 
-        // Union signature for upload
         let union = union_signatures(read_signature, write_signature);
 
         let mut run_time = runtime()?;
 
-        // Immutable borrow scope
+        // Upload only dirty chunks, then dispatch.
         {
             let archetypes: &[Archetype] = data.archetypes();
 
             {
-                let Runtime { context, mirror, pipelines: _ } = &mut *run_time;
-                mirror.upload_signature_dirty_chunks(&*context, archetypes, &union, data.gpu_dirty_chunks())?;
+                let Runtime { context, mirror, .. } = &mut *run_time;
+                mirror.upload_signature_dirty_chunks(
+                    &*context,
+                    archetypes,
+                    &union,
+                    data.gpu_dirty_chunks(),
+                )?;
             }
 
             dispatch_over_archetypes(&mut *run_time, system.id(), gpu, archetypes, &access)?;
         }
 
-        // Download scope
-        {
-            let archetypes_mut: &mut [Archetype] = data.archetypes_mut();
-            let Runtime { context, mirror, pipelines: _ } = &mut *run_time;
-            mirror.download_signature(&*context, archetypes_mut, write_signature)?;
-        }
+        or_signature_in_place(&mut run_time.pending_download, write_signature);
 
         Ok(())
     })
@@ -235,14 +275,17 @@ fn dispatch_over_archetypes(
     )?;
 
     for archetype in archetypes {
-        if !archetype.signature().contains_all(&access.read) || !archetype.signature().contains_all(&access.write) {
+        if !archetype.signature().contains_all(&access.read)
+            || !archetype.signature().contains_all(&access.write)
+        {
             continue;
         }
 
         let entity_len = archetype.length()? as u32;
-        if entity_len == 0 { continue; }
+        if entity_len == 0 {
+            continue;
+        }
 
-        // Build bind entries (read, write, params)
         let mut entries: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(binding_count);
 
         for (i, &component_id) in reads.iter().enumerate() {
@@ -288,47 +331,54 @@ fn dispatch_over_archetypes(
 
         #[repr(C)]
         #[derive(Clone, Copy)]
-        struct Params { entity_len: u32, _p0: u32, _p1: u32, _p2: u32 }
+        struct Params {
+            entity_len: u32,
+            _p0: u32,
+            _p1: u32,
+            _p2: u32,
+        }
+        
         unsafe impl bytemuck::Pod for Params {}
         unsafe impl bytemuck::Zeroable for Params {}
 
-        let params = Params { entity_len, _p0: 0, _p1: 0, _p2: 0 };
+        let params = Params {
+            entity_len,
+            _p0: 0,
+            _p1: 0,
+            _p2: 0,
+        };
+
         let parameter_buffer = run_time.context.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("abm_params"),
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
+            },
         );
 
-        entries.push(
-            wgpu::BindGroupEntry {
-                binding: (binding_count - 1) as u32,
-                resource: parameter_buffer.as_entire_binding(),
-            }
-        );
+        entries.push(wgpu::BindGroupEntry {
+            binding: (binding_count - 1) as u32,
+            resource: parameter_buffer.as_entire_binding(),
+        });
 
-        let bind_group = run_time.context.device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                label: Some("abm_bind_group"),
-                layout: bind_group_layout,
-                entries: &entries,
-            }
-        );
+        let bind_group = run_time.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("abm_bind_group"),
+            layout: bind_group_layout,
+            entries: &entries,
+        });
 
         let mut encoder = run_time.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some("abm_compute_encoder"),
-            }
+            },
         );
 
         {
-            let mut pass = encoder.begin_compute_pass(
-                &wgpu::ComputePassDescriptor {
-                    label: Some("abm_compute_pass"),
-                    timestamp_writes: None,
-                }
-            );
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("abm_compute_pass"),
+                timestamp_writes: None,
+            });
+
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
 
@@ -337,19 +387,19 @@ fn dispatch_over_archetypes(
             pass.dispatch_workgroups(groups, 1, 1);
         }
 
-            let submission = run_time.context.queue.submit(Some(encoder.finish()));
-            run_time
-                .context
-                .device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: Some(submission),
-                    timeout: None,
+        let submission = run_time.context.queue.submit(Some(encoder.finish()));
+        run_time
+            .context
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|e| {
+                ECSError::from(ExecutionError::GpuDispatchFailed {
+                    message: format!("wgpu device poll failed: {e:?}").into(),
                 })
-                .map_err(|e| {
-                    ECSError::from(ExecutionError::GpuDispatchFailed {
-                        message: format!("wgpu device poll failed: {e:?}").into(),
-                    })
-                })?;
+            })?;
     }
 
     Ok(())
@@ -363,8 +413,25 @@ fn dispatch_over_archetypes(
 
 fn union_signatures(a: &Signature, b: &Signature) -> Signature {
     let mut out = Signature::default();
-    for ((o, av), bv) in out.components.iter_mut().zip(a.components.iter()).zip(b.components.iter()) {
+    for ((o, av), bv) in out
+        .components
+        .iter_mut()
+        .zip(a.components.iter())
+        .zip(b.components.iter())
+    {
         *o = *av | *bv;
     }
     out
+}
+
+#[inline]
+fn or_signature_in_place(dst: &mut Signature, src: &Signature) {
+    for (d, s) in dst.components.iter_mut().zip(src.components.iter()) {
+        *d |= *s;
+    }
+}
+
+#[inline]
+fn is_signature_empty(sig: &Signature) -> bool {
+    sig.components.iter().all(|&w| w == 0)
 }

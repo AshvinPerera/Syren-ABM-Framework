@@ -61,7 +61,6 @@ impl Default for StageType {
 /// - evolve into a CPU/GPU multi-backend dispatcher.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
-    
     stage_type: StageType,
     /// Indices of systems that can execute in parallel.
     pub system_indices: Vec<usize>,
@@ -71,17 +70,27 @@ pub struct Stage {
 
 impl Stage {
     fn boundary() -> Self {
-        Self { stage_type: StageType::BOUNDARY, system_indices: Vec::new(), aggregate_access: AccessSets::default() }
+        Self { 
+            stage_type: StageType::BOUNDARY, 
+            system_indices: Vec::new(), 
+            aggregate_access: AccessSets::default() 
+        }
     }
 
     fn cpu() -> Self {
-        Self { stage_type: StageType::CPU, system_indices: Vec::new(), aggregate_access: AccessSets::default() }
+        Self { 
+            stage_type: StageType::CPU, 
+            system_indices: Vec::new(), 
+            aggregate_access: AccessSets::default() 
+        }
     }
 
-    fn gpu(idx: usize, access: AccessSets) -> Self {
-        let mut s = Self { stage_type: StageType::GPU, system_indices: vec![idx], aggregate_access: AccessSets::default() };
-        s.aggregate_access = access;
-        s
+    fn gpu() -> Self {
+        Self { 
+            stage_type: StageType::GPU, 
+            system_indices: Vec::new(), 
+            aggregate_access: AccessSets::default() 
+        }
     }
 
     /// Returns true if `access` does NOT conflict with anything already in this stage.
@@ -91,12 +100,20 @@ impl Stage {
         !access.conflicts_with(&self.aggregate_access)
     }
 
-    /// Adds a system index to this stage and merges its access into the aggregate.
+    /// Adds a system index to this stage and merges its access into the aggregate (CPU only).
     #[inline]
-    pub fn push(&mut self, idx: usize, access: &AccessSets) {
-        self.system_indices.push(idx);
+    pub fn push_cpu(&mut self, index: usize, access: &AccessSets) {
+        debug_assert_eq!(self.stage_type, StageType::CPU);
+        self.system_indices.push(index);
         or_signature_in_place(&mut self.aggregate_access.read, &access.read);
         or_signature_in_place(&mut self.aggregate_access.write, &access.write);
+    }
+
+    /// Adds a system index to this stage (GPU only; executed sequentially).
+    #[inline]
+    pub fn push_gpu(&mut self, index: usize) {
+        debug_assert_eq!(self.stage_type, StageType::GPU);
+        self.system_indices.push(index);
     }
 
     /// Returns true if this stage is acting as a boundary marker.
@@ -166,58 +183,6 @@ impl Scheduler {
         self.add_boxed(Box::new(system));
     }
 
-    /// Registers a function-backed system.
-    pub fn add_fn_system<F>(
-        &mut self,
-        system: crate::engine::systems::FnSystem<F>,
-    )
-    where
-        F: Fn(crate::engine::manager::ECSReference<'_>) -> ECSResult<()>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.add_system(system);
-    }
-
-    /// Convenience helper to build-and-register an [`FnSystem`](crate::engine::systems::FnSystem)
-    #[inline]
-    pub fn add_fn<F>(
-        &mut self,
-        id: crate::engine::types::SystemID,
-        name: &'static str,
-        access: AccessSets,
-        f: F,
-    )
-    where
-        F: Fn(crate::engine::manager::ECSReference<'_>) -> ECSResult<()>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.add_fn_system(crate::engine::systems::FnSystem::new(id, name, access, f));
-    }
-
-    /// Registers an infallible function-backed system.
-    /// The function is automatically wrapped to return `Ok(())`.
-    
-    #[inline]
-    pub fn add_fn_infallible<F>(
-        &mut self,
-        id: crate::engine::types::SystemID,
-        name: &'static str,
-        access: AccessSets,
-        f: F,
-    )
-    where
-        F: Fn(crate::engine::manager::ECSReference<'_>) + Send + Sync + 'static,
-    {
-        self.add_fn(id, name, access, move |world| {
-            f(world);
-            Ok::<(), ECSError>(())
-        });
-    }
-
     /// Ensures stages are up to date.
     pub fn rebuild(&mut self) {
         if !self.dirty {
@@ -229,41 +194,69 @@ impl Scheduler {
 
         self.plan.clear();
 
+        // Track whether currently inside a GPU run.
+        let mut in_gpu_run = false;
+
         for index in indices {
             let system = &self.systems[index];
             let access = system.access();
 
             match system.backend() {
                 SystemBackend::CPU => {
-                    // Place into first compatible CPU stage
+                    // If leaving a GPU run, close it with a boundary.
+                    if in_gpu_run {
+                        self.plan.push(Stage::boundary());
+                        in_gpu_run = false;
+                    }
+
+                    // Place into the first compatible CPU stage.
                     let mut placed = false;
-                    for stage in self.plan.iter_mut() {
-                        if stage.stage_type != StageType::CPU { continue; }
+
+                    for stage in self.plan.iter_mut().rev() {
+                        if stage.stage_type == StageType::BOUNDARY {
+                            break;
+                        }
+                        if stage.stage_type != StageType::CPU {
+                            continue;
+                        }
                         if stage.can_accept(&access) {
-                            stage.push(index, &access);
+                            stage.push_cpu(index, &access);
                             placed = true;
                             break;
                         }
                     }
-                    
+
                     if !placed {
                         let mut stage = Stage::cpu();
-                        stage.push(index, &access);
+                        stage.push_cpu(index, &access);
                         self.plan.push(stage);
                     }
                 }
 
                 SystemBackend::GPU => {
-                    // Boundaries are forced around every GPU system
-                    self.plan.push(Stage::boundary());
-                    self.plan.push(Stage::gpu(index, access));
-                    self.plan.push(Stage::boundary());
+                    // If entering a GPU run, open it with a boundary.
+                    if !in_gpu_run {
+                        self.plan.push(Stage::boundary());
+                        self.plan.push(Stage::gpu());
+                        in_gpu_run = true;
+                    }
+
+                    // Push into the current GPU stage.
+                    let last = self.plan.last_mut().expect("plan must have a GPU stage");
+                    debug_assert_eq!(last.stage_type, StageType::GPU);
+                    last.push_gpu(index);
                 }
             }
         }
 
+        // Close final GPU run with a boundary.
+        if in_gpu_run {
+            self.plan.push(Stage::boundary());
+        }
+
         self.dirty = false;
     }
+
 
     /// Runs the schedule once.
     ///
@@ -282,6 +275,13 @@ impl Scheduler {
             match stage.stage_type {
                 StageType::BOUNDARY => {
                     ecs.clear_borrows();
+
+                    #[cfg(feature = "gpu")]
+                    {
+                        // Ensures ECS CPU storage is consistent before commands or CPU stages.
+                        gpu::sync_pending_to_cpu(ecs)?;
+                    }
+
                     ecs.apply_deferred_commands()?;
                 }
 
@@ -293,29 +293,24 @@ impl Scheduler {
                     ecs.clear_borrows();
                 }
 
-
                 StageType::GPU => {
-                    if stage.system_indices.len() != 1 {
-                        return Err(ECSError::from(ExecutionError::SchedulerInvariantViolation));
-                    }
-
-                    let idx = stage.system_indices[0];
-                    let sys = &self.systems[idx];
-
                     #[cfg(not(feature = "gpu"))]
                     {
-                        let _ = sys;
+                        let _ = &stage;
                         return Err(ECSError::from(ExecutionError::GpuNotEnabled));
                     }
 
                     #[cfg(feature = "gpu")]
                     {
-                        let gpu_cap = sys.gpu().ok_or_else(|| {
-                            ECSError::from(ExecutionError::SchedulerInvariantViolation)
-                        })?;
-
-                        gpu::execute_gpu_system(ecs, sys.as_ref(), gpu_cap)?;
-                        ecs.clear_borrows();
+                        // Sequential execution on GPU.
+                        for &idx in &stage.system_indices {
+                            let system = &self.systems[idx];
+                            let gpu_cap = system.gpu().ok_or_else(|| {
+                                ECSError::from(ExecutionError::SchedulerInvariantViolation)
+                            })?;
+                            gpu::execute_gpu_system(ecs, system.as_ref(), gpu_cap)?;
+                            ecs.clear_borrows();
+                        }
                     }
                 }
             }

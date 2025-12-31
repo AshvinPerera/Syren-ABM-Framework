@@ -104,5 +104,6 @@ mod layout;
 mod dispatch;
 
 pub use dispatch::{
-    execute_gpu_system
+    execute_gpu_system,
+    sync_pending_to_cpu
 };

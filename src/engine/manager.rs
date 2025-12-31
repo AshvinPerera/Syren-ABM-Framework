@@ -732,6 +732,44 @@ impl ECSReference<'_> {
         )
     }
 
+    /// Executes a typed, parallel reduction over two read-only components.
+    pub fn reduce_read2<A, B, R>(
+        &self,
+        query: BuiltQuery,
+        init: impl Fn() -> R + Send + Sync,
+        fold: impl Fn(&mut R, &A, &B) + Send + Sync,
+        combine: impl Fn(&mut R, R) + Send + Sync,
+    ) -> ECSResult<R>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        R: Send + 'static,
+    {
+        if query.reads.len() != 2 || !query.writes.is_empty() {
+            return Err(ECSError::Internal(
+                "reduce_read2: requires exactly 2 reads and 0 writes".into(),
+            ));
+        }
+
+        self.reduce_abstraction(
+            query,
+            init,
+            move |acc, cols, _| unsafe {
+                let slice_a =
+                    crate::engine::storage::cast_slice::<A>(cols[0].as_ptr(), cols[0].len());
+                let slice_b =
+                    crate::engine::storage::cast_slice::<B>(cols[1].as_ptr(), cols[1].len());
+
+                debug_assert_eq!(slice_a.len(), slice_b.len());
+
+                for i in 0..slice_a.len() {
+                    fold(acc, &slice_a[i], &slice_b[i]);
+                }
+            },
+            combine,
+        )
+    }
+
 }
 
 /// RAII guard representing the ECS read phase.
