@@ -50,7 +50,9 @@ use sugarscape::gpu::{
     MetabolismGpuSystem,
     DeathGpuSystem,
     AgentIntentGpuSystem,
-    ResolveHarvestGpuSystem
+    ResolveHarvestGpuSystem,
+    SugarRegrowthGpuSystem,
+    ClearOccupancyGpuSystem
 };
 
 
@@ -98,11 +100,8 @@ fn init_components() -> ECSResult<()> {
 fn sugarscape_basic_abm() -> ECSResult<()> {
     init_components()?;
 
-    #[cfg(feature = "gpu")]
-    let gpu_ctx = gpu::GPUContext::new()?;
-
-    let w = 200;
-    let h = 200;
+    let w = 300;
+    let h = 300;
 
     let shards = EntityShards::new(4);
     let ecs = ECSManager::new(ECSData::new(shards));
@@ -125,11 +124,10 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
         }
 
         let sugar_grid_id = world.register_gpu_resource(
-            SugarGrid::new(&gpu_ctx, w as u32, h as u32, &capacity)
+            SugarGrid::new(w as u32, h as u32, capacity)
         )?;
-
         let intent_id = world.register_gpu_resource(
-            AgentIntentBuffers::new(&gpu_ctx, 200_000)
+            AgentIntentBuffers::new(200_000)
         )?;
 
         (sugar_grid_id, intent_id)
@@ -147,7 +145,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
             b.insert(component_id_of::<AgentTag>()?, AgentTag(0));
             b.insert(component_id_of::<Position>()?, Position { x, y });
             b.insert(component_id_of::<Sugar>()?, Sugar(10.0));
-            b.insert(component_id_of::<Metabolism>()?, Metabolism(1.0));
+            b.insert(component_id_of::<Metabolism>()?, Metabolism(0.02));
             b.insert(component_id_of::<Vision>()?, Vision(3));
             b.insert(component_id_of::<RNG>()?, RNG { state: seed });
             b.insert(component_id_of::<Alive>()?, Alive(1));
@@ -165,27 +163,33 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
 
     #[cfg(not(feature = "gpu"))]
     {
-        scheduler.add_system(SugarRegrowthSystem {
-            grid: grid.clone(),
-            rate: 1.0,
-        });
-
         scheduler.add_system(MoveAndHarvestSystem {
             grid: grid.clone(),
         });
+
+        scheduler.add_system(SugarRegrowthSystem {
+            grid: grid.clone(),
+            rate: 4.0
+        });
+
+        scheduler.add_system(MetabolismSystem);
+
+        scheduler.add_system(DeathSystem);
     }
 
     #[cfg(feature = "gpu")]
     {
+        scheduler.add_system(ClearOccupancyGpuSystem::new(sugar_grid_id));
         scheduler.add_system(AgentIntentGpuSystem::new(sugar_grid_id, intent_id));
         scheduler.add_system(ResolveHarvestGpuSystem::new(sugar_grid_id, intent_id));
+        scheduler.add_system(SugarRegrowthGpuSystem::new(sugar_grid_id));
         scheduler.add_system(MetabolismGpuSystem);
         scheduler.add_system(DeathGpuSystem);
     }
 
     // Run simulation
 
-    for step in 0..300 {
+    for step in 0..20 {
         ecs.run(&mut scheduler)?;
 
         #[cfg(feature = "gpu")]

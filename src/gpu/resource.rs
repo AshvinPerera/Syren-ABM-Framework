@@ -167,11 +167,8 @@ impl GPUResourceRegistry {
 
     /// Returns flattened binding descriptions for a set of resource IDs,
     pub fn flattened_binding_descs(&self, ids: &[GPUResourceID]) -> Vec<GPUBindingDesc> {
-        let mut sorted = ids.to_vec();
-        sorted.sort_unstable();
-
         let mut out = Vec::new();
-        for id in sorted {
+        for &id in ids {
             if let Some(e) = self.entries.iter().find(|e| e.id == id) {
                 out.extend_from_slice(e.resource.bindings());
             }
@@ -186,11 +183,8 @@ impl GPUResourceRegistry {
         base_binding: u32,
         out: &mut Vec<wgpu::BindGroupEntry<'a>>,
     ) -> ECSResult<u32> {
-        let mut sorted = ids.to_vec();
-        sorted.sort_unstable();
-
         let mut cursor = base_binding;
-        for id in sorted {
+        for &id in ids {
             let e = self.entries.iter().find(|e| e.id == id).ok_or_else(|| {
                 ECSError::from(ExecutionError::GpuDispatchFailed {
                     message: format!("missing gpu resource id {id}").into(),
@@ -199,7 +193,6 @@ impl GPUResourceRegistry {
             e.resource.encode_bind_group_entries(cursor, out)?;
             cursor += e.resource.bindings().len() as u32;
         }
-
         Ok(cursor)
     }
 }

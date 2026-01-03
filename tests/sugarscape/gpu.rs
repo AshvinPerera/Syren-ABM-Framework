@@ -169,3 +169,56 @@ impl GpuSystem for ResolveHarvestGpuSystem {
     fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
     fn writes_resources(&self) -> &[GPUResourceID] { &self.writes }
 }
+
+pub struct SugarRegrowthGpuSystem {
+    resources: [GPUResourceID; 1],
+}
+
+impl SugarRegrowthGpuSystem {
+    pub fn new(sugar_grid: GPUResourceID) -> Self {
+        Self { resources: [sugar_grid] }
+    }
+}
+
+impl System for SugarRegrowthGpuSystem {
+    fn id(&self) -> u16 { 12 }
+    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+
+    fn access(&self) -> AccessSets { AccessSets::default() }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
+    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+}
+
+impl GpuSystem for SugarRegrowthGpuSystem {
+    fn shader(&self) -> &'static str { include_str!("shaders/sugar_regrowth.wgsl") }
+    fn entry_point(&self) -> &'static str { "main" }
+    fn workgroup_size(&self) -> u32 { 256 }
+    fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
+    fn writes_resources(&self) -> &[GPUResourceID] { &self.resources }
+}
+
+pub struct ClearOccupancyGpuSystem {
+    resources: [GPUResourceID; 1],
+}
+
+impl ClearOccupancyGpuSystem {
+    pub fn new(sugar_grid: GPUResourceID) -> Self {
+        Self { resources: [sugar_grid] }
+    }
+}
+
+impl System for ClearOccupancyGpuSystem {
+    fn id(&self) -> u16 { 13 }
+    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+    fn access(&self) -> AccessSets { AccessSets::default() }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
+    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+}
+
+impl GpuSystem for ClearOccupancyGpuSystem {
+    fn shader(&self) -> &'static str { include_str!("shaders/clear_occupancy.wgsl") }
+    fn entry_point(&self) -> &'static str { "main" }
+    fn workgroup_size(&self) -> u32 { 256 }
+    fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
+    fn writes_resources(&self) -> &[GPUResourceID] { &self.resources }
+}

@@ -573,6 +573,40 @@ impl ECSReference<'_> {
         })
     }
 
+    /// Executes a parallel iteration over three read-only components.
+    pub fn for_each_read3<A, B, C>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &C) + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
+    {
+        if query.reads.len() != 3 || !query.writes.is_empty() {
+            return Err(ECSError::Internal(
+                "for_each_read3: expected exactly 3 reads and 0 writes".into(),
+            ));
+        }
+
+        self.for_each_abstraction(query, move |reads, _| unsafe {
+            let a =
+                crate::engine::storage::cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+            let b =
+                crate::engine::storage::cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+            let c =
+                crate::engine::storage::cast_slice::<C>(reads[2].as_ptr(), reads[2].len());
+
+            debug_assert_eq!(a.len(), b.len());
+            debug_assert_eq!(a.len(), c.len());
+
+            for i in 0..a.len() {
+                f(&a[i], &b[i], &c[i]);
+            }
+        })
+    }
+
     /// Executes a parallel iteration over one read-only and one mutable component.
     pub fn for_each_read_write<A, B>(
         &self,

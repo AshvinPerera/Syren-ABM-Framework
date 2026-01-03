@@ -140,7 +140,17 @@ pub fn execute_gpu_system(
     gpu: &dyn GpuSystem,
 ) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
-        let access = system.access();
+        let mut access = system.access();
+        normalize_access_sets(&mut access);
+
+        #[cfg(debug_assertions)]
+        {
+            // Ensure no overlap remains
+            for (r, w) in access.read.components.iter().zip(access.write.components.iter()) {
+                debug_assert_eq!(r & w, 0, "AccessSets overlap after normalization");
+            }
+        }
+
         let read_signature = &access.read;
         let write_signature = &access.write;
 
@@ -194,21 +204,27 @@ fn dispatch_over_archetypes(
     access: &crate::engine::systems::AccessSets,
     gpu_resources: &GPUResourceRegistry,
 ) -> ECSResult<()> {
+    // ---- Resolve GPU resources -------------------------------------------------
+
     let mut resource_ids: Vec<_> = gpu.uses_resources().to_vec();
     resource_ids.sort_unstable();
     let resource_layout = gpu_resources.flattened_binding_descs(&resource_ids);
 
-    let mut reads: Vec<crate::engine::types::ComponentID> =
+    // ---- Resolve component access ---------------------------------------------
+
+    let mut reads: Vec<_> =
         crate::engine::component::iter_bits_from_words(&access.read.components).collect();
-    let mut writes: Vec<crate::engine::types::ComponentID> =
+    let mut writes: Vec<_> =
         crate::engine::component::iter_bits_from_words(&access.write.components).collect();
-    
+
     writes.sort_unstable();
-    reads.retain(|component_id| writes.binary_search(component_id).is_err());      
+    reads.retain(|cid| writes.binary_search(cid).is_err());
     reads.sort_unstable();
 
     let read_count = reads.len();
     let write_count = writes.len();
+
+    // ---- Pipeline --------------------------------------------------------------
 
     let (pipeline, bgl0, bgl1_opt) = run_time.pipelines.get_or_create(
         &run_time.context,
@@ -220,189 +236,186 @@ fn dispatch_over_archetypes(
         &resource_layout,
     )?;
 
-    for archetype in archetypes {
-        if !archetype.signature().contains_all(&access.read) || !archetype.signature().contains_all(&access.write) {
-            continue;
-        }
+    // ---- Create ONE encoder and ONE compute pass for this SYSTEM ----------------
 
-        let entity_len = archetype.length()? as u32;
-        if entity_len == 0 {
-            continue;
-        }
-
-        let mut entries0: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(read_count + write_count + 1);
-
-        for (i, &component_id) in reads.iter().enumerate() {
-            let archetype_id = archetype.archetype_id();
-
-            let buffer = run_time
-                .mirror
-                .buffer_for(archetype_id, component_id)
-                .ok_or_else(|| {
-                    ECSError::from(ExecutionError::GpuMissingBuffer {
-                        archetype_id,
-                        component_id,
-                        access: GPUAccessMode::Read,
-                    })
-                })?;
-
-            entries0.push(wgpu::BindGroupEntry {
-                binding: i as u32,
-                resource: buffer.as_entire_binding(),
-            });
-        }
-
-        let base = reads.len();
-        for (j, &component_id) in writes.iter().enumerate() {
-            let archetype_id = archetype.archetype_id();
-
-            let buffer = run_time
-                .mirror
-                .buffer_for(archetype_id, component_id)
-                .ok_or_else(|| {
-                    ECSError::from(ExecutionError::GpuMissingBuffer {
-                        archetype_id,
-                        component_id,
-                        access: GPUAccessMode::Write,
-                    })
-                })?;
-
-            entries0.push(wgpu::BindGroupEntry {
-                binding: (base + j) as u32,
-                resource: buffer.as_entire_binding(),
-            });
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct Params {
-            entity_len: u32,
-            _p0: u32,
-            _p1: u32,
-            _p2: u32,
-        }
-
-        unsafe impl bytemuck::Pod for Params {}
-        unsafe impl bytemuck::Zeroable for Params {}
-
-        let params = Params {
-            entity_len,
-            _p0: 0,
-            _p1: 0,
-            _p2: 0,
-        };
-
-        let params_size = std::mem::size_of::<Params>() as u64;
-        let recreate = match run_time.params_buffer.as_ref() {
-            Some(buf) => buf.size() < params_size,
-            None => true,
-        };
-
-        if recreate {
-            run_time.params_buffer = Some(
-                run_time.context.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("abm_params"),
-                    size: params_size,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-            );
-        }
-
-        let params_buf = run_time.params_buffer.as_ref().unwrap();
-
-        // Update contents safely
-        run_time
-            .context
-            .queue
-            .write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
-
-        // Bind params buffer
-        entries0.push(wgpu::BindGroupEntry {
-            binding: (read_count + write_count) as u32,
-            resource: params_buf.as_entire_binding(),
+    let mut encoder = run_time
+        .context
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("abm_compute_encoder"),
         });
 
-        let bind_group0 = run_time.context.device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                label: Some("abm_bind_group_group0"),
-                layout: bgl0,
-                entries: &entries0,
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("abm_compute_pass"),
+            timestamp_writes: None,
+        });
+
+        pass.set_pipeline(pipeline);
+
+        // ---- Dispatch per archetype (INSIDE SAME PASS) -------------------------
+
+        for archetype in archetypes {
+            if !archetype.signature().contains_all(&access.read)
+                || !archetype.signature().contains_all(&access.write)
+            {
+                continue;
             }
-        );
 
-        let bind_group1 = if let Some(bgl1) = bgl1_opt {
-            let mut entries1: Vec<wgpu::BindGroupEntry> =
-                Vec::with_capacity(resource_layout.len());
-
-            gpu_resources.append_bind_group_entries(
-                &resource_ids,
-                0,
-                &mut entries1,
-            )?;
-
-            println!("params_buf ptr = {:p}", params_buf);
-
-            for e in &entries1 {
-                if let wgpu::BindingResource::Buffer(b) = &e.resource {
-                    println!(
-                        "group1 binding={} buf_ptr={:p} usage={:?}",
-                        e.binding,
-                        b.buffer,
-                        b.buffer.usage(),
-                    );
-                }
+            let entity_len = archetype.length()? as u32;
+            if entity_len == 0 {
+                continue;
             }
-            
-            println!("params_buf usage = {:?}", params_buf.usage());
 
-            Some(run_time.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("abm_bind_group_group1"),
-                layout: bgl1,
-                entries: &entries1,
-            }))
-        } else {
-            None
-        };
+            // ---- Bind group 0 (components + params) -----------------------------
 
-        let mut encoder = run_time
-            .context
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("abm_compute_encoder"),
+            let mut entries0 =
+                Vec::with_capacity(read_count + write_count + 1);
+
+            for (i, &component_id) in reads.iter().enumerate() {
+                let buffer = run_time
+                    .mirror
+                    .buffer_for(archetype.archetype_id(), component_id)
+                    .ok_or_else(|| {
+                        ECSError::from(ExecutionError::GpuMissingBuffer {
+                            archetype_id: archetype.archetype_id(),
+                            component_id,
+                            access: GPUAccessMode::Read,
+                        })
+                    })?;
+
+                entries0.push(wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: buffer.as_entire_binding(),
+                });
+            }
+
+            let base = reads.len();
+            for (j, &component_id) in writes.iter().enumerate() {
+                let buffer = run_time
+                    .mirror
+                    .buffer_for(archetype.archetype_id(), component_id)
+                    .ok_or_else(|| {
+                        ECSError::from(ExecutionError::GpuMissingBuffer {
+                            archetype_id: archetype.archetype_id(),
+                            component_id,
+                            access: GPUAccessMode::Write,
+                        })
+                    })?;
+
+                entries0.push(wgpu::BindGroupEntry {
+                    binding: (base + j) as u32,
+                    resource: buffer.as_entire_binding(),
+                });
+            }
+
+            // ---- Params buffer --------------------------------------------------
+
+            #[repr(C, align(16))]
+            #[derive(Clone, Copy)]
+            struct Params {
+                entity_len: u32,
+                _pad0: u32,
+                _pad1: u32,
+                _pad2: u32,
+            }
+
+            unsafe impl bytemuck::Pod for Params {}
+            unsafe impl bytemuck::Zeroable for Params {}
+
+            let params = Params {
+                entity_len,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
+            };
+
+            let size = std::mem::size_of::<Params>() as u64;
+            let recreate = match run_time.params_buffer.as_ref() {
+                Some(b) => b.size() < size,
+                None => true,
+            };
+
+            if recreate {
+                run_time.params_buffer = Some(
+                    run_time.context.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("abm_params"),
+                        size,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                );
+            }
+
+            let params_buf = run_time.params_buffer.as_ref().unwrap();
+            run_time
+                .context
+                .queue
+                .write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
+
+            entries0.push(wgpu::BindGroupEntry {
+                binding: (read_count + write_count) as u32,
+                resource: params_buf.as_entire_binding(),
             });
 
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("abm_compute_pass"),
-                timestamp_writes: None,
-            });
+            let bind_group0 = run_time.context.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("abm_bind_group_group0"),
+                    layout: bgl0,
+                    entries: &entries0,
+                },
+            );
 
-            pass.set_pipeline(pipeline);
+            // ---- Bind group 1 (GPU resources) -----------------------------------
+
+            let bind_group1 = if let Some(bgl1) = bgl1_opt {
+                let mut entries1 = Vec::with_capacity(resource_layout.len());
+
+                gpu_resources.append_bind_group_entries(
+                    &resource_ids,
+                    0,
+                    &mut entries1,
+                )?;
+
+                Some(run_time.context.device.create_bind_group(
+                    &wgpu::BindGroupDescriptor {
+                        label: Some("abm_bind_group_group1"),
+                        layout: bgl1,
+                        entries: &entries1,
+                    },
+                ))
+            } else {
+                None
+            };
+
+            // ---- Dispatch -------------------------------------------------------
+
             pass.set_bind_group(0, &bind_group0, &[]);
             if let Some(bg1) = &bind_group1 {
                 pass.set_bind_group(1, bg1, &[]);
             }
 
-            let work_group_size = gpu.workgroup_size().max(1);
-            let groups = (entity_len + work_group_size - 1) / work_group_size;
+            let workgroup = gpu.workgroup_size().max(1);
+            let groups = (entity_len + workgroup - 1) / workgroup;
             pass.dispatch_workgroups(groups, 1, 1);
         }
-
-        let submission = run_time.context.queue.submit(Some(encoder.finish()));
-        run_time
-            .context
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
-            .map_err(|e| {
-                ECSError::from(ExecutionError::GpuDispatchFailed {
-                    message: format!("wgpu device poll failed: {e:?}").into(),
-                })
-            })?;
     }
+
+    // ---- Submit ONCE for the whole system --------------------------------------
+
+    let submission = run_time.context.queue.submit(Some(encoder.finish()));
+    run_time
+        .context
+        .device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .map_err(|e| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: format!("wgpu device poll failed: {e:?}").into(),
+            })
+        })?;
 
     Ok(())
 }
@@ -430,4 +443,12 @@ fn or_signature_in_place(dst: &mut Signature, src: &Signature) {
 #[inline]
 fn is_signature_empty(sig: &Signature) -> bool {
     sig.components.iter().all(|&w| w == 0)
+}
+
+#[inline]
+fn normalize_access_sets(access: &mut crate::engine::systems::AccessSets) {
+    // read = read \ write
+    for (r, w) in access.read.components.iter_mut().zip(access.write.components.iter()) {
+        *r &= !*w;
+    }
 }

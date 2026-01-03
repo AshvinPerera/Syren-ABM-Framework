@@ -14,7 +14,6 @@ use crate::sugarscape::components::*;
 
 
 /// Deterministic RNG
-
 #[inline]
 fn rng_next_u32(state: &mut u64) -> u32 {
     let mut x = *state;
@@ -35,7 +34,6 @@ pub fn rng_range(state: &mut u64, n: u32) -> u32 {
 }
 
 /// Sugarscape terrain
-
 #[inline]
 pub fn sugar_capacity_hills(x: i32, y: i32, w: i32, h: i32) -> f32 {
     let (cx1, cy1) = (w / 4, h / 4);
@@ -125,7 +123,6 @@ impl Grid {
 }
 
 /// Sugar regrowth system (CPU)
-
 pub struct SugarRegrowthSystem {
     pub grid: Arc<Mutex<Grid>>,
     pub rate: f32,
@@ -150,7 +147,6 @@ impl System for SugarRegrowthSystem {
 }
 
 /// Move + Harvest system (CPU)
-/// -----------------------------------------------------------
 pub struct MoveAndHarvestSystem {
     pub grid: Arc<Mutex<Grid>>,
 }
@@ -166,109 +162,182 @@ impl System for MoveAndHarvestSystem {
         let mut a = AccessSets::default();
 
         a.read.set(component_id_of::<Vision>().unwrap());
+        a.read.set(component_id_of::<Alive>().unwrap());
 
         a.write.set(component_id_of::<Position>().unwrap());
         a.write.set(component_id_of::<Sugar>().unwrap());
-        a.write.set(component_id_of::<RNG>().unwrap());
-        a.write.set(component_id_of::<Alive>().unwrap());
 
         a
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        // ---------------- Clear occupancy ----------------
-        {
-            let mut grid = self.grid.lock().unwrap();
-            grid.clear_occupancy();
-        }
-
-        // ---------------- Mark occupancy ----------------
-        {
-            let grid = self.grid.clone();
-            let q = ecs.query()?
-                .read::<Position>()?
-                .read::<Alive>()?
-                .build()?;
-
-            ecs.for_each_read2::<Position, Alive>(q, move |pos, alive| {
-                if alive.0 == 0 {
-                    return;
-                }
-
-                let mut g = grid.lock().unwrap();
-                if g.in_bounds(pos.x, pos.y) {
-                    g.set_occupant(pos.x, pos.y);
-                }
-            })?;
-        }
-
-        // ---------------- Move + harvest ----------------
         let grid = self.grid.clone();
+
+        // Clear occupancy
+
+        {
+            let mut g = grid.lock().unwrap();
+            g.clear_occupancy();
+        }
+
+        //INTENT + RESOLVE
 
         let q = ecs.query()?
             .read::<Vision>()?
+            .read::<Alive>()?
             .write::<Position>()?
             .write::<Sugar>()?
-            .write::<RNG>()?
-            .write::<Alive>()?
             .build()?;
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
             let vision =
                 abm_framework::engine::storage::cast_slice::<Vision>(reads[0].as_ptr(), reads[0].len());
+            let alive =
+                abm_framework::engine::storage::cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
 
             let pos =
-                abm_framework::engine::storage::cast_slice_mut::<Position>(writes[0].as_mut_ptr(), writes[0].len());
-
+                abm_framework::engine::storage::cast_slice_mut::<Position>(
+                    writes[0].as_mut_ptr(),
+                    writes[0].len(),
+                );
             let sugar =
-                abm_framework::engine::storage::cast_slice_mut::<Sugar>(writes[1].as_mut_ptr(), writes[1].len());
+                abm_framework::engine::storage::cast_slice_mut::<Sugar>(
+                    writes[1].as_mut_ptr(),
+                    writes[1].len(),
+                );
 
-            let rng =
-                abm_framework::engine::storage::cast_slice_mut::<RNG>(writes[2].as_mut_ptr(), writes[2].len());
+            let mut g = grid.lock().unwrap();
 
-            let alive =
-                abm_framework::engine::storage::cast_slice_mut::<Alive>(writes[3].as_mut_ptr(), writes[3].len());
-
-            let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
-            for i in 0..vision.len() {
+            for i in 0..alive.len() {
                 if alive[i].0 == 0 {
                     continue;
                 }
 
                 let (x0, y0) = (pos[i].x, pos[i].y);
-                let mut g = grid.lock().unwrap();
+                let v = vision[i].0.max(0);
 
                 if !g.in_bounds(x0, y0) {
                     continue;
                 }
 
-                let v = vision[i].0.max(1).min(50);
-                let mut best = -1.0;
-                let mut best_xy = (x0, y0);
+                // Intent scan
+                let mut best: Option<(i32, i32)> = None;
+                let mut best_val = -1.0;
 
-                for (dx, dy) in dirs {
-                    for s in 1..=v {
-                        let nx = x0 + dx * s;
-                        let ny = y0 + dy * s;
+                for dx in -v..=v {
+                    for dy in -v..=v {
+                        let nx = x0 + dx;
+                        let ny = y0 + dy;
 
                         if !g.in_bounds(nx, ny) || !g.is_free(nx, ny) {
-                            break;
+                            continue;
                         }
 
-                        let sc = g.sugar_at(nx, ny);
-                        if sc > best {
-                            best = sc;
-                            best_xy = (nx, ny);
+                        let s = g.sugar_at(nx, ny);
+                        if s > best_val {
+                            best_val = s;
+                            best = Some((nx, ny));
                         }
                     }
                 }
 
-                pos[i].x = best_xy.0;
-                pos[i].y = best_xy.1;
+                // Atomic-claim analogue
+                if let Some((x, y)) = best {
+                    if !g.is_free(x, y) {
+                        continue;
+                    }
 
-                sugar[i].0 += g.harvest(best_xy.0, best_xy.1);
-                rng_next_u32(&mut rng[i].state);
+                    g.set_occupant(x, y);
+
+                    let harvested = g.harvest(x, y);
+                    sugar[i].0 += harvested;
+                }
+            }
+        })?;
+
+        Ok(())
+    }
+}
+
+pub struct MetabolismSystem;
+
+impl System for MetabolismSystem {
+    fn id(&self) -> u16 { 3 }
+
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::CPU
+    }
+
+    fn access(&self) -> AccessSets {
+        let mut a = AccessSets::default();
+        a.read.set(component_id_of::<Metabolism>().unwrap());
+        a.read.set(component_id_of::<Alive>().unwrap());
+        a.write.set(component_id_of::<Sugar>().unwrap());
+        a
+    }
+
+    fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
+        let q = ecs.query()?
+            .read::<Metabolism>()?
+            .read::<Alive>()?
+            .write::<Sugar>()?
+            .build()?;
+
+        ecs.for_each_abstraction(q, move |reads, writes| unsafe {
+            let metab =
+                abm_framework::engine::storage::cast_slice::<Metabolism>(reads[0].as_ptr(), reads[0].len());
+            let alive =
+                abm_framework::engine::storage::cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
+            let sugar =
+                abm_framework::engine::storage::cast_slice_mut::<Sugar>(writes[0].as_mut_ptr(), writes[0].len());
+
+            for i in 0..alive.len() {
+                if alive[i].0 == 0 {
+                    continue;
+                }
+                sugar[i].0 -= metab[i].0;
+            }
+        })?;
+
+        Ok(())
+    }
+}
+
+pub struct DeathSystem;
+
+impl System for DeathSystem {
+    fn id(&self) -> u16 { 4 }
+
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::CPU
+    }
+
+    fn access(&self) -> AccessSets {
+        let mut a = AccessSets::default();
+        a.read.set(component_id_of::<Sugar>().unwrap());
+        a.write.set(component_id_of::<Alive>().unwrap());
+        a
+    }
+
+    fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
+        let q = ecs.query()?
+            .read::<Sugar>()?
+            .write::<Alive>()?
+            .build()?;
+
+        ecs.for_each_abstraction(q, move |reads, writes| unsafe {
+            let sugar =
+                abm_framework::engine::storage::cast_slice::<Sugar>(reads[0].as_ptr(), reads[0].len());
+            let alive =
+                abm_framework::engine::storage::cast_slice_mut::<Alive>(writes[0].as_mut_ptr(), writes[0].len());
+
+            for i in 0..alive.len() {
+                if alive[i].0 == 0 {
+                    continue;
+                }
+                if sugar[i].0 <= 0.0 {
+                    alive[i].0 = 0;
+                }
             }
         })?;
 

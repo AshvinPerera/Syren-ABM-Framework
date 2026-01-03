@@ -58,6 +58,14 @@ use crate::gpu::GPUBindingDesc;
 
 
 #[inline]
+pub(crate) fn hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+#[inline]
 fn hash_resource_layout(descriptions: &[GPUBindingDesc]) -> u64 {
     let mut hash: u64 = 1469598103934665603;
     for description in descriptions {
@@ -85,8 +93,8 @@ fn hash_resource_layout(descriptions: &[GPUBindingDesc]) -> u64 {
 #[derive(Debug)]
 pub struct PipelineCache {
     map: HashMap<
-        (SystemID, usize, usize, usize, u64),
-        (wgpu::ComputePipeline, wgpu::BindGroupLayout, Option<wgpu::BindGroupLayout>),
+    (SystemID, u64, u64, usize, usize, usize, u64),
+    (wgpu::ComputePipeline, wgpu::BindGroupLayout, Option<wgpu::BindGroupLayout>),
     >,
 }
 
@@ -124,21 +132,39 @@ impl PipelineCache {
         read_count: usize,
         write_count: usize,
         resource_layout: &[GPUBindingDesc],
-    ) -> ECSResult<(&wgpu::ComputePipeline, &wgpu::BindGroupLayout, Option<&wgpu::BindGroupLayout>)> {
+    ) -> ECSResult<(
+        &wgpu::ComputePipeline,
+        &wgpu::BindGroupLayout,
+        Option<&wgpu::BindGroupLayout>,
+    )> {
+        let shader_hash = hash_str(shader_wgsl);
+        let entry_hash  = hash_str(entry_point);
+
         let group1_len = resource_layout.len();
-        let resource_signature = hash_resource_layout(resource_layout);
+        let group1_sig = hash_resource_layout(resource_layout);
+
         let key = (
             system_id,
+            shader_hash,
+            entry_hash,
             read_count,
             write_count,
             group1_len,
-            resource_signature,
+            group1_sig,
         );
 
         if !self.map.contains_key(&key) {
-            let (pipeline, bgl0, bgl1) =
-                create_pipeline(context, shader_wgsl, entry_point, read_count, write_count, resource_layout)
-                    .map_err(|e| ECSError::from(ExecutionError::GpuDispatchFailed { message: e.into() }))?;
+            let (pipeline, bgl0, bgl1) = create_pipeline(
+                context,
+                shader_wgsl,
+                entry_point,
+                read_count,
+                write_count,
+                resource_layout,
+            )
+            .map_err(|e| ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: e.into(),
+            }))?;
 
             self.map.insert(key, (pipeline, bgl0, bgl1));
         }
