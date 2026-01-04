@@ -100,8 +100,8 @@ fn init_components() -> ECSResult<()> {
 fn sugarscape_basic_abm() -> ECSResult<()> {
     init_components()?;
 
-    let w = 300;
-    let h = 300;
+    let w = 600;
+    let h = 600;
 
     let shards = EntityShards::new(4);
     let ecs = ECSManager::new(ECSData::new(shards));
@@ -136,7 +136,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
     // Spawn agents
 
     world.with_exclusive(|_| {
-        for i in 0..200_000u32 {
+        for i in 0..1_000_000u32 {
             let mut seed = i as u64 ^ 0x9E3779B97F4A7C15;
             let x = rng_range(&mut seed, w as u32) as i32;
             let y = rng_range(&mut seed, h as u32) as i32;
@@ -144,9 +144,9 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
             let mut b = Bundle::new();
             b.insert(component_id_of::<AgentTag>()?, AgentTag(0));
             b.insert(component_id_of::<Position>()?, Position { x, y });
-            b.insert(component_id_of::<Sugar>()?, Sugar(10.0));
-            b.insert(component_id_of::<Metabolism>()?, Metabolism(0.02));
-            b.insert(component_id_of::<Vision>()?, Vision(3));
+            b.insert(component_id_of::<Sugar>()?, Sugar(1.0));
+            b.insert(component_id_of::<Metabolism>()?, Metabolism(0.1));
+            b.insert(component_id_of::<Vision>()?, Vision(2));
             b.insert(component_id_of::<RNG>()?, RNG { state: seed });
             b.insert(component_id_of::<Alive>()?, Alive(1));
 

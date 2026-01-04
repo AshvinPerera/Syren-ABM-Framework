@@ -20,8 +20,8 @@
 //!
 //! Pipelines created by this module follow a strict binding convention:
 //!
-//! * Bindings `0..N-1` — storage buffers for component columns
-//! * Binding `N` — uniform buffer containing per-dispatch parameters
+//! * Bindings `0..N-1` - storage buffers for component columns
+//! * Binding `N` - uniform buffer containing per-dispatch parameters
 //!
 //! This layout is compatible with archetype-based dispatch, where each archetype
 //! instance binds a different set of buffers while reusing the same pipeline.
@@ -107,11 +107,11 @@ impl PipelineCache {
     /// Retrieves an existing compute pipeline or creates a new one.
     ///
     /// ## Parameters
-    /// * `context` — GPU device context
-    /// * `system_id` — ECS system identifier
-    /// * `shader_wgsl` — WGSL compute shader source
-    /// * `entry_point` — shader entry point function
-    /// * `binding_count` — number of bind group entries
+    /// * `context` - GPU device context
+    /// * `system_id` - ECS system identifier
+    /// * `shader_wgsl` - WGSL compute shader source
+    /// * `entry_point` - shader entry point function
+    /// * `binding_count` - number of bind group entries
     ///
     /// ## Semantics
     /// * If a pipeline for `(system_id, binding_count)` exists, it is reused.
@@ -181,10 +181,10 @@ impl PipelineCache {
 /// * Uniform buffer: `binding_count-1`
 ///
 /// ## Parameters
-/// * `context` — GPU device context
-/// * `shader_wgsl` — WGSL shader source
-/// * `entry_point` — compute entry point
-/// * `binding_count` — total number of bindings
+/// * `context` - GPU device context
+/// * `shader_wgsl` - WGSL shader source
+/// * `entry_point` - compute entry point
+/// * `binding_count` - total number of bindings
 ///
 /// ## Errors
 /// Returns an error string if pipeline creation fails.

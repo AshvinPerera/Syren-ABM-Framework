@@ -73,7 +73,7 @@ thread_local! {static TL_RNG: Cell<u64> = Cell::new(0x9E37_79B9_7F4A_7C15);}
 /// ## Non-goals
 /// * This is **not cryptographically secure**.
 /// * Output quality is sufficient for simulation, sampling, and randomized
-///   iteration—not security-sensitive contexts.
+///   iteration-not security-sensitive contexts.
 ///
 /// ## Example
 /// ```

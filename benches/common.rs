@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::sync::Once;
+
 use abm_framework::engine::component::{
     Bundle,
     register_component,
@@ -31,19 +33,27 @@ pub struct Productivity {
     pub rate: f32,
 }
 
-pub fn setup_world(agent_count: usize) -> ECSResult<ECSManager> {
-    register_component::<Position>()?;
-    register_component::<Wealth>()?;
-    register_component::<Productivity>()?;
-    freeze_components()?;
+static INIT: Once = Once::new();
 
-    let shards = EntityShards::new(4);
+pub fn init_components() {
+    INIT.call_once(|| {
+        register_component::<Position>().unwrap();
+        register_component::<Wealth>().unwrap();
+        register_component::<Productivity>().unwrap();
+        freeze_components().unwrap();
+    });
+}
+
+pub fn make_world(shards: usize) -> ECSManager {
+    let shards = EntityShards::new(shards);
     let data = ECSData::new(shards);
-    let ecs = ECSManager::new(data);
+    ECSManager::new(data)
+}
 
+pub fn populate(ecs: &ECSManager, agent_count: usize) -> ECSResult<()> {
     let world = ecs.world_ref();
 
-    world.with_exclusive(|_data| {
+    world.with_exclusive(|_| {
         for _ in 0..agent_count {
             let mut bundle = Bundle::new();
 
@@ -67,5 +77,5 @@ pub fn setup_world(agent_count: usize) -> ECSResult<ECSManager> {
     })?;
 
     ecs.apply_deferred_commands()?;
-    Ok(ecs)
+    Ok(())
 }

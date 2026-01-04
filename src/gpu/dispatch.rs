@@ -204,13 +204,13 @@ fn dispatch_over_archetypes(
     access: &crate::engine::systems::AccessSets,
     gpu_resources: &GPUResourceRegistry,
 ) -> ECSResult<()> {
-    // ---- Resolve GPU resources -------------------------------------------------
+    // Resolve GPU resources
 
     let mut resource_ids: Vec<_> = gpu.uses_resources().to_vec();
     resource_ids.sort_unstable();
     let resource_layout = gpu_resources.flattened_binding_descs(&resource_ids);
 
-    // ---- Resolve component access ---------------------------------------------
+    // Resolve component access
 
     let mut reads: Vec<_> =
         crate::engine::component::iter_bits_from_words(&access.read.components).collect();
@@ -224,7 +224,7 @@ fn dispatch_over_archetypes(
     let read_count = reads.len();
     let write_count = writes.len();
 
-    // ---- Pipeline --------------------------------------------------------------
+    // Pipeline
 
     let (pipeline, bgl0, bgl1_opt) = run_time.pipelines.get_or_create(
         &run_time.context,
@@ -235,8 +235,6 @@ fn dispatch_over_archetypes(
         write_count,
         &resource_layout,
     )?;
-
-    // ---- Create ONE encoder and ONE compute pass for this SYSTEM ----------------
 
     let mut encoder = run_time
         .context
@@ -253,7 +251,7 @@ fn dispatch_over_archetypes(
 
         pass.set_pipeline(pipeline);
 
-        // ---- Dispatch per archetype (INSIDE SAME PASS) -------------------------
+        // Dispatch per archetype
 
         for archetype in archetypes {
             if !archetype.signature().contains_all(&access.read)
@@ -267,7 +265,7 @@ fn dispatch_over_archetypes(
                 continue;
             }
 
-            // ---- Bind group 0 (components + params) -----------------------------
+            // Bind group 0 (components + params)
 
             let mut entries0 =
                 Vec::with_capacity(read_count + write_count + 1);
@@ -309,7 +307,7 @@ fn dispatch_over_archetypes(
                 });
             }
 
-            // ---- Params buffer --------------------------------------------------
+            // Params buffer
 
             #[repr(C, align(16))]
             #[derive(Clone, Copy)]
@@ -366,7 +364,7 @@ fn dispatch_over_archetypes(
                 },
             );
 
-            // ---- Bind group 1 (GPU resources) -----------------------------------
+            // Bind group 1 (GPU resources)
 
             let bind_group1 = if let Some(bgl1) = bgl1_opt {
                 let mut entries1 = Vec::with_capacity(resource_layout.len());
@@ -388,7 +386,7 @@ fn dispatch_over_archetypes(
                 None
             };
 
-            // ---- Dispatch -------------------------------------------------------
+            // Dispatch
 
             pass.set_bind_group(0, &bind_group0, &[]);
             if let Some(bg1) = &bind_group1 {
@@ -401,7 +399,7 @@ fn dispatch_over_archetypes(
         }
     }
 
-    // ---- Submit ONCE for the whole system --------------------------------------
+    // Submit
 
     let submission = run_time.context.queue.submit(Some(encoder.finish()));
     run_time
@@ -447,7 +445,7 @@ fn is_signature_empty(sig: &Signature) -> bool {
 
 #[inline]
 fn normalize_access_sets(access: &mut crate::engine::systems::AccessSets) {
-    // read = read \ write
+    // read = read / write
     for (r, w) in access.read.components.iter_mut().zip(access.write.components.iter()) {
         *r &= !*w;
     }

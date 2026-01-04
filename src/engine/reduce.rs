@@ -33,18 +33,18 @@
 //! ## Design principles
 //! The accumulator types in this module are intentionally:
 //!
-//! * **Plain data containers** — no ECS references or side effects.
-//! * **Copy / Clone** — easy to move between threads.
-//! * **Execution-agnostic** — usable on CPU, GPU, or in offline analysis.
+//! * **Plain data containers** - no ECS references or side effects.
+//! * **Copy / Clone** - easy to move between threads.
+//! * **Execution-agnostic** - usable on CPU, GPU, or in offline analysis.
 //!
 //! They do not depend on the scheduler, query system, or ECS internals.
 //!
 //! ## Provided accumulators
 //!
-//! * [`Count`] — counts entities.
-//! * [`Sum`] — accumulates floating-point totals.
-//! * [`MinMax`] — tracks minimum and maximum values.
-//! * [`Welford`] — computes mean and variance using a numerically stable
+//! * [`Count`] - counts entities.
+//! * [`Sum`] - accumulates floating-point totals.
+//! * [`MinMax`] - tracks minimum and maximum values.
+//! * [`Welford`] - computes mean and variance using a numerically stable
 //!   online algorithm.
 //!
 //!

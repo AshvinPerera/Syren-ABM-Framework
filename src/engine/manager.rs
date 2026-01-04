@@ -408,10 +408,10 @@ impl<'a> ECSReference<'a> {
     ///
     /// ## Execution model
     /// The reduction proceeds in two phases:
-    /// 1. **Parallel accumulation** — each worker thread processes a disjoint
+    /// 1. **Parallel accumulation** - each worker thread processes a disjoint
     ///    subset of archetype chunks and accumulates results into a thread-local
     ///    accumulator of type `R`.
-    /// 2. **Deterministic combination** — all partial results are combined
+    /// 2. **Deterministic combination** - all partial results are combined
     ///    serially using the provided `combine` function to produce the final
     ///    result.
     ///
@@ -425,11 +425,11 @@ impl<'a> ECSReference<'a> {
     /// a reduction. Queries containing write components will be rejected.
     ///
     /// ## Parameters
-    /// * `query` — A built ECS query specifying which components to read.
-    /// * `init` — Constructs a fresh accumulator value for each worker thread.
-    /// * `fold_chunk` — Updates an accumulator using the raw component slices
+    /// * `query` - A built ECS query specifying which components to read.
+    /// * `init` - Constructs a fresh accumulator value for each worker thread.
+    /// * `fold_chunk` - Updates an accumulator using the raw component slices
     ///   for a single chunk.
-    /// * `combine` — Merges two accumulator values; must be associative.
+    /// * `combine` - Merges two accumulator values; must be associative.
     ///
     /// ## Determinism
     /// Partial results are combined in a deterministic order independent of
@@ -739,10 +739,10 @@ impl ECSReference<'_> {
     /// The query must specify **exactly one read component** and no writes.
     ///
     /// ## Parameters
-    /// * `query` — A built query reading exactly one component of type `A`.
-    /// * `init` — Constructs a fresh accumulator for each worker thread.
-    /// * `fold` — Updates the accumulator for each entity.
-    /// * `combine` — Merges two accumulator values; must be associative.
+    /// * `query` - A built query reading exactly one component of type `A`.
+    /// * `init` - Constructs a fresh accumulator for each worker thread.
+    /// * `fold` - Updates the accumulator for each entity.
+    /// * `combine` - Merges two accumulator values; must be associative.
     ///
     /// ## Typical use cases
     /// * Counting entities
@@ -979,9 +979,9 @@ impl ECSData {
     /// any operation.
     ///
     /// ### Parameters
-    /// * `entity` — The entity to which the component should be added.
-    /// * `added_component_id` — The component type identifier to add.
-    /// * `added_value` — The concrete component value, type-erased as `Box<dyn Any>`.
+    /// * `entity` - The entity to which the component should be added.
+    /// * `added_component_id` - The component type identifier to add.
+    /// * `added_value` - The concrete component value, type-erased as `Box<dyn Any>`.
     ///   The dynamic type **must match** the registered type of `added_component_id`.
     ///
     /// ### Safety and correctness notes

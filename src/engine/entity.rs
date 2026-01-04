@@ -73,9 +73,9 @@ use crate::engine::error::{
 /// ## Representation
 /// Internally, an `Entity` packs three values into a single integer:
 ///
-/// - **Shard ID** — identifies which shard owns the entity
-/// - **Index** — slot within the shard
-/// - **Version** — incremented on despawn to invalidate stale handles
+/// - **Shard ID** - identifies which shard owns the entity
+/// - **Index** - slot within the shard
+/// - **Version** - incremented on despawn to invalidate stale handles
 ///
 /// ## Invariants
 /// - Two entities with the same `(shard, index)` but different versions

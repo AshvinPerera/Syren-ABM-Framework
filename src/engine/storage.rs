@@ -154,12 +154,12 @@ enum RollbackAction<T> {
     ///
     /// This rollback action contains all data needed to reverse that:
     ///
-    /// - `removed_position` — The position of the element originally removed.
-    /// - `removed_value` — The value that was removed from that position.
-    /// - `moved_from` — If `Some((c, r))`, the value originally at `(c, r)` was
+    /// - `removed_position` - The position of the element originally removed.
+    /// - `removed_value` - The value that was removed from that position.
+    /// - `moved_from` - If `Some((c, r))`, the value originally at `(c, r)` was
     ///   moved into `removed_position`. Otherwise, the removed element was already the
     ///   last element and no move occurred.
-    /// - `moved_value` — The value that was moved from `(c, r)` into
+    /// - `moved_value` - The value that was moved from `(c, r)` into
     ///   `removed_position`. This is `None` if no move occurred.
     ///
     /// Applying this rollback:
@@ -183,7 +183,7 @@ enum RollbackAction<T> {
     /// potentially growing a chunk or adding a new chunk.
     ///
     /// The rollback action simply stores:
-    /// - `inserted_position` — Where the pushed value was inserted.
+    /// - `inserted_position` - Where the pushed value was inserted.
     ///
     /// Applying this rollback removes the inserted value (using swap-remove
     /// internally), restores `length` and `last_chunk_length`, and pops any chunk
@@ -208,11 +208,11 @@ enum RollbackAction<T> {
     /// This rollback action contains everything needed to undo *both* sides of
     /// the transfer:
     ///
-    /// - `destination_position` — Where the transferred value was inserted in the
+    /// - `destination_position` - Where the transferred value was inserted in the
     ///   destination.
-    /// - `source_position` — The original location of the value in the source.
-    /// - `value_moved` — The value that was transferred from source to destination.
-    /// - `last_displaced_source_information` — If the source performed a
+    /// - `source_position` - The original location of the value in the source.
+    /// - `value_moved` - The value that was transferred from source to destination.
+    /// - `last_displaced_source_information` - If the source performed a
     ///   swap-remove, this is:
     ///     `Some(((c, r), v))` where `(c, r)` is the position of the source’s
     ///     last element before the operation, and `v` is its value.
@@ -464,7 +464,7 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
 /// ```text
 /// Chunk 0: [ T, T, T, T ]   (full)
 /// Chunk 1: [ T, T, T, T ]   (full)
-/// Chunk 2: [ T, T, —, — ]   (partially full, last_chunk_length = 2)
+/// Chunk 2: [ T, T, -, - ]   (partially full, last_chunk_length = 2)
 /// ```
 ///
 /// # Invariants
@@ -525,9 +525,9 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
 ///
 /// # Fields
 ///
-/// - `chunks` — The chunked backing storage.  
-/// - `last_chunk_length` — The number of initialized elements in the final chunk.  
-/// - `length` — Total number of initialized elements across all chunks.
+/// - `chunks` - The chunked backing storage.  
+/// - `last_chunk_length` - The number of initialized elements in the final chunk.  
+/// - `length` - Total number of initialized elements across all chunks.
 ///
 
 pub struct Attribute<T> {

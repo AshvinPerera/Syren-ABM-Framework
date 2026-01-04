@@ -6,9 +6,9 @@
 //! (such as borrow conflicts or invalid query access).
 //!
 //! The errors in this module are designed to be:
-//! * **Deterministic** — the same misuse always yields the same error,
-//! * **Actionable** — errors carry structured context for diagnostics,
-//! * **Composable** — low-level errors can be promoted into higher-level ones
+//! * **Deterministic** - the same misuse always yields the same error,
+//! * **Actionable** - errors carry structured context for diagnostics,
+//! * **Composable** - low-level errors can be promoted into higher-level ones
 //!   without losing information.
 //!
 //! ## Error Categories
@@ -164,9 +164,9 @@ impl std::error::Error for RegistryError {}
 /// beyond its configured limit.
 ///
 /// ### Fields
-/// * `entities_needed` — Total number of entities the operation attempted to
+/// * `entities_needed` - Total number of entities the operation attempted to
 ///   create or accommodate.
-/// * `capacity` — The current upper bound that prevented the operation.
+/// * `capacity` - The current upper bound that prevented the operation.
 ///
 /// ### Example
 /// ```ignore
@@ -201,8 +201,8 @@ impl std::error::Error for CapacityError {}
 /// set or collection.
 ///
 /// ### Fields
-/// * `index` — The shard index that was requested.
-/// * `max_index` — The maximum valid shard index (inclusive).
+/// * `index` - The shard index that was requested.
+/// * `max_index` - The maximum valid shard index (inclusive).
 ///
 /// ### Example
 /// ```ignore
@@ -234,7 +234,7 @@ impl fmt::Display for ShardBoundsError {
 
 impl std::error::Error for ShardBoundsError {}
 
-/// Returned when an `Entity` handle is no longer valid—typically because it
+/// Returned when an `Entity` handle is no longer valid-typically because it
 /// was despawned or its generation/version no longer matches live storage.
 ///
 /// Use this to prevent use-after-free style logic errors at the API boundary.
@@ -329,8 +329,8 @@ impl std::error::Error for PositionOutOfBoundsError {}
 /// type IDs diverge (e.g. writing `Velocity` into a `Position` column).
 ///
 /// ### Fields
-/// * `expected` — The [`TypeId`] that the destination storage declares.
-/// * `actual` — The [`TypeId`] of the value provided by the caller.
+/// * `expected` - The [`TypeId`] that the destination storage declares.
+/// * `actual` - The [`TypeId`] of the value provided by the caller.
 ///
 /// ### Example
 /// ```ignore
@@ -435,11 +435,11 @@ impl From<TypeMismatchError> for AttributeError {
 /// underlying structured error to keep diagnostics actionable.
 ///
 /// ### Variants (typical)
-/// * `Capacity(CapacityError)` — Not enough room to allocate the requested
+/// * `Capacity(CapacityError)` - Not enough room to allocate the requested
 ///   number of entities.
-/// * `ShardBounds(ShardBoundsError)` — Target shard index was invalid.
-/// * `StaleEntity(StaleEntityError)` — A supplied entity reference was not live.
-/// * `StoragePushFailedWith(AttributeError)` — Component push/write failed.
+/// * `ShardBounds(ShardBoundsError)` - Target shard index was invalid.
+/// * `StaleEntity(StaleEntityError)` - A supplied entity reference was not live.
+/// * `StoragePushFailedWith(AttributeError)` - Component push/write failed.
 ///
 /// ### Usage
 /// `From<T>` conversions allow `?` from low-level operations:
