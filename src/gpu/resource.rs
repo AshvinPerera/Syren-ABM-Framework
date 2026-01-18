@@ -4,6 +4,8 @@
 //!
 //! A GPU resource is a **world-owned persistent GPU state** (buffers / bindable storage)
 
+use std::any::Any;
+
 use crate::engine::types::GPUResourceID;
 use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 
@@ -57,6 +59,12 @@ pub trait GPUResource: Send + Sync {
         base: u32,
         out: &mut Vec<wgpu::BindGroupEntry<'a>>,
     ) -> ECSResult<()>;
+    
+    /// Downcasts to `Any`.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Downcasts to mutable `Any`.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 #[allow(dead_code)]
@@ -194,5 +202,21 @@ impl GPUResourceRegistry {
             cursor += e.resource.bindings().len() as u32;
         }
         Ok(cursor)
+    }
+
+    /// Returns a mutable reference to a typed GPU resource by ID.
+    pub fn get_mut_typed<R: 'static>(&mut self, id: GPUResourceID) -> Option<&mut R> {
+        self.entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .and_then(|e| e.resource.as_any_mut().downcast_mut::<R>())
+    }
+
+    /// Returns an immutable reference to a typed GPU resource by ID.
+    pub fn get_typed<R: 'static>(&self, id: GPUResourceID) -> Option<&R> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.resource.as_any().downcast_ref::<R>())
     }
 }

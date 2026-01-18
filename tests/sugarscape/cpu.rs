@@ -7,8 +7,21 @@ use abm_framework::engine::{
     systems::{System, SystemBackend, AccessSets},
     component::component_id_of,
     manager::ECSReference,
-    error::ECSResult,
+    error::{ECSResult},
 };
+
+#[cfg(feature = "gpu")]
+use abm_framework::engine::{
+    types::GPUResourceID,
+    error::ECSError,
+};
+
+#[cfg(feature = "gpu")]
+use abm_framework::gpu;
+
+#[cfg(feature = "gpu")]
+use crate::sugarscape::gpu_resources::{AgentIntentBuffers, SugarGrid};
+
 
 use crate::sugarscape::components::*;
 
@@ -342,5 +355,102 @@ impl System for DeathSystem {
         })?;
 
         Ok(())
+    }
+}
+
+#[cfg(feature = "gpu")]
+pub struct ResolveIntentCpuSystem {
+    sugar_grid: GPUResourceID,
+    intent: GPUResourceID,
+}
+
+#[cfg(feature = "gpu")]
+impl ResolveIntentCpuSystem {
+    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID) -> Self {
+        Self { sugar_grid, intent }
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl System for ResolveIntentCpuSystem {
+    fn id(&self) -> u16 { 14 }
+    fn backend(&self) -> SystemBackend { SystemBackend::CPU }
+
+    fn access(&self) -> AccessSets {
+        AccessSets::default()
+    }
+
+    fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
+        gpu::sync_pending_to_cpu(ecs)?;
+
+        const INVALID: u32 = 0xffffffff;
+
+        ecs.with_exclusive(|data| {
+            let gpu_resources = data.gpu_resources_mut();
+            let grid_len = {
+                let sugar = gpu_resources
+                    .get_typed::<SugarGrid>(self.sugar_grid)
+                    .ok_or_else(|| ECSError::from(
+                        abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
+                            message: "missing SugarGrid resource".into(),
+                        }
+                    ))?;
+
+                (sugar.w * sugar.h) as usize
+            };
+
+            if grid_len == 0 {
+                return Ok(());
+            }
+
+            let intent = gpu_resources
+                .get_mut_typed::<AgentIntentBuffers>(self.intent)
+                .ok_or_else(|| ECSError::from(
+                    abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
+                        message: "missing AgentIntentBuffers resource".into(),
+                    }
+                ))?;
+
+            let mut winner_agent: Vec<u32> = vec![INVALID; grid_len];
+            let mut winner_score: Vec<f32> = vec![-1.0; grid_len];
+
+            let n = intent.len();
+            for i in 0..n {
+                let tgt = intent.target_cpu[i];
+                if tgt == INVALID { continue; }
+
+                let cell = tgt as usize;
+                if cell >= grid_len { continue; }
+
+                let score = intent.score_cpu[i];
+
+                let cur_a = winner_agent[cell];
+                if cur_a == INVALID {
+                    winner_agent[cell] = i as u32;
+                    winner_score[cell] = score;
+                    continue;
+                }
+
+                let cur_s = winner_score[cell];
+                if score > cur_s || (score == cur_s && (i as u32) < cur_a) {
+                    winner_agent[cell] = i as u32;
+                    winner_score[cell] = score;
+                }
+            }
+
+            for i in 0..n {
+                let tgt = intent.target_cpu[i];
+                if tgt == INVALID { continue; }
+
+                let cell = tgt as usize;
+                if cell >= grid_len || winner_agent[cell] != (i as u32) {
+                    intent.target_cpu[i] = INVALID;
+                }
+            }
+
+            gpu_resources.mark_cpu_dirty(self.intent);
+
+            Ok(())
+        })
     }
 }

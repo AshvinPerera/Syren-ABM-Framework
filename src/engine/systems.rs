@@ -147,6 +147,12 @@ pub trait GpuSystem {
 /// in parallel across threads.
 
 pub trait System: Send + Sync {
+    /// Human-readable name (used for debugging/profiling).
+    #[inline]
+    fn name(&self) -> &'static str {
+        std::any::type_name_of_val(self)
+    }
+
     /// Returns the unique identifier of this system.
     fn id(&self) -> SystemID;
 
@@ -230,6 +236,10 @@ where
         + Sync
         + 'static,
 {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
     fn id(&self) -> SystemID {
         self.id
     }

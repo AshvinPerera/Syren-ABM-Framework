@@ -1,2 +1,4 @@
 /target
+/profile/*.etl
+/profile/*.csv
 .vs/

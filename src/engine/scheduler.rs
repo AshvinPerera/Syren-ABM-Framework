@@ -34,6 +34,7 @@ use crate::engine::manager::ECSReference;
 use crate::engine::systems::{AccessSets, System, SystemBackend};
 use crate::engine::component::Signature;
 use crate::engine::error::{ECSResult, ECSError, ExecutionError};
+use crate::profiling::profiler;
 
 #[cfg(feature = "gpu")]
 use crate::gpu;
@@ -269,31 +270,53 @@ impl Scheduler {
     /// by the ECS manager at higher-level execution boundaries
     
     pub fn run(&mut self, ecs: ECSReference<'_>) -> ECSResult<()> {
+        let _g = profiler::span("Scheduler::run");
+        
         self.rebuild();
 
         for stage in &self.plan {
             match stage.stage_type {
                 StageType::BOUNDARY => {
+                    let _s = profiler::span("Stage::BOUNDARY");
+
                     ecs.clear_borrows();
 
                     #[cfg(feature = "gpu")]
                     {
+                        let _g0 = profiler::span("GPU::sync_pending_to_cpu");
                         // Ensures ECS CPU storage is consistent before commands or CPU stages.
                         gpu::sync_pending_to_cpu(ecs)?;
                     }
+
+                    let _g1 = profiler::span("ECS::apply_deferred_commands");
 
                     ecs.apply_deferred_commands()?;
                 }
 
                 StageType::CPU => {
+                    let _s = profiler::span("Stage::CPU")
+                        .arg("systems", profiler::Arg::U64(stage.system_indices.len() as u64));
+                    
                     stage.system_indices
                         .par_iter()
-                        .try_for_each(|&i| self.systems[i].run(ecs))?;
+                        .try_for_each(|&i| {
+                            let sys = &self.systems[i];
+
+                            profiler::next_arg("system_id", profiler::Arg::U64(sys.id() as u64));
+                            profiler::next_arg("backend", profiler::Arg::Str("CPU".to_string()));
+
+                            let _sg = profiler::span_fmt(format_args!("System::{}", sys.name()));
+
+                            sys.run(ecs)
+                        })?;
 
                     ecs.clear_borrows();
                 }
 
                 StageType::GPU => {
+                    let _s = profiler::span("Stage::GPU")
+                        .arg("systems", profiler::Arg::U64(stage.system_indices.len() as u64));
+
                     #[cfg(not(feature = "gpu"))]
                     {
                         let _ = &stage;
@@ -305,12 +328,24 @@ impl Scheduler {
                         // Sequential execution on GPU.
                         for &idx in &stage.system_indices {
                             let system = &self.systems[idx];
+
+                            profiler::next_arg("system_id", profiler::Arg::U64(system.id() as u64));
+                            profiler::next_arg("backend", profiler::Arg::Str("GPU".to_string()));
+
+                            let _sg = profiler::span_fmt(format_args!("System::{}", system.name()));
+
                             let gpu_cap = system.gpu().ok_or_else(|| {
                                 ECSError::from(ExecutionError::SchedulerInvariantViolation)
                             })?;
-                            gpu::execute_gpu_system(ecs, system.as_ref(), gpu_cap)?;
+
+                            {
+                                let _g_exec = profiler::span("GPU::execute_gpu_system");
+                                gpu::execute_gpu_system(ecs, system.as_ref(), gpu_cap)?;
+                            }
+
                             ecs.clear_borrows();
                         }
+
                     }
                 }
             }

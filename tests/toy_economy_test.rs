@@ -9,6 +9,12 @@ use abm_framework::engine::commands::Command;
 use abm_framework::engine::error::{ECSError, ECSResult};
 use abm_framework::engine::reduce::{Count, Sum};
 
+use abm_framework::profiling::profiler;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Components
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct AgentTag(pub u8);
@@ -38,6 +44,10 @@ struct TargetInventory(pub f32);
 #[derive(Clone, Copy)]
 struct Price(pub f32);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Systems
+// ─────────────────────────────────────────────────────────────────────────────
+
 struct ProductionSystem;
 
 impl System for ProductionSystem {
@@ -52,8 +62,7 @@ impl System for ProductionSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
-        let qb = ecs.query()?;
-        let query = qb
+        let query = ecs.query()?
             .read::<Production>()?
             .read::<TargetInventory>()?
             .write::<Inventory>()?
@@ -86,8 +95,7 @@ impl System for WagePaymentSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
-        let qb = ecs.query()?;
-        let query = qb
+        let query = ecs.query()?
             .read::<Production>()?
             .read::<Wage>()?
             .write::<Cash>()?
@@ -117,8 +125,7 @@ impl System for SpendingSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
-        let qb = ecs.query()?;
-        let query = qb
+        let query = ecs.query()?
             .read::<AgentTag>()?
             .write::<Cash>()?
             .build()?;
@@ -150,8 +157,7 @@ impl System for PriceSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
-        let qb = ecs.query()?;
-        let query = qb
+        let query = ecs.query()?
             .read::<Inventory>()?
             .read::<TargetInventory>()?
             .write::<Price>()?
@@ -185,8 +191,7 @@ impl System for HungerSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> Result<(), ECSError> {
-        let qb = ecs.query()?;
-        let query = qb
+        let query = ecs.query()?
             .read::<Cash>()?
             .write::<Hunger>()?
             .build()?;
@@ -206,8 +211,17 @@ impl System for HungerSystem {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Simulation
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[test]
 fn toy_economy_ecs_abm() -> ECSResult<()> {
+    // ─── PROFILER SETUP ───────────────────────────────────────────────────────
+    profiler::init("profile/toy_economy_trace.json");
+    profiler::thread_name("Main");
+
+    // ─── COMPONENT REGISTRATION ──────────────────────────────────────────────
     let _ = register_component::<Cash>();
     let _ = register_component::<Hunger>();
     let _ = register_component::<AgentTag>();
@@ -219,12 +233,15 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
     let _ = register_component::<Price>();
     let _ = freeze_components();
 
+    // ─── WORLD SETUP ──────────────────────────────────────────────────────────
+    let _setup = profiler::span("setup::spawn_entities");
+
     let shards = EntityShards::new(4);
     let ecs = ECSManager::new(ECSData::new(shards));
-
     let world = ecs.world_ref();
 
     world.with_exclusive(|_| -> Result<(), ECSError> {
+        // Firms
         for _ in 0..100 {
             let mut b = Bundle::new();
             b.insert(component_id_of::<FirmTag>()?, FirmTag(0));
@@ -237,6 +254,7 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
             world.defer(Command::Spawn { bundle: b })?;
         }
 
+        // Agents
         for _ in 0..1_000_000 {
             let mut b = Bundle::new();
             b.insert(component_id_of::<AgentTag>()?, AgentTag(0));
@@ -249,7 +267,9 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
     })?;
 
     ecs.apply_deferred_commands()?;
+    drop(_setup);
 
+    // ─── SCHEDULER ────────────────────────────────────────────────────────────
     let mut scheduler = Scheduler::new();
     scheduler.add_system(ProductionSystem);
     scheduler.add_system(WagePaymentSystem);
@@ -257,35 +277,42 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
     scheduler.add_system(SpendingSystem);
     scheduler.add_system(HungerSystem);
 
+    // ─── SIMULATION LOOP ──────────────────────────────────────────────────────
     for step in 0..1000 {
+        let _tick = profiler::span("tick")
+            .arg("step", profiler::Arg::U64(step as u64));
+
         ecs.run(&mut scheduler)?;
 
         let world = ecs.world_ref();
-
-        let qb = world.query()?;
-        let query = qb
+        let query = world.query()?
             .read::<Price>()?
             .build()?;
 
-        // Sum of prices
-        let sum = world.reduce_read::<Price, Sum>(
-            query.clone(),
-            Sum::default,
-            |acc, price| acc.0 += price.0 as f64,
-            |a, b| a.0 += b.0,
-        )?;
+        let sum = {
+            let _g = profiler::span("reduce::sum_price");
+            world.reduce_read::<Price, Sum>(
+                query.clone(),
+                Sum::default,
+                |acc, price| acc.0 += price.0 as f64,
+                |a, b| a.0 += b.0,
+            )?
+        };
 
-        // Count of firms
-        let count = world.reduce_read::<Price, Count>(
-            query,
-            Count::default,
-            |acc, _| acc.0 += 1,
-            |a, b| a.0 += b.0,
-        )?;
+        let count = {
+            let _g = profiler::span("reduce::count_firms");
+            world.reduce_read::<Price, Count>(
+                query,
+                Count::default,
+                |acc, _| acc.0 += 1,
+                |a, b| a.0 += b.0,
+            )?
+        };
 
         let avg = sum.0 / count.0 as f64;
         println!("{step},{avg}");
     }
 
+    profiler::shutdown();
     Ok(())
 }

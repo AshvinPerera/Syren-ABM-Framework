@@ -12,15 +12,13 @@ struct GridInfo {
     _pad1: u32,
 };
 
-@group(0) @binding(0) var<uniform> params : Params;
+@group(0) @binding(0) var<uniform> params: Params;
 
-// SugarGrid resource layout:
-@group(1) @binding(0) var<storage, read_write> sugar : array<f32>;
-@group(1) @binding(1) var<storage, read> capacity : array<f32>;
-@group(1) @binding(2) var<storage, read_write> occupancy : array<atomic<u32>>;
-
-// NEW
-@group(1) @binding(3) var<storage, read> grid : GridInfo;
+// SugarGrid resource layout
+@group(1) @binding(0) var<storage, read_write> sugar: array<f32>;
+@group(1) @binding(1) var<storage, read> capacity: array<f32>;
+@group(1) @binding(2) var<storage, read_write> occupancy: array<atomic<u32>>; 
+@group(1) @binding(3) var<storage, read> grid: GridInfo;
 
 const REGROW_RATE : f32 = 4.0;
 

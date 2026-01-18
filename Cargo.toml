@@ -26,6 +26,8 @@ pollster = "0.4.0"
 default = []
 rollback = []
 gpu = ["wgpu", "bytemuck", "pollster"]
+profiling = []
+gpu_profiling = ["gpu", "profiling"]
 
 [[bench]]
 name = "spawn"

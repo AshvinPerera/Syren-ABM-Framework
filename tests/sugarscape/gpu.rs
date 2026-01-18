@@ -1,8 +1,4 @@
 //! GPU systems for the Sugarscape model.
-//!
-//! These systems are executed by the scheduler when the GPU backend is enabled.
-//! They do not perform any CPU-side logic; instead they provide WGSL shaders
-//! that operate directly on GPU component buffers.
 
 #![cfg(feature = "gpu")]
 
@@ -15,7 +11,6 @@ use abm_framework::engine::{
 };
 
 use crate::sugarscape::components::*;
-
 
 pub struct MetabolismGpuSystem;
 
@@ -99,7 +94,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
 pub struct AgentIntentGpuSystem {
     resources: [GPUResourceID; 2],
-    writes: [GPUResourceID; 1],
+    writes:    [GPUResourceID; 1],
 }
 
 impl AgentIntentGpuSystem {
@@ -137,12 +132,15 @@ impl GpuSystem for AgentIntentGpuSystem {
 
 pub struct ResolveHarvestGpuSystem {
     resources: [GPUResourceID; 2],
-    writes: [GPUResourceID; 1],
+    writes:    [GPUResourceID; 1],
 }
 
 impl ResolveHarvestGpuSystem {
     pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID) -> Self {
-        Self { resources: [sugar_grid, intent], writes: [sugar_grid] }
+        Self {
+            resources: [sugar_grid, intent],
+            writes: [sugar_grid],
+        }
     }
 }
 
@@ -183,7 +181,6 @@ impl SugarRegrowthGpuSystem {
 impl System for SugarRegrowthGpuSystem {
     fn id(&self) -> u16 { 12 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
-
     fn access(&self) -> AccessSets { AccessSets::default() }
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }

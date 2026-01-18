@@ -23,6 +23,16 @@ pub mod engine;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+/// Chrome Trace (flame-style) profiler for ECS execution.
+///
+/// This module provides a feature-gated, zero-overhead (when disabled)
+/// profiling API that emits Chrome Trace JSON compatible with:
+/// - chrome://tracing
+/// - https://ui.perfetto.dev
+///
+/// Enable with `--features profiling`.
+pub mod profiling;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Re-exports (Public API)
 // ─────────────────────────────────────────────────────────────────────────────
