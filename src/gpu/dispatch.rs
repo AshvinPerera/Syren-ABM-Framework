@@ -46,6 +46,7 @@
 
 #![cfg(feature = "gpu")]
 
+use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::engine::archetype::Archetype;

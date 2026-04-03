@@ -1,5 +1,7 @@
 #![cfg(feature = "gpu")]
 
+use std::mem::size_of;
+
 use abm_framework::gpu::{GPUResource, GPUBindingDesc, GPUContext};
 use abm_framework::{ECSResult, ECSError, ExecutionError};
 
