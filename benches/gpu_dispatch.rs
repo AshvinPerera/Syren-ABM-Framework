@@ -1,19 +1,19 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::engine::scheduler::Scheduler;
+use abm_framework::Scheduler;
 
 mod gpu_common;
 use gpu_common::*;
 
 fn gpu_dispatch_hot_benchmark(c: &mut Criterion) {
-    init_components();
+    let (registry, energy_id) = make_registry();
 
-    let ecs = make_world(4);
-    populate_energy(&ecs, AGENTS).unwrap();
+    let ecs = make_world(4, registry);
+    populate_energy(&ecs, AGENTS, energy_id).unwrap();
 
     let mut scheduler = Scheduler::new();
-    scheduler.add_system(EnergyDecayGpu::new(1));
+    scheduler.add_system(EnergyDecayGpu::new(1, energy_id));
 
     ecs.run(&mut scheduler).unwrap();
 

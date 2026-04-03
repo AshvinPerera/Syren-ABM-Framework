@@ -69,7 +69,7 @@
 //! * Synchronization is explicit and never implicit
 //! * GPU errors are never ignored or silently suppressed
 //!
-//! Violating these invariants may result in undefined behavior or corrupted
+//! Violating these invariants may result in undefined behaviour or corrupted
 //! ECS state.
 //!
 //! ---

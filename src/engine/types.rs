@@ -71,8 +71,6 @@ pub type EntityCount = u32;
 
 /// Unique identifier for a system.
 pub type SystemID = u16;
-/// Simulation tick counter.
-pub type Tick = u64;
 
 /// Total number of bits in an [`EntityID`].
 pub const ENTITY_BITS: Bits = 64;
@@ -113,7 +111,13 @@ pub const CHUNK_CAP: usize = 16_384;
 pub type ComponentID = u16;
 
 /// Maximum number of registered component types.
-pub const COMPONENT_CAP: usize = 4096;
+///
+/// This value controls the size of [`Signature`] bitsets: each 256-component
+/// capacity requires 4 `u64` words (32 bytes) per signature. If a simulation
+/// requires more than 256 distinct component types, this constant can be
+/// increased in multiples of 64. Each additional 64 components adds one `u64`
+/// word (8 bytes) to every signature, so increases should be made deliberately.
+pub const COMPONENT_CAP: usize = 256;
 /// Number of `u64` words required to represent a full component signature.
 pub const SIGNATURE_SIZE: usize = (COMPONENT_CAP + 63) / 64;
 
@@ -122,6 +126,7 @@ pub const SIGNATURE_SIZE: usize = (COMPONENT_CAP + 63) / 64;
 pub type GPUResourceID = u16;
 
 /// Declares how a component buffer is accessed during GPU execution.
+#[cfg(feature = "gpu")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GPUAccessMode {
     /// Read-only access to a component buffer.

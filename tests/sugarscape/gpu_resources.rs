@@ -1,7 +1,7 @@
 #![cfg(feature = "gpu")]
 
 use abm_framework::gpu::{GPUResource, GPUBindingDesc, GPUContext};
-use abm_framework::engine::error::ECSResult;
+use abm_framework::{ECSResult, ECSError, ExecutionError};
 
 use wgpu::util::DeviceExt;
 
@@ -143,7 +143,7 @@ impl AgentIntentBuffers {
 
 fn read_buffer_u32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [u32]) -> ECSResult<()> {
     use std::sync::mpsc;
-    let bytes_len = (out.len() * std::mem::size_of::<u32>()) as u64;
+    let bytes_len = (out.len() * size_of::<u32>()) as u64;
 
     let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback_u32"),
@@ -159,8 +159,8 @@ fn read_buffer_u32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [u32]) -> ECS
     let submission = ctx.queue.submit(Some(encoder.finish()));
 
     ctx.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
-        .map_err(|e| abm_framework::engine::error::ECSError::from(
-            abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
+        .map_err(|e| ECSError::from(
+            ExecutionError::GpuDispatchFailed {
                 message: format!("poll failed: {e:?}").into(),
             }
         ))?;
@@ -171,14 +171,14 @@ fn read_buffer_u32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [u32]) -> ECS
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
 
     rx.recv()
-    .unwrap()
-    .map_err(|e| {
-        abm_framework::engine::error::ECSError::from(
-            abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
-                message: format!("map_async (u32) failed: {e:?}").into(),
-            },
-        )
-    })?;
+        .unwrap()
+        .map_err(|e| {
+            ECSError::from(
+                ExecutionError::GpuDispatchFailed {
+                    message: format!("map_async (u32) failed: {e:?}").into(),
+                },
+            )
+        })?;
 
     let data = slice.get_mapped_range();
     let src: &[u8] = &data;
@@ -192,7 +192,7 @@ fn read_buffer_u32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [u32]) -> ECS
 fn read_buffer_f32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [f32]) -> ECSResult<()> {
     // identical to read_buffer_u32 except types
     use std::sync::mpsc;
-    let bytes_len = (out.len() * std::mem::size_of::<f32>()) as u64;
+    let bytes_len = (out.len() * size_of::<f32>()) as u64;
 
     let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback_f32"),
@@ -208,8 +208,8 @@ fn read_buffer_f32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [f32]) -> ECS
     let submission = ctx.queue.submit(Some(encoder.finish()));
 
     ctx.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
-        .map_err(|e| abm_framework::engine::error::ECSError::from(
-            abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
+        .map_err(|e| ECSError::from(
+            ExecutionError::GpuDispatchFailed {
                 message: format!("poll failed: {e:?}").into(),
             }
         ))?;
@@ -220,14 +220,14 @@ fn read_buffer_f32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [f32]) -> ECS
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
 
     rx.recv()
-    .unwrap()
-    .map_err(|e| {
-        abm_framework::engine::error::ECSError::from(
-            abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
-                message: format!("map_async (u32) failed: {e:?}").into(),
-            },
-        )
-    })?;
+        .unwrap()
+        .map_err(|e| {
+            ECSError::from(
+                ExecutionError::GpuDispatchFailed {
+                    message: format!("map_async (f32) failed: {e:?}").into(),
+                },
+            )
+        })?;
 
     let data = slice.get_mapped_range();
     let src: &[u8] = &data;

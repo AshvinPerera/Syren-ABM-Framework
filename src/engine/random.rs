@@ -13,7 +13,7 @@
 //! - No global state, locks, or atomics are used.
 //!
 //! The initial seed is a fixed, non-zero constant, ensuring deterministic
-//! behavior *per thread* across executions unless the thread creation order
+//! behaviour *per thread* across executions unless the thread creation order
 //! changes.
 //!
 //! # Performance characteristics
@@ -41,7 +41,7 @@
 //!
 //! # Intended use cases
 //!
-//! - Simulation and modeling
+//! - Simulation and modelling
 //! - Randomized algorithms and heuristics
 //! - ECS shuffling and load balancing
 //! - Procedural generation
@@ -57,7 +57,7 @@ thread_local! {static TL_RNG: Cell<u64> = Cell::new(0x9E37_79B9_7F4A_7C15);}
 
 /// Returns a fast, thread-local pseudo-random `u64`.
 ///
-/// ## Behavior
+/// ## Behaviour
 /// This function generates a new pseudo-random value using a **xorshift64\***
 /// algorithm backed by a thread-local state. Each thread maintains its own
 /// independent RNG state, eliminating contention and synchronization overhead.

@@ -5,26 +5,25 @@ mod common;
 use common::*;
 
 fn reduce_benchmark(c: &mut Criterion) {
-    init_components();
+    let (registry, pos_id, wealth_id, prod_id) = make_registry();
 
     let mut group = c.benchmark_group("reduce");
 
     group.bench_function("reduce_sum_wealth_1M", |b| {
+        let registry = registry.clone();
         b.iter_batched(
             || {
-                let ecs = make_world(4);
-                populate(&ecs, AGENTS_MED).unwrap();
+                let ecs = make_world(4, registry.clone());
+                populate(&ecs, AGENTS_MED, pos_id, wealth_id, prod_id).unwrap();
 
-                let q = ecs
-                    .world_ref()
-                    .query().unwrap()
+                let q = query_builder(&registry)
                     .read::<Wealth>().unwrap()
                     .build().unwrap();
 
                 (ecs, q)
             },
-            |(_ecs, q)| {
-                let total = _ecs
+            |(ecs, q)| {
+                let total = ecs
                     .world_ref()
                     .reduce_read::<Wealth, f32>(
                         q,

@@ -3,18 +3,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use abm_framework::engine::{
-    systems::{System, SystemBackend, AccessSets},
-    component::component_id_of,
-    manager::ECSReference,
-    error::{ECSResult},
+use abm_framework::{
+    System, SystemBackend, AccessSets, ComponentRegistry,
+    ECSReference, ECSResult,
+    cast_slice, cast_slice_mut,
 };
 
 #[cfg(feature = "gpu")]
-use abm_framework::engine::{
-    types::GPUResourceID,
-    error::ECSError,
-};
+use abm_framework::{GPUResourceID, ECSError, ExecutionError};
 
 #[cfg(feature = "gpu")]
 use abm_framework::gpu;
@@ -139,6 +135,17 @@ impl Grid {
 pub struct SugarRegrowthSystem {
     pub grid: Arc<Mutex<Grid>>,
     pub rate: f32,
+    access: AccessSets,
+}
+
+impl SugarRegrowthSystem {
+    pub fn new(grid: Arc<Mutex<Grid>>, rate: f32) -> Self {
+        Self {
+            grid,
+            rate,
+            access: AccessSets::default(),
+        }
+    }
 }
 
 impl System for SugarRegrowthSystem {
@@ -148,9 +155,7 @@ impl System for SugarRegrowthSystem {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> AccessSets {
-        AccessSets::default()
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
         let mut grid = self.grid.lock().unwrap();
@@ -162,6 +167,18 @@ impl System for SugarRegrowthSystem {
 /// Move + Harvest system (CPU)
 pub struct MoveAndHarvestSystem {
     pub grid: Arc<Mutex<Grid>>,
+    access: AccessSets,
+}
+
+impl MoveAndHarvestSystem {
+    pub fn new(grid: Arc<Mutex<Grid>>, registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Vision>().unwrap());
+        a.read.set(registry.id_of::<Alive>().unwrap());
+        a.write.set(registry.id_of::<Position>().unwrap());
+        a.write.set(registry.id_of::<Sugar>().unwrap());
+        Self { grid, access: a }
+    }
 }
 
 impl System for MoveAndHarvestSystem {
@@ -171,17 +188,7 @@ impl System for MoveAndHarvestSystem {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-
-        a.read.set(component_id_of::<Vision>().unwrap());
-        a.read.set(component_id_of::<Alive>().unwrap());
-
-        a.write.set(component_id_of::<Position>().unwrap());
-        a.write.set(component_id_of::<Sugar>().unwrap());
-
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
         let grid = self.grid.clone();
@@ -204,17 +211,17 @@ impl System for MoveAndHarvestSystem {
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
             let vision =
-                abm_framework::engine::storage::cast_slice::<Vision>(reads[0].as_ptr(), reads[0].len());
+                cast_slice::<Vision>(reads[0].as_ptr(), reads[0].len());
             let alive =
-                abm_framework::engine::storage::cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
+                cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
 
             let pos =
-                abm_framework::engine::storage::cast_slice_mut::<Position>(
+                cast_slice_mut::<Position>(
                     writes[0].as_mut_ptr(),
                     writes[0].len(),
                 );
             let sugar =
-                abm_framework::engine::storage::cast_slice_mut::<Sugar>(
+                cast_slice_mut::<Sugar>(
                     writes[1].as_mut_ptr(),
                     writes[1].len(),
                 );
@@ -272,7 +279,19 @@ impl System for MoveAndHarvestSystem {
     }
 }
 
-pub struct MetabolismSystem;
+pub struct MetabolismSystem {
+    access: AccessSets,
+}
+
+impl MetabolismSystem {
+    pub fn new(registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Metabolism>().unwrap());
+        a.read.set(registry.id_of::<Alive>().unwrap());
+        a.write.set(registry.id_of::<Sugar>().unwrap());
+        Self { access: a }
+    }
+}
 
 impl System for MetabolismSystem {
     fn id(&self) -> u16 { 3 }
@@ -281,13 +300,7 @@ impl System for MetabolismSystem {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Metabolism>().unwrap());
-        a.read.set(component_id_of::<Alive>().unwrap());
-        a.write.set(component_id_of::<Sugar>().unwrap());
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
         let q = ecs.query()?
@@ -298,11 +311,11 @@ impl System for MetabolismSystem {
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
             let metab =
-                abm_framework::engine::storage::cast_slice::<Metabolism>(reads[0].as_ptr(), reads[0].len());
+                cast_slice::<Metabolism>(reads[0].as_ptr(), reads[0].len());
             let alive =
-                abm_framework::engine::storage::cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
+                cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
             let sugar =
-                abm_framework::engine::storage::cast_slice_mut::<Sugar>(writes[0].as_mut_ptr(), writes[0].len());
+                cast_slice_mut::<Sugar>(writes[0].as_mut_ptr(), writes[0].len());
 
             for i in 0..alive.len() {
                 if alive[i].0 == 0 {
@@ -316,7 +329,18 @@ impl System for MetabolismSystem {
     }
 }
 
-pub struct DeathSystem;
+pub struct DeathSystem {
+    access: AccessSets,
+}
+
+impl DeathSystem {
+    pub fn new(registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Sugar>().unwrap());
+        a.write.set(registry.id_of::<Alive>().unwrap());
+        Self { access: a }
+    }
+}
 
 impl System for DeathSystem {
     fn id(&self) -> u16 { 4 }
@@ -325,12 +349,7 @@ impl System for DeathSystem {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Sugar>().unwrap());
-        a.write.set(component_id_of::<Alive>().unwrap());
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
         let q = ecs.query()?
@@ -340,9 +359,9 @@ impl System for DeathSystem {
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
             let sugar =
-                abm_framework::engine::storage::cast_slice::<Sugar>(reads[0].as_ptr(), reads[0].len());
+                cast_slice::<Sugar>(reads[0].as_ptr(), reads[0].len());
             let alive =
-                abm_framework::engine::storage::cast_slice_mut::<Alive>(writes[0].as_mut_ptr(), writes[0].len());
+                cast_slice_mut::<Alive>(writes[0].as_mut_ptr(), writes[0].len());
 
             for i in 0..alive.len() {
                 if alive[i].0 == 0 {
@@ -362,12 +381,13 @@ impl System for DeathSystem {
 pub struct ResolveIntentCpuSystem {
     sugar_grid: GPUResourceID,
     intent: GPUResourceID,
+    access: AccessSets,
 }
 
 #[cfg(feature = "gpu")]
 impl ResolveIntentCpuSystem {
     pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID) -> Self {
-        Self { sugar_grid, intent }
+        Self { sugar_grid, intent, access: AccessSets::default() }
     }
 }
 
@@ -376,12 +396,10 @@ impl System for ResolveIntentCpuSystem {
     fn id(&self) -> u16 { 14 }
     fn backend(&self) -> SystemBackend { SystemBackend::CPU }
 
-    fn access(&self) -> AccessSets {
-        AccessSets::default()
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        gpu::sync_pending_to_cpu(ecs)?;
+        gpu::sync_pending_to_cpu(ecs, &[])?;
 
         const INVALID: u32 = 0xffffffff;
 
@@ -391,7 +409,7 @@ impl System for ResolveIntentCpuSystem {
                 let sugar = gpu_resources
                     .get_typed::<SugarGrid>(self.sugar_grid)
                     .ok_or_else(|| ECSError::from(
-                        abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
+                        ExecutionError::GpuDispatchFailed {
                             message: "missing SugarGrid resource".into(),
                         }
                     ))?;
@@ -406,7 +424,7 @@ impl System for ResolveIntentCpuSystem {
             let intent = gpu_resources
                 .get_mut_typed::<AgentIntentBuffers>(self.intent)
                 .ok_or_else(|| ECSError::from(
-                    abm_framework::engine::error::ExecutionError::GpuDispatchFailed {
+                    ExecutionError::GpuDispatchFailed {
                         message: "missing AgentIntentBuffers resource".into(),
                     }
                 ))?;

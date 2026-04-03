@@ -2,29 +2,32 @@
 
 #![cfg(feature = "gpu")]
 
-use abm_framework::engine::{
-    systems::{System, SystemBackend, AccessSets, GpuSystem},
-    component::component_id_of,
-    manager::ECSReference,
-    error::ECSResult,
-    types::GPUResourceID,
+use abm_framework::{
+    System, SystemBackend, AccessSets, GpuSystem, ComponentRegistry,
+    ECSReference, ECSResult, GPUResourceID,
 };
 
 use crate::sugarscape::components::*;
 
-pub struct MetabolismGpuSystem;
+pub struct MetabolismGpuSystem {
+    access: AccessSets,
+}
+
+impl MetabolismGpuSystem {
+    pub fn new(registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Metabolism>().unwrap());
+        a.read.set(registry.id_of::<Alive>().unwrap());
+        a.write.set(registry.id_of::<Sugar>().unwrap());
+        Self { access: a }
+    }
+}
 
 impl System for MetabolismGpuSystem {
     fn id(&self) -> u16 { 3 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Metabolism>().unwrap());
-        a.read.set(component_id_of::<Alive>().unwrap());
-        a.write.set(component_id_of::<Sugar>().unwrap());
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
@@ -53,18 +56,24 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     fn workgroup_size(&self) -> u32 { 256 }
 }
 
-pub struct DeathGpuSystem;
+pub struct DeathGpuSystem {
+    access: AccessSets,
+}
+
+impl DeathGpuSystem {
+    pub fn new(registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Sugar>().unwrap());
+        a.write.set(registry.id_of::<Alive>().unwrap());
+        Self { access: a }
+    }
+}
 
 impl System for DeathGpuSystem {
     fn id(&self) -> u16 { 4 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Sugar>().unwrap());
-        a.write.set(component_id_of::<Alive>().unwrap());
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
@@ -93,13 +102,19 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 
 pub struct AgentIntentGpuSystem {
+    access: AccessSets,
     resources: [GPUResourceID; 2],
     writes:    [GPUResourceID; 1],
 }
 
 impl AgentIntentGpuSystem {
-    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID) -> Self {
+    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID, registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Vision>().unwrap());
+        a.read.set(registry.id_of::<Position>().unwrap());
+        a.read.set(registry.id_of::<Alive>().unwrap());
         Self {
+            access: a,
             resources: [sugar_grid, intent],
             writes: [intent],
         }
@@ -110,13 +125,7 @@ impl System for AgentIntentGpuSystem {
     fn id(&self) -> u16 { 10 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Vision>().unwrap());
-        a.read.set(component_id_of::<Position>().unwrap());
-        a.read.set(component_id_of::<Alive>().unwrap());
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
@@ -131,13 +140,19 @@ impl GpuSystem for AgentIntentGpuSystem {
 }
 
 pub struct ResolveHarvestGpuSystem {
+    access: AccessSets,
     resources: [GPUResourceID; 2],
     writes:    [GPUResourceID; 1],
 }
 
 impl ResolveHarvestGpuSystem {
-    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID) -> Self {
+    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID, registry: &ComponentRegistry) -> Self {
+        let mut a = AccessSets::default();
+        a.read.set(registry.id_of::<Alive>().unwrap());
+        a.write.set(registry.id_of::<Position>().unwrap());
+        a.write.set(registry.id_of::<Sugar>().unwrap());
         Self {
+            access: a,
             resources: [sugar_grid, intent],
             writes: [sugar_grid],
         }
@@ -148,13 +163,7 @@ impl System for ResolveHarvestGpuSystem {
     fn id(&self) -> u16 { 11 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
-    fn access(&self) -> AccessSets {
-        let mut a = AccessSets::default();
-        a.read.set(component_id_of::<Alive>().unwrap());
-        a.write.set(component_id_of::<Position>().unwrap());
-        a.write.set(component_id_of::<Sugar>().unwrap());
-        a
-    }
+    fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
@@ -169,19 +178,20 @@ impl GpuSystem for ResolveHarvestGpuSystem {
 }
 
 pub struct SugarRegrowthGpuSystem {
+    access: AccessSets,
     resources: [GPUResourceID; 1],
 }
 
 impl SugarRegrowthGpuSystem {
     pub fn new(sugar_grid: GPUResourceID) -> Self {
-        Self { resources: [sugar_grid] }
+        Self { access: AccessSets::default(), resources: [sugar_grid] }
     }
 }
 
 impl System for SugarRegrowthGpuSystem {
     fn id(&self) -> u16 { 12 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
-    fn access(&self) -> AccessSets { AccessSets::default() }
+    fn access(&self) -> &AccessSets { &self.access }
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
 }
@@ -195,19 +205,20 @@ impl GpuSystem for SugarRegrowthGpuSystem {
 }
 
 pub struct ClearOccupancyGpuSystem {
+    access: AccessSets,
     resources: [GPUResourceID; 1],
 }
 
 impl ClearOccupancyGpuSystem {
     pub fn new(sugar_grid: GPUResourceID) -> Self {
-        Self { resources: [sugar_grid] }
+        Self { access: AccessSets::default(), resources: [sugar_grid] }
     }
 }
 
 impl System for ClearOccupancyGpuSystem {
     fn id(&self) -> u16 { 13 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
-    fn access(&self) -> AccessSets { AccessSets::default() }
+    fn access(&self) -> &AccessSets { &self.access }
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
     fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
 }

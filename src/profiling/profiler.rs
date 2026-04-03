@@ -1,4 +1,4 @@
-//! Chrome Trace (“flame style”) profiling.
+//! Chrome Trace ("flame style") profiling.
 //!
 //! Feature-gated with `--features profiling`.
 //!
@@ -11,27 +11,27 @@
 //!   abm_framework::profiler::shutdown();
 
 use std::borrow::Cow;
-use std::path::{Path};
+use std::path::Path;
 use std::fmt;
 
 #[cfg(feature = "profiling")]
-    mod enabled {
+mod enabled {
     use std::cell::RefCell;
     use std::fs::File;
     use std::io::{BufWriter, Write};
-    use std::path::{PathBuf};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
+    use std::borrow::Cow;
 
     use super::*;
 
-
-    /// A Chrome trace “complete event” (`ph:"X"`) plus optional metadata events (`ph:"M"`).
+    /// A Chrome trace "complete event" (`ph:"X"`) plus optional metadata events (`ph:"M"`).
     #[derive(Debug)]
     enum TraceEvent {
         Complete {
-            name: String,
+            name: Cow<'static, str>,
             ts_us: u64,
             dur_us: u64,
             pid: u32,
@@ -55,7 +55,6 @@ use std::fmt;
         Bool(bool),
     }
 
-    // ✅ Conversion lives INSIDE enabled, so it can return private ArgValue
     impl super::Arg {
         fn into_enabled(self) -> ArgValue {
             match self {
@@ -86,12 +85,15 @@ use std::fmt;
         }
     }
 
+    /// Global profiler state. `collected_events` is populated by draining per-thread
+    /// `LOCAL_EVENTS` buffers at shutdown (or when a thread explicitly calls `flush_thread`).
     struct ProfilerState {
         start: Instant,
         out_path: PathBuf,
         pid: u32,
         is_on: AtomicBool,
-        events: Mutex<Vec<TraceEvent>>,
+        /// Events drained from per-thread buffers and collected for final output.
+        collected_events: Mutex<Vec<TraceEvent>>,
     }
 
     static STATE: OnceLock<ProfilerState> = OnceLock::new();
@@ -100,6 +102,9 @@ use std::fmt;
     thread_local! {
         static TID: u64 = NEXT_TID.fetch_add(1, Ordering::Relaxed);
         static PENDING_ARGS: RefCell<Vec<(String, ArgValue)>> = const { RefCell::new(Vec::new()) };
+        /// Per-thread event buffer. Events are pushed here without any locking and are
+        /// moved into `ProfilerState::collected_events` when `flush_thread` is called.
+        static LOCAL_EVENTS: RefCell<Vec<TraceEvent>> = const { RefCell::new(Vec::new()) };
     }
 
     fn now_us() -> u64 {
@@ -119,15 +124,39 @@ use std::fmt;
             out_path,
             pid: 1,
             is_on: AtomicBool::new(true),
-            events: Mutex::new(Vec::new()),
+            collected_events: Mutex::new(Vec::new()),
         });
     }
 
+    /// Flush this thread's local event buffer into the global `collected_events` store.
+    ///
+    /// Called automatically during `shutdown`. May also be called manually by threads
+    /// that are about to exit to ensure their events are captured before the thread
+    /// destructor runs.
+    pub fn flush_thread() {
+        let st = match STATE.get() {
+            Some(s) => s,
+            None => return,
+        };
+        let local: Vec<TraceEvent> = LOCAL_EVENTS.with(|b| std::mem::take(&mut *b.borrow_mut()));
+        if !local.is_empty() {
+            let mut guard = st.collected_events.lock().unwrap();
+            guard.extend(local);
+        }
+    }
+
     /// Shut down the profiler and write the Chrome Trace JSON.
+    ///
+    /// Flushes the calling thread's local event buffer before writing. Events from
+    /// threads that have not called `flush_thread` and have not yet been collected
+    /// will be included only if they were previously flushed.
     pub fn shutdown() {
         if let Some(st) = STATE.get() {
             // Stop accepting new events (best-effort; spans already in-flight may still push).
             st.is_on.store(false, Ordering::Release);
+
+            // Flush the calling thread's local buffer into the global store.
+            flush_thread();
 
             // Write file
             if let Err(e) = write_trace_file(st) {
@@ -137,9 +166,9 @@ use std::fmt;
     }
 
     fn write_trace_file(st: &ProfilerState) -> std::io::Result<()> {
-        // Snapshot events
+        // Drain collected events.
         let events = {
-            let mut guard = st.events.lock().unwrap();
+            let mut guard = st.collected_events.lock().unwrap();
             std::mem::take(&mut *guard)
         };
 
@@ -221,6 +250,7 @@ use std::fmt;
         Ok(())
     }
 
+    /// Push an event to the calling thread's local buffer without acquiring any global lock.
     fn push_event(ev: TraceEvent) {
         let st = match STATE.get() {
             Some(s) => s,
@@ -229,8 +259,7 @@ use std::fmt;
         if !st.is_on.load(Ordering::Acquire) {
             return;
         }
-        let mut guard = st.events.lock().unwrap();
-        guard.push(ev);
+        LOCAL_EVENTS.with(|b| b.borrow_mut().push(ev));
     }
 
     /// Assign a human-friendly thread name (shown in Perfetto/Chrome tracing).
@@ -271,7 +300,8 @@ use std::fmt;
         let args = PENDING_ARGS.with(|p| std::mem::take(&mut *p.borrow_mut()));
 
         SpanGuard {
-            name: name.into().0.into_owned(),
+            // Preserve the Cow without forcing allocation for &'static str inputs.
+            name: name.into().0,
             ts0,
             tid,
             pid: st.pid,
@@ -287,7 +317,8 @@ use std::fmt;
 
     /// A RAII guard that records a Chrome Trace complete event on drop.
     pub struct SpanGuard {
-        name: String,
+        /// Stored as `Cow` so that `&'static str` names incur no heap allocation.
+        name: Cow<'static, str>,
         ts0: u64,
         tid: u64,
         pid: u32,
@@ -298,7 +329,7 @@ use std::fmt;
     impl SpanGuard {
         fn disabled() -> Self {
             Self {
-                name: String::new(),
+                name: Cow::Borrowed(""),
                 ts0: 0,
                 tid: 0,
                 pid: 0,
@@ -325,7 +356,7 @@ use std::fmt;
             let ts1 = now_us();
             let dur = ts1.saturating_sub(self.ts0);
             push_event(TraceEvent::Complete {
-                name: std::mem::take(&mut self.name),
+                name: std::mem::replace(&mut self.name, Cow::Borrowed("")),
                 ts_us: self.ts0,
                 dur_us: dur,
                 pid: self.pid,
@@ -354,11 +385,11 @@ mod disabled {
 
     /// Attach arg to next span (no-op).
     #[inline]
-    pub fn next_arg(_key: impl Into<String>, _value: super::Arg) {}
+    pub fn next_arg(_key: impl Into<String>, _value: Arg) {}
 
     /// Create profiling span (no-op).
     #[inline]
-    pub fn span(_name: impl Into<super::SpanName>) -> SpanGuard {
+    pub fn span(_name: impl Into<SpanName>) -> SpanGuard {
         SpanGuard
     }
 
@@ -374,7 +405,7 @@ mod disabled {
     impl SpanGuard {
         /// Attach an argument to this span (builder-style; no-op).
         #[inline]
-        pub fn arg(self, _key: impl Into<String>, _value: super::Arg) -> Self {
+        pub fn arg(self, _key: impl Into<String>, _value: Arg) -> Self {
             self
         }
     }
@@ -419,20 +450,20 @@ pub enum Arg {
 
     /// 64-bit floating-point value.
     F64(f64),
-    
+
     /// Boolean value.
     Bool(bool),
 }
 
 // Re-export correct backend
 #[cfg(feature = "profiling")]
-pub use enabled::SpanGuard as SpanGuard;
+pub use enabled::SpanGuard;
 
 #[cfg(not(feature = "profiling"))]
-pub use disabled::SpanGuard as SpanGuard;
+pub use disabled::SpanGuard;
 
 #[cfg(feature = "profiling")]
-pub use enabled::{init, next_arg, shutdown, span, span_fmt, thread_name};
+pub use enabled::{flush_thread, init, next_arg, shutdown, span, span_fmt, thread_name};
 
 #[cfg(not(feature = "profiling"))]
 pub use disabled::{init, next_arg, shutdown, span, span_fmt, thread_name};

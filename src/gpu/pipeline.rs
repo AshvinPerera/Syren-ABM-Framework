@@ -93,8 +93,8 @@ fn hash_resource_layout(descriptions: &[GPUBindingDesc]) -> u64 {
 #[derive(Debug)]
 pub struct PipelineCache {
     map: HashMap<
-    (SystemID, u64, u64, usize, usize, usize, u64),
-    (wgpu::ComputePipeline, wgpu::BindGroupLayout, Option<wgpu::BindGroupLayout>),
+        (SystemID, u64, u64, usize, usize, usize, u64),
+        (wgpu::ComputePipeline, wgpu::BindGroupLayout, Option<wgpu::BindGroupLayout>),
     >,
 }
 
@@ -162,9 +162,9 @@ impl PipelineCache {
                 write_count,
                 resource_layout,
             )
-            .map_err(|e| ECSError::from(ExecutionError::GpuDispatchFailed {
-                message: e.into(),
-            }))?;
+                .map_err(|e| ECSError::from(ExecutionError::GpuDispatchFailed {
+                    message: e.into(),
+                }))?;
 
             self.map.insert(key, (pipeline, bgl0, bgl1));
         }
@@ -275,15 +275,15 @@ fn create_pipeline(
         None
     };
 
-    let mut layouts: Vec<&wgpu::BindGroupLayout> = vec![&bgl0];
+    let mut layouts: Vec<Option<&wgpu::BindGroupLayout>> = vec![Some(&bgl0)];
     if let Some(ref b) = bgl1 {
-        layouts.push(b);
+        layouts.push(Some(b));
     }
 
     let pl = context.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("abm_pipeline_layout"),
         bind_group_layouts: &layouts,
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     let module = context.device.create_shader_module(wgpu::ShaderModuleDescriptor {
