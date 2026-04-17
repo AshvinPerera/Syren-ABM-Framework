@@ -125,7 +125,10 @@ impl GPUContext {
             &wgpu::DeviceDescriptor {
                 label: Some("abm_framework_device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: wgpu::Limits {
+                    max_storage_buffers_per_shader_stage: 10,
+                    ..wgpu::Limits::default()
+                },
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off

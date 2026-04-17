@@ -13,9 +13,6 @@ use abm_framework::{
 use abm_framework::{GPUResourceID, ECSError, ExecutionError};
 
 #[cfg(feature = "gpu")]
-use abm_framework::gpu;
-
-#[cfg(feature = "gpu")]
 use crate::sugarscape::gpu_resources::{AgentIntentBuffers, SugarGrid};
 
 
@@ -399,8 +396,6 @@ impl System for ResolveIntentCpuSystem {
     fn access(&self) -> &AccessSets { &self.access }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        gpu::sync_pending_to_cpu(ecs, &[])?;
-
         const INVALID: u32 = 0xffffffff;
 
         ecs.with_exclusive(|data| {
