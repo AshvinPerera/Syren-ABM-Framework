@@ -24,7 +24,7 @@ impl MetabolismGpuSystem {
 }
 
 impl System for MetabolismGpuSystem {
-    fn id(&self) -> u16 { 3 }
+    fn id(&self) -> u16 { 15 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
     fn access(&self) -> &AccessSets { &self.access }
@@ -70,7 +70,7 @@ impl DeathGpuSystem {
 }
 
 impl System for DeathGpuSystem {
-    fn id(&self) -> u16 { 4 }
+    fn id(&self) -> u16 { 16 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
     fn access(&self) -> &AccessSets { &self.access }
@@ -160,7 +160,7 @@ impl ResolveHarvestGpuSystem {
 }
 
 impl System for ResolveHarvestGpuSystem {
-    fn id(&self) -> u16 { 11 }
+    fn id(&self) -> u16 { 13 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
     fn access(&self) -> &AccessSets { &self.access }
@@ -216,7 +216,7 @@ impl ClearOccupancyGpuSystem {
 }
 
 impl System for ClearOccupancyGpuSystem {
-    fn id(&self) -> u16 { 13 }
+    fn id(&self) -> u16 { 10 }
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
     fn access(&self) -> &AccessSets { &self.access }
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
