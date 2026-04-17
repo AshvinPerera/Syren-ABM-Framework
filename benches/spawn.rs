@@ -5,7 +5,7 @@ mod common;
 use common::*;
 
 fn spawn_benchmark(c: &mut Criterion) {
-    init_components();
+    let (registry, pos_id, wealth_id, prod_id) = make_registry();
 
     let mut group = c.benchmark_group("spawn");
 
@@ -14,11 +14,12 @@ fn spawn_benchmark(c: &mut Criterion) {
         ("spawn_1M",   AGENTS_MED),
         // ("spawn_10M",  AGENTS_LARGE),
     ] {
+        let registry = registry.clone();
         group.bench_function(label, |b| {
             b.iter_batched(
-                || make_world(4),
+                || make_world(4, registry.clone()),
                 |ecs| {
-                    populate(&ecs, n).unwrap();
+                    populate(&ecs, n, pos_id, wealth_id, prod_id).unwrap();
                     black_box(ecs);
                 },
                 BatchSize::LargeInput,

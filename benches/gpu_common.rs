@@ -1,19 +1,25 @@
 #![cfg(feature = "gpu")]
 #![allow(dead_code)]
 
-use std::sync::Once;
+use std::sync::{Arc, RwLock};
 
-use abm_framework::engine::commands::Command;
-use abm_framework::engine::component::{Bundle, freeze_components, component_id_of};
-use abm_framework::engine::entity::EntityShards;
-use abm_framework::engine::error::{ECSResult, ECSError};
-use abm_framework::engine::manager::{ECSData, ECSManager};
-use abm_framework::engine::systems::{AccessSets, GpuSystem, System, SystemBackend};
-use abm_framework::engine::types::SystemID;
-use abm_framework::engine::component::Signature;
-
-#[cfg(feature = "gpu")]
-use abm_framework::engine::component::{GPUPod, register_gpu_component};
+use abm_framework::{
+    Bundle,
+    Command,
+    ComponentID,
+    ComponentRegistry,
+    ECSManager,
+    ECSReference,
+    ECSResult,
+    ECSError,
+    EntityShards,
+    Signature,
+    System,
+    SystemBackend,
+    SystemID,
+    AccessSets,
+    GpuSystem,
+};
 
 pub const AGENTS: usize = 1_000_000;
 
@@ -23,26 +29,32 @@ pub struct Energy {
     pub v: f32,
 }
 
-unsafe impl GPUPod for Energy {}
-
-static INIT: Once = Once::new();
-
-pub fn init_components() {
-    INIT.call_once(|| {
-        register_gpu_component::<Energy>().unwrap();
-        freeze_components().unwrap();
-    });
+/// Creates a shared, frozen component registry with Energy registered.
+/// Returns the registry handle and the Energy component ID.
+pub fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, ComponentID) {
+    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+    let energy_id = {
+        let mut reg = registry.write().unwrap();
+        let id = reg.register::<Energy>().unwrap();
+        reg.freeze();
+        id
+    };
+    (registry, energy_id)
 }
 
-pub fn make_world(shards: usize) -> ECSManager {
-    let shards = EntityShards::new(shards);
-    let data = ECSData::new(shards);
-    ECSManager::new(data)
+/// Constructs an ECSManager backed by the given instance-owned registry.
+pub fn make_world(shards: usize, registry: Arc<RwLock<ComponentRegistry>>) -> ECSManager {
+    let shards = EntityShards::new(shards).unwrap();
+    ECSManager::with_registry(shards, registry)
 }
 
-pub fn populate_energy(ecs: &ECSManager, n: usize) -> ECSResult<()> {
+/// Spawns `n` entities each carrying an Energy component.
+pub fn populate_energy(
+    ecs: &ECSManager,
+    n: usize,
+    energy_id: ComponentID,
+) -> ECSResult<()> {
     let world = ecs.world_ref();
-    let energy_id = component_id_of::<Energy>()?;
 
     world.with_exclusive(|_| {
         for _ in 0..n {
@@ -59,27 +71,32 @@ pub fn populate_energy(ecs: &ECSManager, n: usize) -> ECSResult<()> {
 
 pub struct EnergyDecayGpu {
     pub id: SystemID,
+    access: AccessSets,
 }
 
 impl EnergyDecayGpu {
-    pub fn new(id: SystemID) -> Self { Self { id } }
-
-    fn access_sets() -> AccessSets {
+    pub fn new(id: SystemID, energy_id: ComponentID) -> Self {
         let mut write = Signature::default();
-        write.set(component_id_of::<Energy>().unwrap());
-        AccessSets { read: Signature::default(), write }
+        write.set(energy_id);
+        Self {
+            id,
+            access: AccessSets {
+                read: Signature::default(),
+                write,
+            },
+        }
     }
 }
 
 impl System for EnergyDecayGpu {
     fn id(&self) -> SystemID { self.id }
 
-    fn access(&self) -> AccessSets { Self::access_sets() }
+    fn access(&self) -> &AccessSets { &self.access }
 
     #[inline]
     fn backend(&self) -> SystemBackend { SystemBackend::GPU }
 
-    fn run(&self, _world: abm_framework::engine::manager::ECSReference<'_>) -> ECSResult<()> {
+    fn run(&self, _world: ECSReference<'_>) -> ECSResult<()> {
         Ok(())
     }
 

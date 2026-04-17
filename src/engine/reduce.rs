@@ -27,7 +27,7 @@
 //!      operation.
 //!    * Combination order is deterministic and independent of thread count.
 //!
-//! This model scales efficiently on multi-core CPUs and maps directly to
+//! This model scales efficiently on multicore CPUs and maps directly to
 //! GPU-style block reductions.
 //!
 //! ## Design principles
@@ -45,14 +45,16 @@
 //! * [`Sum`] - accumulates floating-point totals.
 //! * [`MinMax`] - tracks minimum and maximum values.
 //! * [`Welford`] - computes mean and variance using a numerically stable
-//!   online algorithm.
+//!   online algorithm. Supports parallel combination via [`Welford::combine`].
 //!
 //!
 //! ## Usage example
-//! ```
-//! let query = world.query()?.read::<Wealth>()?.build()?;
 //!
-//! let total = world.reduce_read::<Wealth, Sum>(
+//! ```ignore
+//! // `ecs` is an ECSReference obtained from ECSManager::world_ref().
+//! let query = ecs.query()?.read::<Wealth>()?.build()?;
+//!
+//! let total = ecs.reduce_read::<Wealth, Sum>(
 //!     query,
 //!     Sum::default,
 //!     |acc, w| acc.0 += w.amount,
@@ -130,7 +132,7 @@ impl Default for MinMax {
     }
 }
 
-/// Accumulator implementing Welford’s online algorithm for mean and variance.
+/// Accumulator implementing Welford's online algorithm for mean and variance.
 ///
 /// ## Semantics
 /// This accumulator computes the mean and (sample) variance of a stream of
@@ -138,7 +140,7 @@ impl Default for MinMax {
 ///
 /// It supports:
 /// * incremental updates via [`Welford::push`],
-/// * deterministic combination of partial accumulators,
+/// * parallel combination of partial accumulators via [`Welford::combine`],
 /// * stable results independent of iteration order.
 ///
 /// ## Typical use cases
@@ -149,6 +151,8 @@ impl Default for MinMax {
 /// ## References
 /// * Welford, B. P. (1962). *Note on a method for calculating corrected sums of
 ///   squares and products*.
+/// * Chan, T. F., Golub, G. H., LeVeque, R. J. (1979). *Updating formulae and a
+///   pairwise algorithm for computing sample variances*.
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Welford {
@@ -178,5 +182,44 @@ impl Welford {
         } else {
             0.0
         }
+    }
+
+    /// Merges another `Welford` accumulator into this one.
+    ///
+    /// This implements the parallel/pairwise combination formula from
+    /// Chan, Golub & LeVeque (1979), which is numerically stable and
+    /// produces identical results regardless of how partitions are combined.
+    ///
+    /// ## Usage
+    /// This method is intended to be used as the `combine` function in
+    /// [`ECSReference::reduce_read`] and [`ECSReference::reduce_abstraction`]:
+    ///
+    /// ```ignore
+    /// ecs.reduce_read::<Value, Welford>(
+    ///     query,
+    ///     Welford::default,
+    ///     |acc, v| acc.push(v.0),
+    ///     |a, b| a.combine(b),
+    /// )?;
+    /// ```
+    pub fn combine(&mut self, other: Welford) {
+        if other.n == 0 {
+            return;
+        }
+        if self.n == 0 {
+            *self = other;
+            return;
+        }
+
+        let combined_n = self.n + other.n;
+        let delta = other.mean - self.mean;
+        let combined_mean = self.mean + delta * (other.n as f64 / combined_n as f64);
+        let combined_m2 = self.m2
+            + other.m2
+            + delta * delta * (self.n as f64 * other.n as f64 / combined_n as f64);
+
+        self.n = combined_n;
+        self.mean = combined_mean;
+        self.m2 = combined_m2;
     }
 }

@@ -1,30 +1,29 @@
 [package]
 name = "abm_framework"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.76"
 
 [lib]
 name = "abm_framework"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [dependencies]
 rayon = "1.7.0"
-wgpu = { version = "27.0.1", optional = true }
+wgpu = { version = "29.0.1", optional = true }
 bytemuck = { version = "1.16", features = ["derive"], optional = true }
 pollster = { version = "0.4.0", optional = true }
+smallvec = "1.15.1"
 
 [dev-dependencies]
-proptest = "1.9.0"
-insta = { version = "1.45.1", features = ["json"] }
 criterion = "0.8.1"
 
-wgpu = "27.0.1"
+wgpu = "29.0.1"
 bytemuck = { version = "1.16", features = ["derive"] }
 pollster = "0.4.0"
 
 [features]
 default = []
-rollback = []
 gpu = ["wgpu", "bytemuck", "pollster"]
 profiling = []
 gpu_profiling = ["gpu", "profiling"]

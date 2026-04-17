@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::engine::archetype::Archetype;
-use crate::engine::component::{component_description_by_component_id, iter_bits_from_words, Signature};
+use crate::engine::component::{iter_bits_from_words, ComponentRegistry, Signature};
 use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 use crate::engine::types::{ArchetypeID, ComponentID, ChunkID};
 
@@ -31,13 +31,23 @@ pub struct Mirror {
 
 impl Mirror {
     pub fn new() -> Self {
-        Self { 
+        Self {
             buffers: HashMap::new(),
         }
     }
 
-    pub fn ensure_gpu_safe(&self, component_id: ComponentID) -> ECSResult<(usize, &'static str)> {
-        let description = component_description_by_component_id(component_id)?
+    /// Checks that the component identified by `component_id` is registered and GPU-safe,
+    /// returning its element size in bytes and its name. Uses the provided `ComponentRegistry`
+    /// to look up the component description.
+    ///
+    /// # Errors
+    /// Returns an error if the component is not registered or if it is not marked for GPU usage.
+    pub fn ensure_gpu_safe(
+        &self,
+        component_id: ComponentID,
+        registry: &ComponentRegistry,
+    ) -> ECSResult<(usize, &'static str)> {
+        let description = registry.description_by_component_id(component_id)
             .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
 
         if !description.gpu_usage {
@@ -56,6 +66,7 @@ impl Mirror {
         archetypes: &[Archetype],
         signature: &Signature,
         dirty: &DirtyChunks,
+        registry: &ComponentRegistry,
     ) -> ECSResult<()> {
         let mut component_ids: Vec<ComponentID> =
             iter_bits_from_words(&signature.components).collect();
@@ -67,7 +78,7 @@ impl Mirror {
 
             for &component_id in &component_ids {
                 if archetype.has(component_id) {
-                    let (size, _) = self.ensure_gpu_safe(component_id)?;
+                    let (size, _) = self.ensure_gpu_safe(component_id, registry)?;
                     self.upload_column_dirty_chunks(context, archetype, component_id, size, dirty)?;
                 }
             }
@@ -76,14 +87,20 @@ impl Mirror {
         Ok(())
     }
 
-    pub fn download_signature(&mut self, context: &GPUContext, archetypes: &mut [Archetype], signature: &Signature) -> ECSResult<()> {
+    pub fn download_signature(
+        &mut self,
+        context: &GPUContext,
+        archetypes: &mut [Archetype],
+        signature: &Signature,
+        registry: &ComponentRegistry,
+    ) -> ECSResult<()> {
         let mut component_ids: Vec<ComponentID> = iter_bits_from_words(&signature.components).collect();
         component_ids.sort_unstable();
 
         for archetype in archetypes {
             for &component_id in &component_ids {
                 if archetype.has(component_id) {
-                    let (size, _) = self.ensure_gpu_safe(component_id)?;
+                    let (size, _) = self.ensure_gpu_safe(component_id, registry)?;
                     self.download_column(context, archetype, component_id, size)?;
                 }
             }
@@ -179,7 +196,7 @@ impl Mirror {
             let valid = archetype.chunk_valid_length(chunk)?;
             if valid == 0 { continue; }
 
-            let chunk_id: ChunkID = chunk.try_into().map_err(|_| ECSError::Internal("chunk id overflow".into()))?;
+            let chunk_id: ChunkID = chunk.try_into().map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
 
             let (ptr, bytes) = guard
                 .chunk_bytes(chunk_id, valid)
@@ -231,7 +248,7 @@ impl Mirror {
             if valid == 0 { continue; }
 
             let (pointer, bytes) = guard.chunk_bytes(chunk as ChunkID, valid)
-                .ok_or_else(|| ECSError::Internal("chunk_bytes returned None".into()))?;
+                .ok_or_else(|| ECSError::from(ExecutionError::InternalExecutionError))?;
             let source = unsafe { std::slice::from_raw_parts(pointer, bytes) };
 
             host[offset..offset + bytes].copy_from_slice(source);
@@ -308,7 +325,7 @@ impl Mirror {
         let host: &[u8] = &data;
 
         let locked = archetype.component_locked(component_id)
-            .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id: component_id }))?;
+            .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
         let mut guard = locked.write()
             .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "attribute write lock (download)" }))?;
 
@@ -319,7 +336,7 @@ impl Mirror {
             if valid == 0 { continue; }
 
             let (pointer, bytes) = guard.chunk_bytes_mut(chunk as ChunkID, valid)
-                .ok_or_else(|| ECSError::Internal("chunk_bytes_mut returned None".into()))?;
+                .ok_or_else(|| ECSError::from(ExecutionError::InternalExecutionError))?;
             let destination = unsafe { std::slice::from_raw_parts_mut(pointer, bytes) };
 
             destination.copy_from_slice(&host[offset..offset + bytes]);

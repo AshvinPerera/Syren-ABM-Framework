@@ -1,39 +1,38 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::engine::component::{Signature, component_id_of};
-use abm_framework::engine::scheduler::Scheduler;
-use abm_framework::engine::systems::{FnSystem, AccessSets};
+use abm_framework::{
+    Signature,
+    Scheduler,
+    FnSystem,
+    AccessSets,
+    Read,
+    Write,
+};
 
 mod common;
 use common::*;
 
 fn tick_benchmark(c: &mut Criterion) {
-    init_components();
+    let (registry, _pos_id, wealth_id, prod_id) = make_registry();
 
     let mut group = c.benchmark_group("tick");
 
     group.bench_function("tick_2_systems_1M", |b| {
+        let registry = registry.clone();
         b.iter_batched(
             || {
-                let ecs = make_world(4);
-                populate(&ecs, AGENTS_MED).unwrap();
+                let ecs = make_world(4, registry.clone());
+                populate(&ecs, AGENTS_MED, _pos_id, wealth_id, prod_id).unwrap();
 
-                let q_prod_to_wealth = ecs
-                    .world_ref()
-                    .query().unwrap()
+                let q_prod_to_wealth = query_builder(&registry)
                     .read::<Productivity>().unwrap()
                     .write::<Wealth>().unwrap()
                     .build().unwrap();
 
-                let q_decay_wealth = ecs
-                    .world_ref()
-                    .query().unwrap()
+                let q_decay_wealth = query_builder(&registry)
                     .write::<Wealth>().unwrap()
                     .build().unwrap();
-
-                let prod_id = component_id_of::<Productivity>().unwrap();
-                let wealth_id = component_id_of::<Wealth>().unwrap();
 
                 let mut scheduler = Scheduler::new();
 
@@ -56,9 +55,9 @@ fn tick_benchmark(c: &mut Criterion) {
                     "production",
                     access_prod_to_wealth,
                     move |world| {
-                        world.for_each_read_write::<Productivity, Wealth>(
+                        world.for_each::<(Read<Productivity>, Write<Wealth>)>(
                             q_prod_to_wealth.clone(),
-                            |p, w| w.value += p.rate,
+                            &|(p, w)| w.value += p.rate,
                         )?;
                         Ok(())
                     },
@@ -79,9 +78,9 @@ fn tick_benchmark(c: &mut Criterion) {
                     "decay",
                     access_decay,
                     move |world| {
-                        world.for_each_write::<Wealth>(
+                        world.for_each::<(Write<Wealth>,)>(
                             q_decay_wealth.clone(),
-                            |w| w.value *= 0.9999,
+                            &|w| w.0.value *= 0.9999,
                         )?;
                         Ok(())
                     },

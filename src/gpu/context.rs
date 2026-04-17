@@ -78,7 +78,7 @@ impl GPUContext {
 
     /// Initializes a new GPU execution context.
     ///
-    /// ## Behavior
+    /// ## Behaviour
     /// This function:
     /// 1. Creates a default `wgpu::Instance`.
     /// 2. Requests a high-performance GPU adapter.
@@ -91,7 +91,7 @@ impl GPUContext {
     ///
     /// This ensures maximum compatibility across platforms.
     ///
-    /// ## Blocking behavior
+    /// ## Blocking behaviour
     /// GPU initialization is performed synchronously using `pollster::block_on`.
     /// This is expected to occur during application startup, not in hot paths.
     ///

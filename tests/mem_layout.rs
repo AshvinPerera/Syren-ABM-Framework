@@ -1,13 +1,11 @@
 use std::mem::{align_of, size_of};
-use std::sync::Once;
+use std::sync::{Arc, RwLock};
 
-use abm_framework::engine::archetype::Archetype;
-use abm_framework::engine::component::{
-    component_id_of, freeze_components, register_component, Bundle, Signature,
+use abm_framework::{
+    Archetype, ArchetypeID, Attribute, Bundle, ChunkID, CHUNK_CAP,
+    ComponentRegistry, EntityShards, Signature, TypeErasedAttribute,
+    cast_slice,
 };
-use abm_framework::engine::entity::EntityShards;
-use abm_framework::engine::storage::{cast_slice, Attribute, TypeErasedAttribute};
-use abm_framework::engine::types::{ArchetypeID, ChunkID, CHUNK_CAP};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Position {
@@ -27,16 +25,18 @@ struct A(u64);
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct B(u32);
 
-static INIT: Once = Once::new();
-
-fn init_registry() {
-    INIT.call_once(|| {
-        register_component::<Position>().unwrap();
-        register_component::<Velocity>().unwrap();
-        register_component::<A>().unwrap();
-        register_component::<B>().unwrap();
-        freeze_components().unwrap();
-    });
+/// Creates a fresh, frozen registry with Position, Velocity, A, and B registered.
+fn make_registry() -> Arc<RwLock<ComponentRegistry>> {
+    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+    {
+        let mut reg = registry.write().unwrap();
+        reg.register::<Position>().unwrap();
+        reg.register::<Velocity>().unwrap();
+        reg.register::<A>().unwrap();
+        reg.register::<B>().unwrap();
+        reg.freeze();
+    }
+    registry
 }
 
 // Helper to push into Attribute<T> for both `rollback` and non-rollback builds.
@@ -123,34 +123,35 @@ fn attribute_crosses_chunk_boundary_as_expected() {
 
 #[test]
 fn archetype_borrow_exposes_soa_columns_with_independent_addresses() {
-    init_registry();
+    let registry = make_registry();
+    let reg = registry.read().unwrap();
 
     // Build a signature for Position + Velocity using the real Signature bitset type
-    let pos_id = component_id_of::<Position>().unwrap();
-    let vel_id = component_id_of::<Velocity>().unwrap();
+    let pos_id = reg.id_of::<Position>().unwrap();
+    let vel_id = reg.id_of::<Velocity>().unwrap();
 
     let mut sig = Signature::default();
     sig.set(pos_id);
     sig.set(vel_id);
 
-    // Archetype::new signature is real: new(archetype_id, signature) -> ECSResult<Self>
-    let mut arch = Archetype::new(0 as ArchetypeID, sig).unwrap();
+    // Archetype::new requires (archetype_id, signature, &registry)
+    let mut arch = Archetype::new(0 as ArchetypeID, sig, &reg).unwrap();
 
-    // spawn_on requires &mut EntityShards, ShardID, and a DynamicBundle (Bundle implements it)
-    let mut shards = EntityShards::new(1);
+    // spawn_on requires &EntityShards, ShardID, and a DynamicBundle (Bundle implements it)
+    let shards = EntityShards::new(1).unwrap();
 
     // Spawn enough to ensure chunk 0 has some data
     for i in 0..1024usize {
         let mut b = Bundle::new();
         b.insert(pos_id, Position { x: i as f32, y: 1.0 });
         b.insert(vel_id, Velocity { dx: 0.5, dy: i as f32 });
-        arch.spawn_on(&mut shards, 0, b).unwrap();
+        arch.spawn_on(&shards, 0, b).unwrap();
     }
 
     let borrow = arch.borrow_chunk_for(0, &[pos_id, vel_id], &[]).unwrap();
     assert!(borrow.length > 0);
 
-    // borrow.reads returns Vec<(*const u8, usize)> in the same order as read_ids
+    // borrow.reads returns SmallVec<[(*const u8, usize); 8]> in the same order as read_ids
     let (pos_ptr, pos_bytes) = borrow.reads[0];
     let (vel_ptr, vel_bytes) = borrow.reads[1];
 
@@ -189,23 +190,24 @@ fn archetype_borrow_exposes_soa_columns_with_independent_addresses() {
 
 #[test]
 fn archetype_bytes_per_row_matches_component_sizes() {
-    init_registry();
+    let registry = make_registry();
+    let reg = registry.read().unwrap();
 
-    let a = component_id_of::<A>().unwrap();
-    let b = component_id_of::<B>().unwrap();
+    let a = reg.id_of::<A>().unwrap();
+    let b = reg.id_of::<B>().unwrap();
 
     let mut sig = Signature::default();
     sig.set(a);
     sig.set(b);
 
-    let mut arch = Archetype::new(0 as ArchetypeID, sig).unwrap();
-    let mut shards = EntityShards::new(1);
+    let mut arch = Archetype::new(0 as ArchetypeID, sig, &reg).unwrap();
+    let shards = EntityShards::new(1).unwrap();
 
     for i in 0..256u32 {
         let mut bundle = Bundle::new();
         bundle.insert(a, A(i as u64));
         bundle.insert(b, B(i));
-        arch.spawn_on(&mut shards, 0, bundle).unwrap();
+        arch.spawn_on(&shards, 0, bundle).unwrap();
     }
 
     let borrow = arch.borrow_chunk_for(0, &[a, b], &[]).unwrap();
@@ -214,26 +216,27 @@ fn archetype_bytes_per_row_matches_component_sizes() {
     let bytes_a = borrow.reads[0].1;
     let bytes_b = borrow.reads[1].1;
 
-    assert_eq!(bytes_a / len, std::mem::size_of::<A>());
-    assert_eq!(bytes_b / len, std::mem::size_of::<B>());
+    assert_eq!(bytes_a / len, size_of::<A>());
+    assert_eq!(bytes_b / len, size_of::<B>());
 }
 
 #[test]
 fn archetype_chunk_pointer_is_stable_across_borrows() {
-    init_registry();
+    let registry = make_registry();
+    let reg = registry.read().unwrap();
 
-    let pos_id = component_id_of::<Position>().unwrap();
+    let pos_id = reg.id_of::<Position>().unwrap();
 
     let mut sig = Signature::default();
     sig.set(pos_id);
 
-    let mut arch = Archetype::new(1 as ArchetypeID, sig).unwrap();
-    let mut shards = EntityShards::new(1);
+    let mut arch = Archetype::new(1 as ArchetypeID, sig, &reg).unwrap();
+    let shards = EntityShards::new(1).unwrap();
 
     for i in 0..(CHUNK_CAP / 2) {
         let mut b = Bundle::new();
         b.insert(pos_id, Position { x: i as f32, y: 0.0 });
-        arch.spawn_on(&mut shards, 0, b).unwrap();
+        arch.spawn_on(&shards, 0, b).unwrap();
     }
 
     let b1 = arch.borrow_chunk_for(0, &[pos_id], &[]).unwrap();

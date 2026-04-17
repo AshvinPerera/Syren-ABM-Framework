@@ -46,14 +46,15 @@
 
 #![cfg(feature = "gpu")]
 
+use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::engine::archetype::Archetype;
-use crate::engine::component::Signature;
+use crate::engine::component::{or_signature_in_place, ComponentRegistry, Signature};
 use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::manager::ECSReference;
 use crate::engine::systems::{GpuSystem, System};
-use crate::engine::types::GPUAccessMode;
+use crate::engine::types::{GPUAccessMode, GPUResourceID};
 
 use crate::gpu::mirror::Mirror;
 use crate::gpu::pipeline::PipelineCache;
@@ -74,9 +75,10 @@ impl Runtime {
         &mut self,
         archetypes_mut: &mut [Archetype],
         pending: &Signature,
+        registry: &ComponentRegistry,
     ) -> ECSResult<()> {
         let ctx = &self.context;
-        self.mirror.download_signature(ctx, archetypes_mut, pending)
+        self.mirror.download_signature(ctx, archetypes_mut, pending, registry)
     }
 }
 
@@ -108,13 +110,22 @@ fn runtime() -> ECSResult<MutexGuard<'static, Runtime>> {
         .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "gpu runtime" }))
 }
 
-/// Synchronize any pending GPU downloads into ECS storage.
-pub fn sync_pending_to_cpu(ecs: ECSReference<'_>) -> ECSResult<()> {
+/// Synchronize pending GPU downloads into ECS storage.
+pub fn sync_pending_to_cpu(
+    ecs: ECSReference<'_>,
+    affected_resources: &[GPUResourceID],
+) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
         let mut run_time = runtime()?;
 
         data.gpu_resources_mut().ensure_created(&run_time.context)?;
-        data.gpu_resources_mut().download_pending(&run_time.context)?;
+
+        if affected_resources.is_empty() {
+            data.gpu_resources_mut().download_pending(&run_time.context)?;
+        } else {
+            data.gpu_resources_mut()
+                .download_pending_filtered(&run_time.context, affected_resources)?;
+        }
 
         let pending = {
             let p = run_time.pending_download.clone();
@@ -124,8 +135,12 @@ pub fn sync_pending_to_cpu(ecs: ECSReference<'_>) -> ECSResult<()> {
             p
         };
 
+        let registry_arc = data.registry().clone();
+        let registry = registry_arc.read()
+            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "component registry" }))?;
+
         let archetypes_mut: &mut [Archetype] = data.archetypes_mut();
-        run_time.download_pending_into(archetypes_mut, &pending)?;
+        run_time.download_pending_into(archetypes_mut, &pending, &registry)?;
 
         run_time.pending_download = Signature::default();
 
@@ -140,12 +155,11 @@ pub fn execute_gpu_system(
     gpu: &dyn GpuSystem,
 ) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
-        let mut access = system.access();
+        let mut access = system.access().clone();
         normalize_access_sets(&mut access);
 
         #[cfg(debug_assertions)]
         {
-            // Ensure no overlap remains
             for (r, w) in access.read.components.iter().zip(access.write.components.iter()) {
                 debug_assert_eq!(r & w, 0, "AccessSets overlap after normalization");
             }
@@ -161,12 +175,16 @@ pub fn execute_gpu_system(
         data.gpu_resources_mut().ensure_created(&run_time.context)?;
         data.gpu_resources_mut().upload_dirty(&run_time.context)?;
 
+        let registry_arc = data.registry().clone();
+        let registry = registry_arc.read()
+            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "component registry" }))?;
+
         {
             let archetypes: &[Archetype] = data.archetypes();
 
             {
                 let Runtime { context, mirror, .. } = &mut *run_time;
-                mirror.upload_signature_dirty_chunks(&*context, archetypes, &union, data.gpu_dirty_chunks())?;
+                mirror.upload_signature_dirty_chunks(context, archetypes, &union, data.gpu_dirty_chunks(), &registry)?;
             }
 
             dispatch_over_archetypes(
@@ -236,8 +254,15 @@ fn dispatch_over_archetypes(
         &resource_layout,
     )?;
 
-    let mut encoder = run_time
-        .context
+    // Destructure run_time so we can borrow fields independently inside the loop.
+    let Runtime {
+        context,
+        mirror,
+        params_buffer,
+        ..
+    } = run_time;
+
+    let mut encoder = context
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("abm_compute_encoder"),
@@ -267,44 +292,29 @@ fn dispatch_over_archetypes(
 
             // Bind group 0 (components + params)
 
-            let mut entries0 =
-                Vec::with_capacity(read_count + write_count + 1);
+            let mut entries0 = Vec::with_capacity(read_count + write_count + 1);
 
             for (i, &component_id) in reads.iter().enumerate() {
-                let buffer = run_time
-                    .mirror
-                    .buffer_for(archetype.archetype_id(), component_id)
-                    .ok_or_else(|| {
-                        ECSError::from(ExecutionError::GpuMissingBuffer {
-                            archetype_id: archetype.archetype_id(),
-                            component_id,
-                            access: GPUAccessMode::Read,
-                        })
-                    })?;
-
-                entries0.push(wgpu::BindGroupEntry {
-                    binding: i as u32,
-                    resource: buffer.as_entire_binding(),
-                });
+                let entry = resolve_buffer_entry(
+                    mirror,
+                    archetype,
+                    component_id,
+                    i as u32,
+                    GPUAccessMode::Read,
+                )?;
+                entries0.push(entry);
             }
 
             let base = reads.len();
             for (j, &component_id) in writes.iter().enumerate() {
-                let buffer = run_time
-                    .mirror
-                    .buffer_for(archetype.archetype_id(), component_id)
-                    .ok_or_else(|| {
-                        ECSError::from(ExecutionError::GpuMissingBuffer {
-                            archetype_id: archetype.archetype_id(),
-                            component_id,
-                            access: GPUAccessMode::Write,
-                        })
-                    })?;
-
-                entries0.push(wgpu::BindGroupEntry {
-                    binding: (base + j) as u32,
-                    resource: buffer.as_entire_binding(),
-                });
+                let entry = resolve_buffer_entry(
+                    mirror,
+                    archetype,
+                    component_id,
+                    (base + j) as u32,
+                    GPUAccessMode::Write,
+                )?;
+                entries0.push(entry);
             }
 
             // Params buffer
@@ -328,15 +338,15 @@ fn dispatch_over_archetypes(
                 _pad2: 0,
             };
 
-            let size = std::mem::size_of::<Params>() as u64;
-            let recreate = match run_time.params_buffer.as_ref() {
+            let size = size_of::<Params>() as u64;
+            let recreate = match params_buffer.as_ref() {
                 Some(b) => b.size() < size,
                 None => true,
             };
 
             if recreate {
-                run_time.params_buffer = Some(
-                    run_time.context.device.create_buffer(&wgpu::BufferDescriptor {
+                *params_buffer = Some(
+                    context.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("abm_params"),
                         size,
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -345,9 +355,8 @@ fn dispatch_over_archetypes(
                 );
             }
 
-            let params_buf = run_time.params_buffer.as_ref().unwrap();
-            run_time
-                .context
+            let params_buf = params_buffer.as_ref().unwrap();
+            context
                 .queue
                 .write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -356,7 +365,7 @@ fn dispatch_over_archetypes(
                 resource: params_buf.as_entire_binding(),
             });
 
-            let bind_group0 = run_time.context.device.create_bind_group(
+            let bind_group0 = context.device.create_bind_group(
                 &wgpu::BindGroupDescriptor {
                     label: Some("abm_bind_group_group0"),
                     layout: bgl0,
@@ -375,7 +384,7 @@ fn dispatch_over_archetypes(
                     &mut entries1,
                 )?;
 
-                Some(run_time.context.device.create_bind_group(
+                Some(context.device.create_bind_group(
                     &wgpu::BindGroupDescriptor {
                         label: Some("abm_bind_group_group1"),
                         layout: bgl1,
@@ -401,9 +410,8 @@ fn dispatch_over_archetypes(
 
     // Submit
 
-    let submission = run_time.context.queue.submit(Some(encoder.finish()));
-    run_time
-        .context
+    let submission = context.queue.submit(Some(encoder.finish()));
+    context
         .device
         .poll(wgpu::PollType::Wait {
             submission_index: Some(submission),
@@ -416,6 +424,31 @@ fn dispatch_over_archetypes(
         })?;
 
     Ok(())
+}
+
+/// Looks up the mirror buffer for `component_id` within `archetype` and wraps
+/// it in a [`wgpu::BindGroupEntry`] at the given `binding` slot.
+fn resolve_buffer_entry<'a>(
+    mirror: &'a Mirror,
+    archetype: &Archetype,
+    component_id: crate::engine::types::ComponentID,
+    binding: u32,
+    access: GPUAccessMode,
+) -> ECSResult<wgpu::BindGroupEntry<'a>> {
+    let buffer = mirror
+        .buffer_for(archetype.archetype_id(), component_id)
+        .ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuMissingBuffer {
+                archetype_id: archetype.archetype_id(),
+                component_id,
+                access,
+            })
+        })?;
+
+    Ok(wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    })
 }
 
 fn union_signatures(a: &Signature, b: &Signature) -> Signature {
@@ -432,20 +465,12 @@ fn union_signatures(a: &Signature, b: &Signature) -> Signature {
 }
 
 #[inline]
-fn or_signature_in_place(dst: &mut Signature, src: &Signature) {
-    for (d, s) in dst.components.iter_mut().zip(src.components.iter()) {
-        *d |= *s;
-    }
-}
-
-#[inline]
 fn is_signature_empty(sig: &Signature) -> bool {
     sig.components.iter().all(|&w| w == 0)
 }
 
 #[inline]
 fn normalize_access_sets(access: &mut crate::engine::systems::AccessSets) {
-    // read = read / write
     for (r, w) in access.read.components.iter_mut().zip(access.write.components.iter()) {
         *r &= !*w;
     }

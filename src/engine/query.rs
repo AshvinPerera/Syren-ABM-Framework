@@ -3,13 +3,29 @@
 //! This module defines data structures and a builder-style API for
 //! *describing* ECS queries: which components are required, which are read,
 //! which are written, and which must be absent.
+//!
+//! `QueryBuilder` supports two construction modes:
+//!
+//! 1. **Global registry** (default) — `QueryBuilder::new()` resolves component
+//!    IDs through the global convenience functions.
+//!
+//! 2. **Instance-owned registry** — `QueryBuilder::with_registry(registry)`
+//!    accepts an `Arc<RwLock<ComponentRegistry>>` and resolves all component IDs
+//!    through that instance.
 
-use crate::engine::types::{ComponentID};
-use crate::engine::component::{Signature, component_id_of};
+use std::sync::{Arc, RwLock};
+
+use crate::engine::types::ComponentID;
+use crate::engine::component::{
+    Signature,
+    component_id_of,
+    ComponentRegistry,
+};
 use crate::engine::systems::AccessSets;
 use crate::engine::error::{
     ExecutionError,
     InvalidAccessReason,
+    RegistryError,
     ECSError,
     ECSResult,
 };
@@ -34,32 +50,11 @@ impl QuerySignature {
         archetype_signature.contains_all(&self.read)
             && archetype_signature.contains_all(&self.write)
             && archetype_signature
-                .components
-                .iter()
-                .zip(self.without.components.iter())
-                .all(|(arch_word, without_word)| (arch_word & without_word) == 0)
+            .components
+            .iter()
+            .zip(self.without.components.iter())
+            .all(|(arch_word, without_word)| (arch_word & without_word) == 0)
     }
-}
-
-/// Marks a component type as read-only in a query signature.
-pub fn set_read<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> ECSResult<()> {
-    let id = component_id_of::<T>()?;
-    signature.read.set(id);
-    Ok(())
-}
-
-/// Marks a component type as writable in a query signature.
-pub fn set_write<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> ECSResult<()> {
-    let id = component_id_of::<T>()?;
-    signature.write.set(id);
-    Ok(())
-}
-
-/// Excludes a component type from a query signature.
-pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> ECSResult<()> {
-    let id = component_id_of::<T>()?;
-    signature.without.set(id);
-    Ok(())
 }
 
 /// An immutable, fully constructed ECS query description.
@@ -71,6 +66,14 @@ pub fn set_without<T: 'static + Send + Sync>(signature: &mut QuerySignature) -> 
 /// - a structural [`QuerySignature`] used for archetype matching,
 /// - an ordered list of components accessed immutably,
 /// - an ordered list of components accessed mutably.
+///
+/// # Important: Declaration Order Contract
+///
+/// The `reads` and `writes` vectors store component IDs in the order
+/// they were declared via `QueryBuilder::read::<T>()` and
+/// `QueryBuilder::write::<T>()`. The byte slice arrays passed to
+/// iteration callbacks use this same ordering: `cols[0]` corresponds
+/// to the first declared read component, `cols[1]` to the second, etc.
 
 #[derive(Clone)]
 pub struct BuiltQuery {
@@ -84,6 +87,38 @@ pub struct BuiltQuery {
     pub writes: Vec<ComponentID>,
 }
 
+// ---------------------------------------------------------------------------
+// Registry source abstraction
+// ---------------------------------------------------------------------------
+
+/// Encapsulates the registry used to resolve `TypeId` → `ComponentID`.
+///
+/// `Global` delegates to the process-wide convenience functions (original
+/// behaviour).  `Instance` holds an `Arc<RwLock<ComponentRegistry>>` for
+/// per-world isolation.
+enum RegistrySource {
+    /// Use the global static registry (default, backward-compatible).
+    Global,
+
+    /// Instance-owned registry.
+    Instance(Arc<RwLock<ComponentRegistry>>),
+}
+
+impl RegistrySource {
+    /// Resolves the `ComponentID` for type `T`.
+    fn resolve<T: 'static + Send + Sync>(&self) -> ECSResult<ComponentID> {
+        match self {
+            RegistrySource::Global => component_id_of::<T>(),
+            RegistrySource::Instance(registry) => {
+                let registry = registry
+                    .read()
+                    .map_err(|_| RegistryError::PoisonedLock)?;
+                Ok(registry.require_id_of::<T>()?)
+            }
+        }
+    }
+}
+
 /// Builder for constructing ECS query descriptions.
 ///
 /// `QueryBuilder` incrementally records:
@@ -94,6 +129,11 @@ pub struct BuiltQuery {
 ///
 /// The builder follows a *builder-style* API and is typically consumed
 /// by calling [`build`](Self::build) to produce a [`BuiltQuery`].
+///
+/// Dual construction modes
+///
+/// Use `QueryBuilder::new()` for the global registry (default), or
+/// `QueryBuilder::with_registry(registry)` for an instance-owned registry.
 
 pub struct QueryBuilder {
     /// Structural and access-level query signature.
@@ -104,15 +144,37 @@ pub struct QueryBuilder {
 
     /// Component IDs written by the query (in declaration order).
     writes: Vec<ComponentID>,
+
+    /// Where to resolve `TypeId` → `ComponentID`.
+    registry_source: RegistrySource,
+}
+
+impl Default for QueryBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl QueryBuilder {
-    /// Creates a new, empty query builder.
+    /// Creates a new, empty query builder that resolves component IDs through
+    /// the **global** component registry.
     pub fn new() -> Self {
         Self {
             signature: QuerySignature::default(),
             reads: vec![],
             writes: vec![],
+            registry_source: RegistrySource::Global,
+        }
+    }
+
+    /// Creates a new, empty query builder that resolves component IDs through
+    /// the provided **instance-owned** registry.
+    pub fn with_registry(registry: Arc<RwLock<ComponentRegistry>>) -> Self {
+        Self {
+            signature: QuerySignature::default(),
+            reads: vec![],
+            writes: vec![],
+            registry_source: RegistrySource::Instance(registry),
         }
     }
 
@@ -121,11 +183,12 @@ impl QueryBuilder {
     /// This:
     /// - marks `T` as a required component in the query signature,
     /// - records `T` as read-access for conflict analysis,
-    /// - appends `T`’s component ID to the read list.
-    
+    /// - appends `T`'s component ID to the read list.
+
     pub fn read<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
-        set_read::<T>(&mut self.signature)?;
-        self.reads.push(component_id_of::<T>()?);
+        let id = self.registry_source.resolve::<T>()?;
+        self.signature.read.set(id);
+        self.reads.push(id);
         Ok(self)
     }
 
@@ -134,22 +197,24 @@ impl QueryBuilder {
     /// This:
     /// - marks `T` as a required component in the query signature,
     /// - records `T` as write-access for conflict analysis,
-    /// - appends `T`’s component ID to the write list.
+    /// - appends `T`'s component ID to the write list.
 
     pub fn write<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
-        set_write::<T>(&mut self.signature)?;
-        self.writes.push(component_id_of::<T>()?);
+        let id = self.registry_source.resolve::<T>()?;
+        self.signature.write.set(id);
+        self.writes.push(id);
         Ok(self)
     }
 
 
-    /// Excludes component `T` from matching archetypes. 
+    /// Excludes component `T` from matching archetypes.
     pub fn without<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
-        set_without::<T>(&mut self.signature)?;
+        let id = self.registry_source.resolve::<T>()?;
+        self.signature.without.set(id);
         Ok(self)
     }
 
-    /// Finalizes the query description and returns an immutable [`BuiltQuery`].  
+    /// Finalizes the query description and returns an immutable [`BuiltQuery`].
     pub fn build(self) -> ECSResult<BuiltQuery> {
         let mut reads_sorted = self.reads.clone();
         let mut writes_sorted = self.writes.clone();
@@ -158,22 +223,20 @@ impl QueryBuilder {
         writes_sorted.sort_unstable();
 
         // Detect duplicates
-        for w in reads_sorted.windows(2) {
-            if w[0] == w[1] {
-                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
-                    component_id: w[0],
-                    reason: InvalidAccessReason::DuplicateAccess,
-                }));
+        let check_duplicates = |sorted: &[ComponentID]| -> ECSResult<()> {
+            for w in sorted.windows(2) {
+                if w[0] == w[1] {
+                    return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
+                        component_id: w[0],
+                        reason: InvalidAccessReason::DuplicateAccess,
+                    }));
+                }
             }
-        }
-        for w in writes_sorted.windows(2) {
-            if w[0] == w[1] {
-                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
-                    component_id: w[0],
-                    reason: InvalidAccessReason::DuplicateAccess,
-                }));
-            }
-        }
+            Ok(())
+        };
+
+        check_duplicates(&reads_sorted)?;
+        check_duplicates(&writes_sorted)?;
 
         reads_sorted.dedup();
         writes_sorted.dedup();
@@ -199,7 +262,7 @@ impl QueryBuilder {
         {
             let overlap = w_word & without_word;
             if overlap != 0 {
-                let bit = overlap.trailing_zeros() as u32;
+                let bit = overlap.trailing_zeros();
                 let component_id = (word_idx as u32) * 64 + bit;
                 return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
                     component_id: component_id as ComponentID,

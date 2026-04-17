@@ -156,15 +156,15 @@ pub trait System: Send + Sync {
     /// Returns the unique identifier of this system.
     fn id(&self) -> SystemID;
 
-    /// Returns the component access sets required by this system.
-    fn access(&self) -> AccessSets;
+    /// Returns a reference to the component access sets required by this system.
+    fn access(&self) -> &AccessSets;
 
     /// Returns which backend this system should run on.
-    /// Defaults to [`SystemBackend::Cpu`].
+    /// Defaults to [`SystemBackend::CPU`].
     #[inline]
     fn backend(&self) -> SystemBackend {
         SystemBackend::CPU
-    }    
+    }
 
     /// Executes the system logic against the ECS world.
     fn run(&self, world: ECSReference<'_>) -> ECSResult<()>;
@@ -177,7 +177,7 @@ pub trait System: Send + Sync {
     fn gpu(&self) -> Option<&dyn GpuSystem> {
         None
     }
-    
+
 }
 
 /// A concrete [`System`] backed by a function or closure.
@@ -190,9 +190,9 @@ pub trait System: Send + Sync {
 pub struct FnSystem<F>
 where
     F: Fn(ECSReference<'_>) -> ECSResult<()>
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 {
     id: SystemID,
     name: &'static str,
@@ -203,9 +203,9 @@ where
 impl<F> FnSystem<F>
 where
     F: Fn(ECSReference<'_>) -> ECSResult<()>
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 {
     /// Creates a new function-backed system.
     ///
@@ -232,9 +232,9 @@ where
 impl<F> System for FnSystem<F>
 where
     F: Fn(ECSReference<'_>) -> ECSResult<()>
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 {
     fn name(&self) -> &'static str {
         self.name
@@ -244,8 +244,8 @@ where
         self.id
     }
 
-    fn access(&self) -> AccessSets {
-        self.access.clone()
+    fn access(&self) -> &AccessSets {
+        &self.access
     }
 
     fn run(&self, world: ECSReference<'_>) -> ECSResult<()> {

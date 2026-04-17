@@ -32,7 +32,7 @@ pub struct RNG {
 pub struct Alive(pub u32);
 
 #[cfg(feature = "gpu")]
-use abm_framework::engine::component::GPUPod;
+use abm_framework::GPUPod;
 
 #[cfg(feature = "gpu")]
 unsafe impl GPUPod for Sugar {}
@@ -44,10 +44,10 @@ unsafe impl GPUPod for Metabolism {}
 unsafe impl GPUPod for Alive {}
 
 #[cfg(feature = "gpu")]
-unsafe impl abm_framework::engine::component::GPUPod for Position {}
+unsafe impl GPUPod for Position {}
 
 #[cfg(feature = "gpu")]
-unsafe impl abm_framework::engine::component::GPUPod for Vision {}
+unsafe impl GPUPod for Vision {}
 
 #[cfg(feature = "gpu")]
-unsafe impl abm_framework::engine::component::GPUPod for RNG {}
+unsafe impl GPUPod for RNG {}

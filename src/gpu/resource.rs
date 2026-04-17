@@ -1,10 +1,38 @@
+//! GPU resource ownership, registration, and synchronization for the ECS world.
+//!
+//! This module provides the [`GPUResource`] trait and [`GPUResourceRegistry`], which together
+//! manage the full lifecycle of persistent GPU-side state (buffers, bindable storage) owned
+//! by the world rather than by individual components or systems.
+//!
+//! # Design
+//!
+//! Resources are registered once and assigned a stable [`GPUResourceID`]. The registry tracks
+//! three independent dirty flags per resource:
+//!
+//! - **`created`** — GPU buffers have been allocated via [`GPUResource::create_gpu`].
+//! - **`cpu_dirty`** — CPU-side data has changed and needs to be uploaded to the GPU.
+//! - **`pending_download`** — GPU-side data has been written and needs to be read back to the CPU.
+//!
+//! Synchronization is **explicit**: callers must call [`GPUResourceRegistry::mark_cpu_dirty`] or
+//! [`GPUResourceRegistry::mark_pending_download`] to schedule transfers, then drive them with
+//! [`GPUResourceRegistry::upload_dirty`] and [`GPUResourceRegistry::download_pending`] at the
+//! appropriate points in the frame.
+//!
+//! # Bind Group Integration
+//!
+//! Each resource declares its binding layout via [`GPUResource::bindings`] and writes
+//! [`wgpu::BindGroupEntry`] values via [`GPUResource::encode_bind_group_entries`]. The registry
+//! can flatten these across multiple resources with [`GPUResourceRegistry::append_bind_group_entries`],
+//! making it straightforward to build bind groups that span several world resources.
+//!
+//! # Feature Flag
+//!
+//! The entire module is gated behind the `gpu` feature flag.
+
 #![cfg(feature = "gpu")]
 
-//! GPU Resources
-//!
-//! A GPU resource is a **world-owned persistent GPU state** (buffers / bindable storage)
-
 use std::any::Any;
+use std::fmt;
 
 use crate::engine::types::GPUResourceID;
 use crate::engine::error::{ECSResult, ECSError, ExecutionError};
@@ -59,7 +87,7 @@ pub trait GPUResource: Send + Sync {
         base: u32,
         out: &mut Vec<wgpu::BindGroupEntry<'a>>,
     ) -> ECSResult<()>;
-    
+
     /// Downcasts to `Any`.
     fn as_any(&self) -> &dyn Any;
 
@@ -78,7 +106,6 @@ pub fn gpu_resource_err(what: &'static str, detail: impl Into<String>) -> ECSErr
 
 #[cfg(feature = "gpu")]
 struct GPUResourceEntry {
-    id: GPUResourceID,
     resource: Box<dyn GPUResource>,
     created: bool,
     cpu_dirty: bool,
@@ -114,7 +141,6 @@ impl GPUResourceRegistry {
         self.next_id = self.next_id.wrapping_add(1);
 
         self.entries.push(GPUResourceEntry {
-            id,
             resource: Box::new(r),
             created: false,
             cpu_dirty: true,
@@ -125,17 +151,17 @@ impl GPUResourceRegistry {
     }
 
     /// Marks a resource as modified on the CPU.
-   #[inline]
+    #[inline]
     pub fn mark_cpu_dirty(&mut self, id: GPUResourceID) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+        if let Some(e) = self.entries.get_mut(id as usize) {
             e.cpu_dirty = true;
         }
     }
 
-    /// Marks a resource as requiring GPU to CPU synchronization.    
+    /// Marks a resource as requiring GPU to CPU synchronization.
     #[inline]
     pub fn mark_pending_download(&mut self, id: GPUResourceID) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+        if let Some(e) = self.entries.get_mut(id as usize) {
             e.pending_download = true;
         }
     }
@@ -173,11 +199,28 @@ impl GPUResourceRegistry {
         Ok(())
     }
 
-    /// Returns flattened binding descriptions for a set of resource IDs,
+    /// Downloads only the specified resources that are pending.
+    pub fn download_pending_filtered(
+        &mut self,
+        context: &GPUContext,
+        ids: &[GPUResourceID],
+    ) -> ECSResult<()> {
+        for &id in ids {
+            if let Some(e) = self.entries.get_mut(id as usize) {
+                if e.pending_download {
+                    e.resource.download(context)?;
+                    e.pending_download = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns flattened binding descriptions for a set of resource IDs.
     pub fn flattened_binding_descs(&self, ids: &[GPUResourceID]) -> Vec<GPUBindingDesc> {
         let mut out = Vec::new();
         for &id in ids {
-            if let Some(e) = self.entries.iter().find(|e| e.id == id) {
+            if let Some(e) = self.entries.get(id as usize) {
                 out.extend_from_slice(e.resource.bindings());
             }
         }
@@ -193,7 +236,7 @@ impl GPUResourceRegistry {
     ) -> ECSResult<u32> {
         let mut cursor = base_binding;
         for &id in ids {
-            let e = self.entries.iter().find(|e| e.id == id).ok_or_else(|| {
+            let e = self.entries.get(id as usize).ok_or_else(|| {
                 ECSError::from(ExecutionError::GpuDispatchFailed {
                     message: format!("missing gpu resource id {id}").into(),
                 })
@@ -207,16 +250,24 @@ impl GPUResourceRegistry {
     /// Returns a mutable reference to a typed GPU resource by ID.
     pub fn get_mut_typed<R: 'static>(&mut self, id: GPUResourceID) -> Option<&mut R> {
         self.entries
-            .iter_mut()
-            .find(|e| e.id == id)
+            .get_mut(id as usize)
             .and_then(|e| e.resource.as_any_mut().downcast_mut::<R>())
     }
 
     /// Returns an immutable reference to a typed GPU resource by ID.
     pub fn get_typed<R: 'static>(&self, id: GPUResourceID) -> Option<&R> {
         self.entries
-            .iter()
-            .find(|e| e.id == id)
+            .get(id as usize)
             .and_then(|e| e.resource.as_any().downcast_ref::<R>())
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl fmt::Debug for GPUResourceRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GPUResourceRegistry")
+            .field("entry_count", &self.entries.len())
+            .field("next_id", &self.next_id)
+            .finish()
     }
 }

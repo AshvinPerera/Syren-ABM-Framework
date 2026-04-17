@@ -12,27 +12,21 @@
 
 mod sugarscape;
 
-use std::sync::Once;
+use std::sync::{Arc, RwLock};
 
 use sugarscape::components::*;
+
 use sugarscape::cpu::*;
 
-use abm_framework::engine::component::{
-    Bundle,
-    component_id_of,
-    register_component,
-    freeze_components,
+use abm_framework::{
+    Bundle, ComponentRegistry, ECSData, ECSManager,
+    EntityShards, Scheduler, Command, Count, Sum, ECSResult,
 };
 
-#[cfg(feature = "gpu")]
-use abm_framework::engine::component::register_gpu_component;
+use abm_framework::{span, Arg};
 
-use abm_framework::engine::entity::EntityShards;
-use abm_framework::engine::manager::{ECSData, ECSManager};
-use abm_framework::engine::scheduler::Scheduler;
-use abm_framework::engine::commands::Command;
-use abm_framework::engine::reduce::{Count, Sum};
-use abm_framework::engine::error::ECSResult;
+#[cfg(feature = "profiling")]
+use abm_framework::{init, shutdown, thread_name};
 
 #[cfg(feature = "gpu")]
 use abm_framework::gpu;
@@ -50,44 +44,45 @@ use sugarscape::gpu::{
     ClearOccupancyGpuSystem
 };
 
-use abm_framework::profiling::profiler;
+/// Build a frozen component registry with all sugarscape components.
+///
+/// When the `gpu` feature is enabled, components that participate in GPU
+/// compute shaders are registered via [`ComponentRegistry::register_gpu`]
+/// so that their `gpu_usage` flag is set and the GPU mirror layer accepts
+/// them.
+fn make_registry() -> Arc<RwLock<ComponentRegistry>> {
+    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+    {
+        let mut reg = registry.write().unwrap();
 
-/// One-time component registration
-static INIT: Once = Once::new();
+        // Components that are CPU-only regardless of feature flags.
+        reg.register::<AgentTag>().unwrap();
 
-fn init_components() -> ECSResult<()> {
-    let mut out = Ok(());
+        // Components that participate in GPU compute shaders when the gpu
+        // feature is active.  On CPU-only builds they are registered normally.
+        #[cfg(feature = "gpu")]
+        {
+            reg.register_gpu::<Position>().unwrap();
+            reg.register_gpu::<Vision>().unwrap();
+            reg.register_gpu::<RNG>().unwrap();
+            reg.register_gpu::<Sugar>().unwrap();
+            reg.register_gpu::<Metabolism>().unwrap();
+            reg.register_gpu::<Alive>().unwrap();
+        }
 
-    INIT.call_once(|| {
-        out = (|| {
-            register_component::<AgentTag>()?;
+        #[cfg(not(feature = "gpu"))]
+        {
+            reg.register::<Position>().unwrap();
+            reg.register::<Vision>().unwrap();
+            reg.register::<RNG>().unwrap();
+            reg.register::<Sugar>().unwrap();
+            reg.register::<Metabolism>().unwrap();
+            reg.register::<Alive>().unwrap();
+        }
 
-            #[cfg(feature = "gpu")]
-            {
-                register_gpu_component::<Position>()?;
-                register_gpu_component::<Vision>()?;
-                register_gpu_component::<RNG>()?;
-                register_gpu_component::<Sugar>()?;
-                register_gpu_component::<Metabolism>()?;
-                register_gpu_component::<Alive>()?;
-            }
-
-            #[cfg(not(feature = "gpu"))]
-            {
-                register_component::<Position>()?;
-                register_component::<Vision>()?;
-                register_component::<RNG>()?;
-                register_component::<Sugar>()?;
-                register_component::<Metabolism>()?;
-                register_component::<Alive>()?;
-            }
-
-            freeze_components()?;
-            Ok(())
-        })();
-    });
-
-    out
+        reg.freeze();
+    }
+    registry
 }
 
 #[test]
@@ -95,35 +90,36 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
     // ─── PROFILER SETUP ───────────────────────────────────────────────────────
     #[cfg(all(feature = "profiling", not(feature = "gpu")))]
     {
-        profiler::init("profile/sugarscape_cpu_trace.json");
-        profiler::thread_name("Main");
+        init("profile/sugarscape_cpu_trace.json");
+        thread_name("Main");
     }
 
     #[cfg(all(feature = "profiling", feature = "gpu"))]
     {
-        profiler::init("profile/sugarscape_gpu_trace.json");
-        profiler::thread_name("Main");
+        init("profile/sugarscape_gpu_trace.json");
+        thread_name("Main");
     }
 
-    init_components()?;
+    let registry = make_registry();
+    let reg = registry.read().unwrap();
 
     let w = 600;
     let h = 600;
 
-    let shards = EntityShards::new(4);
-    let ecs = ECSManager::new(ECSData::new(shards));
+    let shards = EntityShards::new(4)?;
+    let ecs = ECSManager::new(ECSData::new(shards, registry.clone()));
     let world = ecs.world_ref();
 
     // ─── GRID SETUP ───────────────────────────────────────────────────────────
     #[cfg(not(feature = "gpu"))]
     let grid = {
-        let _g = profiler::span("setup::cpu_grid");
+        let _g = span("setup::cpu_grid");
         std::sync::Arc::new(std::sync::Mutex::new(Grid::new(w, h)))
     };
 
     #[cfg(feature = "gpu")]
     let (sugar_grid_id, intent_id) = {
-        let _g = profiler::span("setup::gpu_grid");
+        let _g = span("setup::gpu_grid");
 
         let mut capacity = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
@@ -144,7 +140,15 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
 
     // ─── SPAWN AGENTS ─────────────────────────────────────────────────────────
     {
-        let _g = profiler::span("setup::spawn_agents");
+        let _g = span("setup::spawn_agents");
+
+        let agent_tag_id = reg.id_of::<AgentTag>().unwrap();
+        let position_id = reg.id_of::<Position>().unwrap();
+        let sugar_id = reg.id_of::<Sugar>().unwrap();
+        let metabolism_id = reg.id_of::<Metabolism>().unwrap();
+        let vision_id = reg.id_of::<Vision>().unwrap();
+        let rng_id = reg.id_of::<RNG>().unwrap();
+        let alive_id = reg.id_of::<Alive>().unwrap();
 
         world.with_exclusive(|_| {
             for i in 0..1_000_000u32 {
@@ -153,13 +157,13 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
                 let y = rng_range(&mut seed, h as u32) as i32;
 
                 let mut b = Bundle::new();
-                b.insert(component_id_of::<AgentTag>()?, AgentTag(0));
-                b.insert(component_id_of::<Position>()?, Position { x, y });
-                b.insert(component_id_of::<Sugar>()?, Sugar(1.0));
-                b.insert(component_id_of::<Metabolism>()?, Metabolism(0.1));
-                b.insert(component_id_of::<Vision>()?, Vision(2));
-                b.insert(component_id_of::<RNG>()?, RNG { state: seed });
-                b.insert(component_id_of::<Alive>()?, Alive(1));
+                b.insert(agent_tag_id, AgentTag(0));
+                b.insert(position_id, Position { x, y });
+                b.insert(sugar_id, Sugar(1.0));
+                b.insert(metabolism_id, Metabolism(0.1));
+                b.insert(vision_id, Vision(2));
+                b.insert(rng_id, RNG { state: seed });
+                b.insert(alive_id, Alive(1));
 
                 world.defer(Command::Spawn { bundle: b })?;
             }
@@ -174,43 +178,45 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
 
     #[cfg(not(feature = "gpu"))]
     {
-        scheduler.add_system(MoveAndHarvestSystem { grid: grid.clone() });
-        scheduler.add_system(SugarRegrowthSystem { grid: grid.clone(), rate: 4.0 });
-        scheduler.add_system(MetabolismSystem);
-        scheduler.add_system(DeathSystem);
+        scheduler.add_system(MoveAndHarvestSystem::new(grid.clone(), &reg));
+        scheduler.add_system(SugarRegrowthSystem::new(grid.clone(), 4.0));
+        scheduler.add_system(MetabolismSystem::new(&reg));
+        scheduler.add_system(DeathSystem::new(&reg));
     }
 
     #[cfg(feature = "gpu")]
     {
         scheduler.add_system(ClearOccupancyGpuSystem::new(sugar_grid_id));
-        scheduler.add_system(AgentIntentGpuSystem::new(sugar_grid_id, intent_id));
+        scheduler.add_system(AgentIntentGpuSystem::new(sugar_grid_id, intent_id, &reg));
         scheduler.add_system(ResolveIntentCpuSystem::new(sugar_grid_id, intent_id));
-        scheduler.add_system(ResolveHarvestGpuSystem::new(sugar_grid_id, intent_id));
+        scheduler.add_system(ResolveHarvestGpuSystem::new(sugar_grid_id, intent_id, &reg));
         scheduler.add_system(SugarRegrowthGpuSystem::new(sugar_grid_id));
-        scheduler.add_system(MetabolismGpuSystem);
-        scheduler.add_system(DeathGpuSystem);
+        scheduler.add_system(MetabolismGpuSystem::new(&reg));
+        scheduler.add_system(DeathGpuSystem::new(&reg));
     }
+
+    drop(reg);
 
     // ─── SIMULATION LOOP ──────────────────────────────────────────────────────
     for step in 0..20 {
-        let _tick = profiler::span("tick")
-            .arg("step", profiler::Arg::U64(step as u64));
+        let _tick = span("tick")
+            .arg("step", Arg::U64(step as u64));
 
         {
-            let _run = profiler::span("ecs::run");
+            let _run = span("ecs::run");
             ecs.run(&mut scheduler)?;
         }
 
         #[cfg(feature = "gpu")]
         {
-            let _g = profiler::span("gpu::sync_pending_to_cpu");
-            gpu::sync_pending_to_cpu(world)?;
+            let _g = span("gpu::sync_pending_to_cpu");
+            gpu::sync_pending_to_cpu(world, &[])?;
         }
 
         let q = world.query()?.read::<Sugar>()?.read::<Alive>()?.build()?;
 
         let sum = {
-            let _g = profiler::span("reduce::sum_sugar_alive");
+            let _g = span("reduce::sum_sugar_alive");
             world.reduce_read2::<Sugar, Alive, Sum>(
                 q.clone(),
                 Sum::default,
@@ -220,7 +226,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
         };
 
         let count = {
-            let _g = profiler::span("reduce::count_alive");
+            let _g = span("reduce::count_alive");
             world.reduce_read2::<Sugar, Alive, Count>(
                 q,
                 Count::default,
@@ -243,7 +249,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
     }
 
     #[cfg(feature = "profiling")]
-    profiler::shutdown();
+    shutdown();
 
     Ok(())
 }
