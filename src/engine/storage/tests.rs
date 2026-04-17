@@ -20,12 +20,6 @@ mod tests {
         }
     }
 
-    fn new_counter() -> (Arc<AtomicUsize>, DropCounter) {
-        let count = Arc::new(AtomicUsize::new(0));
-        let token = DropCounter(Arc::clone(&count));
-        (count, token)
-    }
-
     // -----------------------------------------------------------------------
     // Empty attribute
     // -----------------------------------------------------------------------
