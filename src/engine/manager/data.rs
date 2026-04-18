@@ -69,7 +69,7 @@ use crate::engine::archetype::{Archetype, ArchetypeMatch};
 use crate::engine::entity::{Entity, EntityShards};
 use crate::engine::storage::TypeErasedAttribute;
 use crate::engine::component::{Signature, ComponentRegistry};
-use crate::engine::error::{ECSResult, ECSError, ExecutionError, InternalViolation, RegistryError, SpawnError, StaleEntityError};
+use crate::engine::error::{ECSResult, ECSError, ExecutionError, InternalViolation, RegistryError, SpawnError, StaleEntityError, AccessKind};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::DirtyChunks;
@@ -1047,23 +1047,32 @@ impl ECSData {
                 ExecutionError::MissingComponent { component_id }
             ))?;
 
-        let col = col_lock.read().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned { what: "component column" })
+        let col = col_lock.try_read().map_err(|e| match e {
+            std::sync::TryLockError::WouldBlock => ECSError::from(
+                ExecutionError::BorrowConflict {
+                    component_id,
+                    held: AccessKind::Write,
+                    requested: AccessKind::Read,
+                }
+            ),
+            std::sync::TryLockError::Poisoned(_) => ECSError::from(
+                ExecutionError::LockPoisoned { what: "component column" }
+            ),
         })?;
 
         let chunk_len = arch.chunk_valid_length(loc.chunk as usize)?;
-
-        let (ptr, _) = col.chunk_bytes(loc.chunk, chunk_len)
+        let (ptr, bytes) = col.chunk_bytes(loc.chunk, chunk_len)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        // SAFETY: ptr points to initialized, aligned storage for the
-        // registered component type. The column read lock prevents
-        // concurrent mutation. T must match the registered type (caller
-        // invariant, same as for_each).
         let slice: &[T] = unsafe {
-            crate::engine::storage::cast_slice::<T>(ptr, chunk_len)
+            crate::engine::storage::cast_slice::<T>(ptr, bytes)
         };
 
-        Ok(slice[loc.row as usize].clone())
-    }    
+        let row = loc.row as usize;
+        if row >= slice.len() {
+            return Err(ECSError::from(ExecutionError::InternalExecutionError));
+        }
+
+        Ok(slice[row].clone())
+    }
 }

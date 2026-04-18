@@ -91,4 +91,21 @@ impl LockedAttribute {
             )),
         }
     }
+
+    /// Returns a read guard if the lock is not currently write-held.
+    ///
+    /// Unlike [`read`](Self::read), this method does not block. It returns
+    /// `Err(TryLockError::WouldBlock)` immediately if a writer holds the
+    /// lock, preventing same-thread deadlocks when called from inside a
+    /// `for_each` callback.
+    #[inline]
+    pub fn try_read(
+        &self,
+    ) -> Result
+    <
+        RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>,
+        std::sync::TryLockError<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>>,
+    > {
+    self.inner.try_read()
+    }
 }

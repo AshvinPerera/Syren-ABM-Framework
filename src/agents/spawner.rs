@@ -59,10 +59,17 @@ impl<'t> AgentSpawner<'t> {
     ///
     /// If `set` is called multiple times with the same `id`, the last value
     /// wins.
-    pub fn set<T: Any + Send + 'static>(mut self, id: ComponentID, value: T) -> Self {
+    pub fn set<T: Any + Send + 'static>(
+        mut self,
+        id: ComponentID,
+        value: T,
+    ) -> AgentResult<Self> {
+        if !self.template.signature.has(id) {
+            return Err(AgentError::MissingComponent(id));
+        }
         self.overrides.retain(|(cid, _)| *cid != id);
         self.overrides.push((id, Box::new(value)));
-        self
+        Ok(self)
     }
 
     /// Enqueues a `Command::Spawn` that materialises the agent.
@@ -118,7 +125,7 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let spawner = tmpl.spawner().set::<Wealth>(0, Wealth(99.0));
+        let spawner = tmpl.spawner().set::<Wealth>(0, Wealth(99.0)).unwrap();
         assert_eq!(spawner.overrides.len(), 1);
         let (cid, _) = &spawner.overrides[0];
         assert_eq!(*cid, 0);
@@ -135,4 +142,14 @@ mod tests {
             .set::<Wealth>(0, Wealth(2.0));
         assert_eq!(spawner.overrides.len(), 1);
     }
+
+    #[test]
+    fn spawner_rejects_unknown_component() {
+        let tmpl = AgentTemplate::builder("C")
+            .with_component::<Wealth>(0)
+            .unwrap()
+            .build();
+        let err = tmpl.spawner().set::<Wealth>(99, Wealth(1.0)).unwrap_err();
+        assert_eq!(err, AgentError::MissingComponent(99));
+    }    
 }
