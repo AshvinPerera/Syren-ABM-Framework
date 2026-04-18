@@ -8,28 +8,41 @@
 //! - Deterministic scheduling
 //! - Parallel CPU execution (GPU-ready architecture)
 //! - Safe, explicit data access
-//!
-//! This crate builds as both:
-//! - `rlib` (for Rust usage & integration tests)
-//! - `cdylib` (for FFI / DLL usage)
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 #![allow(clippy::module_inception)]
-#![deny(dead_code)]
 
-pub mod engine;
+pub(crate) mod engine;
+
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
+/// Chrome Trace (flame-style) profiler for ECS execution.
+///
+/// This module provides a feature-gated, zero-overhead (when disabled)
+/// profiling API that emits Chrome Trace JSON compatible with:
+/// - chrome://tracing
+/// - https://ui.perfetto.dev
+///
+/// Enable with `--features profiling`.
+pub(crate) mod profiling;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Re-exports (Public API)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Core ECS types
+// Core ECS manager and world access
 
 pub use engine::manager::{
     ECSManager,
     ECSReference,
+    ECSData,
+    Read,
+    Write,
 };
+
+// Entity types
 
 pub use engine::entity::{
     Entity,
@@ -37,23 +50,47 @@ pub use engine::entity::{
     EntityShards,
 };
 
+// Component registry and registration
+
 pub use engine::component::{
     Signature,
-    register_component,
-    freeze_components,
-    component_id_of,
+    ComponentRegistry,
+    DynamicBundle,
+    Bundle,
+    ComponentDesc,
 };
+
+#[cfg(feature = "gpu")]
+pub use engine::component::{
+    GPUPod,
+    register_gpu_component,
+};
+
+// Reduction primitives
+
+pub use engine::reduce::{Count, Sum, MinMax, Welford};
+
+// Query construction
 
 pub use engine::query::QueryBuilder;
 
+// Systems and scheduling
+
 pub use engine::systems::System;
-pub use engine::systems::{FnSystem, SystemBackend};
+pub use engine::systems::{FnSystem, SystemBackend, AccessSets};
+#[cfg(feature = "gpu")]
+pub use engine::systems::GpuSystem;
+
 pub use engine::scheduler::{
     Stage,
     Scheduler
 };
 
+// Deferred commands
+
 pub use engine::commands::Command;
+
+// Error types
 
 pub use engine::error::{
     ECSResult,
@@ -64,11 +101,41 @@ pub use engine::error::{
     MoveError,
 };
 
+// Primitive type aliases and constants
+
 pub use engine::types::{
     EntityID,
     ComponentID,
-    ArchetypeID
+    ArchetypeID,
+    SystemID,
+    ChunkID,
+    CHUNK_CAP,
 };
+
+#[cfg(feature = "gpu")]
+pub use engine::types::{
+    GPUAccessMode,
+    GPUResourceID,
+};
+
+// Archetype and chunk borrowing
+
+pub use engine::archetype::{Archetype, ChunkBorrow};
+
+// Storage utilities
+
+pub use engine::storage::{
+    Attribute,
+    TypeErasedAttribute,
+    cast_slice,
+    cast_slice_mut,
+};
+
+// Profiling public API
+pub use profiling::profiler::{init, shutdown, span, span_fmt, thread_name, next_arg, SpanGuard, SpanName, Arg};
+
+#[cfg(feature = "agents")]
+pub mod agents;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Prelude (Optional but recommended)
@@ -90,15 +157,6 @@ pub mod prelude {
         FnSystem,
         SystemBackend,
         Signature,
-        register_component,
-        freeze_components,
-        component_id_of,
+        ComponentRegistry,
     };
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Feature placeholders
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "rollback")]
-mod rollback_support {}

@@ -60,7 +60,7 @@ pub enum Command {
 
     /// Despawns an existing entity.
     ///
-    /// ## Behavior
+    /// ## Behaviour
     /// - Removes the entity from its archetype.
     /// - Releases the entity handle.
     /// - Performs swap-remove on component storage as needed
@@ -71,7 +71,7 @@ pub enum Command {
 
     /// Adds a component to an existing entity.
     ///
-    /// ## Behavior
+    /// ## Behaviour
     /// - Moves the entity to a new archetype that includes the added component.
     /// - The provided value is inserted into the destination archetype.    
     Add { 
@@ -87,7 +87,7 @@ pub enum Command {
 
     /// Removes a component from an existing entity.
     ///
-    /// ## Behavior
+    /// ## Behaviour
     /// - Moves the entity to a new archetype that excludes the component.
     /// - The removed component value is dropped.    
     Remove { 
