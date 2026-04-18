@@ -199,6 +199,9 @@ impl DirtyChunks {
     pub fn notify_archetype_changed(&self, archetype_id: ArchetypeID) {
         if let Ok(entries) = self.entries.read() {
             let base = (archetype_id as usize) * COMPONENT_CAP;
+            if base >= entries.len() {
+                return; // No entries have been created for this archetype yet
+            }
             let end = (base + COMPONENT_CAP).min(entries.len());
             for slot in &entries[base..end] {
                 if let Some(entry) = slot {

@@ -158,9 +158,9 @@ fn read_buffer_u32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [u32]) -> ECS
         label: Some("readback_encoder_u32"),
     });
     encoder.copy_buffer_to_buffer(buf, 0, &staging, 0, bytes_len);
-    let submission = ctx.queue.submit(Some(encoder.finish()));
+    ctx.queue.submit(Some(encoder.finish()));
 
-    ctx.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
         .map_err(|e| ECSError::from(
             ExecutionError::GpuDispatchFailed {
                 message: format!("poll failed: {e:?}").into(),
@@ -207,9 +207,9 @@ fn read_buffer_f32(ctx: &GPUContext, buf: &wgpu::Buffer, out: &mut [f32]) -> ECS
         label: Some("readback_encoder_f32"),
     });
     encoder.copy_buffer_to_buffer(buf, 0, &staging, 0, bytes_len);
-    let submission = ctx.queue.submit(Some(encoder.finish()));
+    ctx.queue.submit(Some(encoder.finish()));
 
-    ctx.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
         .map_err(|e| ECSError::from(
             ExecutionError::GpuDispatchFailed {
                 message: format!("poll failed: {e:?}").into(),
