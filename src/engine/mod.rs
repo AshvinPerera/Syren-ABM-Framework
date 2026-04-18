@@ -23,3 +23,7 @@ pub mod systems;
 pub mod scheduler;
 pub mod manager;
 pub mod borrow;
+pub mod reduce;
+
+#[cfg(feature = "gpu")]
+pub mod dirty;

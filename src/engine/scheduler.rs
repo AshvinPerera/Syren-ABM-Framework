@@ -21,21 +21,40 @@
 //! Deferred ECS commands (spawns, despawns, component mutations) are applied
 //! at explicit synchronization points controlled by the ECS manager,
 //! typically between scheduler stages.
-//! 
+//!
 //! ## Safety note
 //!
 //! This module assumes that systems are executed only within the
 //! appropriate ECS execution phases; violating phase discipline
-//! may result in undefined behavior.
+//! may result in undefined behaviour.
 
-use std::sync::Mutex;
 use rayon::prelude::*;
 
 use crate::engine::manager::ECSReference;
 use crate::engine::systems::{AccessSets, System, SystemBackend};
-use crate::engine::component::Signature;
+use crate::engine::component::{or_signature_in_place};
 use crate::engine::error::{ECSResult, ECSError, ExecutionError};
+use crate::profiling::profiler;
 
+#[cfg(feature = "gpu")]
+use crate::engine::types::GPUResourceID;
+
+#[cfg(feature = "gpu")]
+use crate::gpu;
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageType {
+    Boundary,
+    Cpu,
+    Gpu,
+}
+
+impl Default for StageType {
+    fn default() -> Self {
+        StageType::Cpu
+    }
+}
 
 /// A logical execution stage used by [`Scheduler`] during planning.
 ///
@@ -46,32 +65,74 @@ use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 /// - evolve into a CPU/GPU multi-backend dispatcher.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
+    stage_type: StageType,
     /// Indices of systems that can execute in parallel.
     pub system_indices: Vec<usize>,
-    /// Aggregate access sets of systems in this stage (used for fast conflict checks
-    /// during plan construction).
+    /// Aggregate access sets of systems in this stage (CPU)
     aggregate_access: AccessSets,
+
+    #[cfg(feature = "gpu")]
+    gpu_write_resources: Vec<GPUResourceID>,
 }
 
 impl Stage {
+    fn boundary() -> Self {
+        Self {
+            stage_type: StageType::Boundary,
+            system_indices: Vec::new(),
+            aggregate_access: AccessSets::default(),
+            #[cfg(feature = "gpu")]
+            gpu_write_resources: Vec::new(),
+        }
+    }
+
+    fn cpu() -> Self {
+        Self {
+            stage_type: StageType::Cpu,
+            system_indices: Vec::new(),
+            aggregate_access: AccessSets::default(),
+            #[cfg(feature = "gpu")]
+            gpu_write_resources: Vec::new(),
+        }
+    }
+
+    fn gpu() -> Self {
+        Self {
+            stage_type: StageType::Gpu,
+            system_indices: Vec::new(),
+            aggregate_access: AccessSets::default(),
+            #[cfg(feature = "gpu")]
+            gpu_write_resources: Vec::new(),
+        }
+    }
+
     /// Returns true if `access` does NOT conflict with anything already in this stage.
     #[inline]
     pub fn can_accept(&self, access: &AccessSets) -> bool {
+        debug_assert_eq!(self.stage_type, StageType::Cpu);
         !access.conflicts_with(&self.aggregate_access)
     }
 
-    /// Adds a system index to this stage and merges its access into the aggregate.
+    /// Adds a system index to this stage and merges its access into the aggregate (CPU only).
     #[inline]
-    pub fn push(&mut self, idx: usize, access: &AccessSets) {
-        self.system_indices.push(idx);
+    pub fn push_cpu(&mut self, index: usize, access: &AccessSets) {
+        debug_assert_eq!(self.stage_type, StageType::Cpu);
+        self.system_indices.push(index);
         or_signature_in_place(&mut self.aggregate_access.read, &access.read);
         or_signature_in_place(&mut self.aggregate_access.write, &access.write);
+    }
+
+    /// Adds a system index to this stage (GPU only; executed sequentially).
+    #[inline]
+    pub fn push_gpu(&mut self, index: usize) {
+        debug_assert_eq!(self.stage_type, StageType::Gpu);
+        self.system_indices.push(index);
     }
 
     /// Returns true if this stage is acting as a boundary marker.
     #[inline]
     pub fn is_boundary(&self) -> bool {
-        self.system_indices.is_empty()
+        self.stage_type == StageType::Boundary
     }
 }
 
@@ -79,9 +140,9 @@ impl Stage {
 /// based on declared access sets, and executes stages with parallelism.
 pub struct Scheduler {
     systems: Vec<Box<dyn System>>,
-    /// Cached CPU stages.
-    cpu_stages: Vec<Stage>,
-    /// Whether `cpu_stages` needs rebuilding.
+    /// Cached stages.
+    plan: Vec<Stage>,
+    /// Whether `plan` needs rebuilding.
     dirty: bool,
 }
 
@@ -97,7 +158,7 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             systems: Vec::new(),
-            cpu_stages: Vec::new(),
+            plan: Vec::new(),
             dirty: true,
         }
     }
@@ -118,7 +179,7 @@ impl Scheduler {
     #[inline]
     pub fn clear(&mut self) {
         self.systems.clear();
-        self.cpu_stages.clear();
+        self.plan.clear();
         self.dirty = true;
     }
 
@@ -135,102 +196,106 @@ impl Scheduler {
         self.add_boxed(Box::new(system));
     }
 
-    /// Registers a function-backed system.
-    pub fn add_fn_system<F>(
-        &mut self,
-        system: crate::engine::systems::FnSystem<F>,
-    )
-    where
-        F: Fn(crate::engine::manager::ECSReference<'_>) -> ECSResult<()>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.add_system(system);
-    }
-
-    /// Convenience helper to build-and-register an [`FnSystem`](crate::engine::systems::FnSystem)
-    #[inline]
-    pub fn add_fn<F>(
-        &mut self,
-        id: crate::engine::types::SystemID,
-        name: &'static str,
-        access: AccessSets,
-        f: F,
-    )
-    where
-        F: Fn(crate::engine::manager::ECSReference<'_>) -> ECSResult<()>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.add_fn_system(crate::engine::systems::FnSystem::new(id, name, access, f));
-    }
-
-    /// Registers an infallible function-backed system.
-    /// The function is automatically wrapped to return `Ok(())`.
-    
-    #[inline]
-    pub fn add_fn_infallible<F>(
-        &mut self,
-        id: crate::engine::types::SystemID,
-        name: &'static str,
-        access: AccessSets,
-        f: F,
-    )
-    where
-        F: Fn(crate::engine::manager::ECSReference<'_>) + Send + Sync + 'static,
-    {
-        self.add_fn(id, name, access, move |world| {
-            f(world);
-            Ok::<(), ECSError>(())
-        });
-    }
-
     /// Ensures stages are up to date.
     pub fn rebuild(&mut self) {
         if !self.dirty {
             return;
         }
 
-        // Deterministic: sort indices by system ID.
         let mut indices: Vec<usize> = (0..self.systems.len()).collect();
         indices.sort_by_key(|&i| self.systems[i].id());
 
-        self.cpu_stages.clear();
+        self.plan.clear();
 
-        for idx in indices {
-            let sys = &self.systems[idx];
+        let mut in_gpu_run = false;
 
-            // For GPU scaling: keep GPU systems as hard boundaries.
-            if sys.backend() == SystemBackend::GPU {
-                // Flush any pending CPU stage and create a boundary stage.
-                self.cpu_stages.push(Stage::default());
-                continue;
-            }
+        for index in indices {
+            let backend = self.systems[index].backend();
+            let access = self.systems[index].access().clone(); // clone here
 
-            let access = sys.access();
+            match backend {
+                SystemBackend::CPU => {
+                    if in_gpu_run {
+                        self.close_gpu_run();
+                        in_gpu_run = false;
+                    }
 
-            // Greedy packing into the first compatible stage.
-            let mut placed = false;
-            for stage in self.cpu_stages.iter_mut() {
-                if stage.system_indices.is_empty() {
-                    continue;
+                    let mut placed = false;
+
+                    for stage in self.plan.iter_mut().rev() {
+                        if stage.stage_type == StageType::Boundary {
+                            break;
+                        }
+                        if stage.stage_type != StageType::Cpu {
+                            continue;
+                        }
+                        if stage.can_accept(&access) {
+                            stage.push_cpu(index, &access);
+                            placed = true;
+                            break;
+                        }
+                    }
+
+                    if !placed {
+                        let mut stage = Stage::cpu();
+                        stage.push_cpu(index, &access);
+                        self.plan.push(stage);
+                    }
                 }
-                if stage.can_accept(&access) {
-                    stage.push(idx, &access);
-                    placed = true;
-                    break;
+
+                SystemBackend::GPU => {
+                    if !in_gpu_run {
+                        self.plan.push(Stage::boundary());
+                        self.plan.push(Stage::gpu());
+                        in_gpu_run = true;
+                    }
+
+                    let last = self.plan.last_mut().expect("plan must have a GPU stage");
+                    debug_assert_eq!(last.stage_type, StageType::Gpu);
+                    last.push_gpu(index);
                 }
-            }
-            if !placed {
-                let mut stage = Stage::default();
-                stage.push(idx, &access);
-                self.cpu_stages.push(stage);
             }
         }
 
+        if in_gpu_run {
+            self.close_gpu_run();
+        }
+
         self.dirty = false;
+    }
+
+    /// Closes a GPU run by appending a trailing [`Stage::boundary`].
+    ///
+    /// On GPU builds the boundary also carries the write-resource list
+    /// collected from the preceding GPU stage.
+    fn close_gpu_run(&mut self) {
+        #[cfg(feature = "gpu")]
+        let gpu_writes = self.collect_gpu_write_resources();
+
+        #[allow(unused_mut)]
+        let mut boundary = Stage::boundary();
+        #[cfg(feature = "gpu")]
+        { boundary.gpu_write_resources = gpu_writes; }
+        self.plan.push(boundary);
+    }
+
+    #[cfg(feature = "gpu")]
+    fn collect_gpu_write_resources(&self) -> Vec<GPUResourceID> {
+        let gpu_stage = self.plan.iter().rev().find(|s| s.stage_type == StageType::Gpu);
+        let Some(stage) = gpu_stage else { return Vec::new(); };
+
+        let mut resources = Vec::new();
+        for &idx in &stage.system_indices {
+            let system = &self.systems[idx];
+            if let Some(gpu_cap) = system.gpu() {
+                for &rid in gpu_cap.writes_resources() {
+                    if !resources.contains(&rid) {
+                        resources.push(rid);
+                    }
+                }
+            }
+        }
+        resources
     }
 
     /// Runs the schedule once.
@@ -241,57 +306,94 @@ impl Scheduler {
     /// 3) run systems within a stage in parallel.
     ///
     /// Structural synchronization is expected to be handled
-    /// by the ECS manager at higher-level execution boundaries
-    
+    /// by the ECS manager at higher-level execution boundaries.
+
+    #[allow(clippy::duplicated_code)]
     pub fn run(&mut self, ecs: ECSReference<'_>) -> ECSResult<()> {
+        let _g = profiler::span("Scheduler::run");
+
         self.rebuild();
 
-        for stage in &self.cpu_stages {
-            if stage.system_indices.is_empty() {
-                continue;
-            }
+        static BACKEND_CPU: &str = "CPU";
+        #[cfg(feature = "gpu")]
+        static BACKEND_GPU: &str = "GPU";
 
-            let err: Mutex<Option<ECSError>> = Mutex::new(None);
+        for stage in &self.plan {
+            match stage.stage_type {
+                StageType::Boundary => {
+                    let _s = profiler::span("Stage::Boundary");
 
-            stage.system_indices.par_iter().for_each(|&system_idx| {
-                let already_failed = match err.lock() {
-                    Ok(g) => g.is_some(),
-                    Err(_) => true,
-                };
-                if already_failed {
-                    return;
+                    ecs.clear_borrows();
+
+                    #[cfg(feature = "gpu")]
+                    {
+                        let _g0 = profiler::span("GPU::sync_pending_to_cpu");
+                        gpu::sync_pending_to_cpu(ecs, &stage.gpu_write_resources)?;
+                    }
+
+                    let _g1 = profiler::span("ECS::apply_deferred_commands");
+
+                    ecs.apply_deferred_commands()?;
                 }
 
-                if let Err(e) = self.systems[system_idx].run(ecs) {
-                    if let Ok(mut g) = err.lock() {
-                        *g = Some(e);
+                StageType::Cpu => {
+                    let _s = profiler::span("Stage::Cpu")
+                        .arg("systems", profiler::Arg::U64(stage.system_indices.len() as u64));
+
+                    stage.system_indices
+                        .par_iter()
+                        .try_for_each(|&i| {
+                            let sys = &self.systems[i];
+
+                            profiler::next_arg("system_id", profiler::Arg::U64(sys.id() as u64));
+                            profiler::next_arg("backend", profiler::Arg::Str(BACKEND_CPU.to_string()));
+
+                            let _sg = profiler::span_fmt(format_args!("System::{}", sys.name()));
+
+                            sys.run(ecs)
+                        })?;
+
+                    ecs.clear_borrows();
+                }
+
+                StageType::Gpu => {
+                    let _s = profiler::span("Stage::Gpu")
+                        .arg("systems", profiler::Arg::U64(stage.system_indices.len() as u64));
+
+                    #[cfg(not(feature = "gpu"))]
+                    {
+                        let _ = &stage;
+                        return Err(ECSError::from(ExecutionError::GpuNotEnabled));
+                    }
+
+                    #[cfg(feature = "gpu")]
+                    {
+                        // Sequential execution on GPU.
+                        for &idx in &stage.system_indices {
+                            let system = &self.systems[idx];
+
+                            profiler::next_arg("system_id", profiler::Arg::U64(system.id() as u64));
+                            profiler::next_arg("backend", profiler::Arg::Str(BACKEND_GPU.to_string()));
+
+                            let _sg = profiler::span_fmt(format_args!("System::{}", system.name()));
+
+                            let gpu_cap = system.gpu().ok_or_else(|| {
+                                ECSError::from(ExecutionError::SchedulerInvariantViolation)
+                            })?;
+
+                            {
+                                let _g_exec = profiler::span("GPU::execute_gpu_system");
+                                gpu::execute_gpu_system(ecs, system.as_ref(), gpu_cap)?;
+                            }
+
+                            ecs.clear_borrows();
+                        }
+
                     }
                 }
-            });
-
-            match err.into_inner() {
-                Ok(Some(e)) => return Err(e),
-                Ok(None) => {}
-                Err(_) => {
-                    return Err(ECSError::from(ExecutionError::LockPoisoned {
-                        what: "scheduler error latch mutex",
-                    }))
-                }
             }
-
-            ecs.clear_borrows();
         }
 
         Ok(())
-    }
-}
-
-#[inline]
-fn or_signature_in_place(
-    dst: &mut Signature,
-    src: &Signature
-) {
-    for (d, s) in dst.components.iter_mut().zip(src.components.iter()) {
-        *d |= *s;
     }
 }
