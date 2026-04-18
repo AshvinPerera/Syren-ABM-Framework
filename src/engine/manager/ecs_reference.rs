@@ -80,7 +80,7 @@ use crate::engine::error::{
 
 #[cfg(feature = "gpu")]
 use crate::engine::types::GPUResourceID;
-
+use crate::{ComponentID, Entity};
 #[cfg(feature = "gpu")]
 use crate::gpu::GPUResource;
 
@@ -117,7 +117,7 @@ impl<'a> ECSReference<'a> {
     }
 
     #[inline]
-    pub(crate) fn apply_deferred_commands(&self) -> ECSResult<()> {
+    pub(crate) fn apply_deferred_commands(&self) -> ECSResult<Vec<Entity>> {
         self.manager.apply_deferred_commands()
     }
 
@@ -629,5 +629,46 @@ impl ECSReference<'_> {
                 f(&a[i], &b[i], &mut c[i], &mut d[i]);
             }
         })
+    }
+
+    /// Reads a single component value for a specific entity.
+    ///
+    /// Unlike `for_each`, this performs a random-access lookup by entity
+    /// handle rather than iterating all matching archetypes. It is safe to
+    /// call both during and outside of iteration — it acquires a shared
+    /// phase lock (the same kind held by `for_each`) and delegates to
+    /// `ECSData::read_component`, which acquires only the column-level
+    /// `RwLock`.
+    ///
+    /// # Intended use
+    ///
+    /// Social networks, firm-worker relationships, predator-prey targeting,
+    /// or any system where agent A needs to read agent B's component by a
+    /// stored `Entity` handle.
+    ///
+    /// # Safety model
+    ///
+    /// * The shared phase lock prevents structural mutation.
+    /// * The column `RwLock` prevents reading through a concurrent write on
+    ///   the same column. If the calling system's query holds a write lock
+    ///   on this component, the read will block — this is correct and
+    ///   prevents data races.
+    /// * The borrow tracker is not consulted. Borrow safety is enforced by
+    ///   the column lock directly.
+    ///
+    /// # Errors
+    ///
+    /// * `SpawnError::StaleEntity` — entity is dead or recycled.
+    /// * `ExecutionError::MissingComponent` — the entity's archetype does
+    ///   not contain this component.
+    /// * `ExecutionError::LockPoisoned` — column or phase lock is poisoned.
+    pub fn read_entity_component<T: 'static + Clone>(
+        &self,
+        entity: Entity,
+        component_id: ComponentID,
+    ) -> ECSResult<T> {
+        let _phase = self.manager.phase_read()?;
+        let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
+        data.read_component::<T>(entity, component_id)
     }
 }

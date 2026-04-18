@@ -174,7 +174,7 @@ fn clear_only_touches_dirty_components() {
 
     // Manually set a non-dirty component to a sentinel value to verify
     // clear() doesn't touch it. This is a white-box test.
-    tracker.states[500].store(42, Ordering::Relaxed);
+    tracker.states[255].store(42, Ordering::Relaxed);
 
     tracker.clear();
 
@@ -183,10 +183,10 @@ fn clear_only_touches_dirty_components() {
     assert_eq!(tracker.states[200].load(Ordering::Relaxed), 0);
 
     // Non-dirty component should still have sentinel value.
-    assert_eq!(tracker.states[500].load(Ordering::Relaxed), 42);
+    assert_eq!(tracker.states[255].load(Ordering::Relaxed), 42);
 
     // Clean up the sentinel so it doesn't affect other tests.
-    tracker.states[500].store(0, Ordering::Relaxed);
+    tracker.states[255].store(0, Ordering::Relaxed);
 }
 
 #[test]

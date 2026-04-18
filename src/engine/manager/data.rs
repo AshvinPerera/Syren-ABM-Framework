@@ -418,22 +418,31 @@ impl ECSData {
     /// This method is expected to evolve as command execution is implemented.
     /// Currently acts as a structural synchronization point.
 
-    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) -> ECSResult<()> {
+    pub fn apply_deferred_commands(
+        &mut self,
+        commands: Vec<Command>,
+    ) -> ECSResult<Vec<Entity>> {
+        let mut spawned = Vec::new();
+
         for command in commands {
             match command {
                 Command::Spawn { bundle } => {
                     let signature = bundle.signature();
                     let archetype_id = self.get_or_create_archetype(&signature)?;
                     let shard_id = self.pick_spawn_shard();
-
                     let archetype = &mut self.archetypes[archetype_id as usize];
-                    let _entity = archetype.spawn_on(&mut self.shards, shard_id, bundle)?;
+                    let entity = archetype.spawn_on(
+                        &mut self.shards, shard_id, bundle
+                    )?;
+                    spawned.push(entity);
                 }
 
                 Command::Despawn { entity } => {
                     let loc = self.shards.get_location(entity)
                         .map_err(ECSError::from)?
-                        .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
+                        .ok_or(ECSError::from(
+                            SpawnError::StaleEntity(StaleEntityError)
+                        ))?;
                     let archetype = &mut self.archetypes[loc.archetype as usize];
                     archetype.despawn_on(&mut self.shards, entity)?;
                 }
@@ -450,13 +459,13 @@ impl ECSData {
 
         #[cfg(feature = "gpu")]
         {
-            // Structural changes invalidate all prior dirty tracking.
             for archetype in &self.archetypes {
-                self.gpu_dirty_chunks.notify_archetype_changed(archetype.archetype_id());
+                self.gpu_dirty_chunks
+                    .notify_archetype_changed(archetype.archetype_id());
             }
         }
 
-        Ok(())
+        Ok(spawned)
     }
 
     /// Executes a generic, parallel, chunk-oriented ECS query **without safety checks**.
@@ -995,4 +1004,66 @@ impl ECSData {
         }
         Ok(())
     }
+
+    /// Reads a single component value for one entity.
+    ///
+    /// Resolves the entity's archetype location through `EntityShards`,
+    /// acquires a read lock on the target component column, and clones the
+    /// value at the entity's `(chunk, row)`.
+    ///
+    /// # Concurrency
+    ///
+    /// This method requires only `&self` — no exclusive access. It is safe
+    /// to call under a shared phase lock (the same lock held by `for_each`)
+    /// because:
+    ///
+    /// * `EntityShards::get_location` acquires only the per-shard mutex,
+    ///   which does not conflict with the phase lock.
+    /// * The component column `RwLock` allows concurrent readers. If the
+    ///   column is write-locked by the calling system's own query, the read
+    ///   will block — which is correct, because reading a component that is
+    ///   concurrently being written is a data race.
+    /// * No structural mutation occurs.
+    ///
+    /// # Errors
+    ///
+    /// * `SpawnError::StaleEntity` — entity is dead or recycled.
+    /// * `ExecutionError::MissingComponent` — archetype does not contain
+    ///   this component.
+    /// * `ExecutionError::LockPoisoned` — column lock is poisoned.
+    pub fn read_component<T: 'static + Clone>(
+        &self,
+        entity: Entity,
+        component_id: ComponentID,
+    ) -> ECSResult<T> {
+        let loc = self.shards.get_location(entity)?
+            .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
+
+        let arch = self.archetypes.get(loc.archetype as usize)
+            .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
+
+        let col_lock = arch.component_locked(component_id)
+            .ok_or(ECSError::from(
+                ExecutionError::MissingComponent { component_id }
+            ))?;
+
+        let col = col_lock.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned { what: "component column" })
+        })?;
+
+        let chunk_len = arch.chunk_valid_length(loc.chunk as usize)?;
+
+        let (ptr, _) = col.chunk_bytes(loc.chunk, chunk_len)
+            .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
+
+        // SAFETY: ptr points to initialized, aligned storage for the
+        // registered component type. The column read lock prevents
+        // concurrent mutation. T must match the registered type (caller
+        // invariant, same as for_each).
+        let slice: &[T] = unsafe {
+            crate::engine::storage::cast_slice::<T>(ptr, chunk_len)
+        };
+
+        Ok(slice[loc.row as usize].clone())
+    }    
 }

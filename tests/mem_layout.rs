@@ -41,12 +41,6 @@ fn make_registry() -> Arc<RwLock<ComponentRegistry>> {
 
 // Helper to push into Attribute<T> for both `rollback` and non-rollback builds.
 fn attr_push<T: Send + Sync + 'static>(attr: &mut Attribute<T>, value: T) -> (ChunkID, u32) {
-    #[cfg(feature = "rollback")]
-    {
-        let ((c, r), _action) = attr.push(value).unwrap();
-        (c, r)
-    }
-    #[cfg(not(feature = "rollback"))]
     {
         let (c, r) = attr.push(value).unwrap();
         (c, r)
@@ -145,7 +139,7 @@ fn archetype_borrow_exposes_soa_columns_with_independent_addresses() {
         let mut b = Bundle::new();
         b.insert(pos_id, Position { x: i as f32, y: 1.0 });
         b.insert(vel_id, Velocity { dx: 0.5, dy: i as f32 });
-        arch.spawn_on(&shards, 0, b).unwrap();
+        let _ = arch.spawn_on(&shards, 0, b).unwrap();
     }
 
     let borrow = arch.borrow_chunk_for(0, &[pos_id, vel_id], &[]).unwrap();
@@ -207,7 +201,7 @@ fn archetype_bytes_per_row_matches_component_sizes() {
         let mut bundle = Bundle::new();
         bundle.insert(a, A(i as u64));
         bundle.insert(b, B(i));
-        arch.spawn_on(&shards, 0, bundle).unwrap();
+        let _ = arch.spawn_on(&shards, 0, bundle).unwrap();
     }
 
     let borrow = arch.borrow_chunk_for(0, &[a, b], &[]).unwrap();
@@ -236,7 +230,7 @@ fn archetype_chunk_pointer_is_stable_across_borrows() {
     for i in 0..(CHUNK_CAP / 2) {
         let mut b = Bundle::new();
         b.insert(pos_id, Position { x: i as f32, y: 0.0 });
-        arch.spawn_on(&shards, 0, b).unwrap();
+        let _ = arch.spawn_on(&shards, 0, b).unwrap();
     }
 
     let b1 = arch.borrow_chunk_for(0, &[pos_id], &[]).unwrap();

@@ -62,7 +62,7 @@ use crate::engine::error::{
     ECSError,
     ExecutionError,
 };
-
+use crate::Entity;
 use super::phase::{PhaseRead, PhaseWrite};
 use super::data::ECSData;
 use super::ecs_reference::ECSReference;
@@ -185,10 +185,9 @@ impl ECSManager {
     /// Runs the given scheduler for one full tick.
     pub fn run(&self, scheduler: &mut Scheduler) -> ECSResult<()> {
         let world = self.world_ref();
-
         scheduler.run(world).map_err(ECSError::from)?;
         world.clear_borrows();
-        self.apply_deferred_commands()?;
+        let _spawned = self.apply_deferred_commands()?;
         Ok(())
     }
 
@@ -201,27 +200,27 @@ impl ECSManager {
     /// ## Notes
     /// Commands are drained and executed in FIFO order.
 
-    pub fn apply_deferred_commands(&self) -> ECSResult<()> {
+    pub fn apply_deferred_commands(&self) -> ECSResult<Vec<Entity>> {
         if self.active_iters.load(Ordering::Acquire) != 0 {
-            return Err(ECSError::from(ExecutionError::StructuralMutationDuringIteration));
+            return Err(ECSError::from(
+                ExecutionError::StructuralMutationDuringIteration
+            ));
         }
 
         let _phase = self.phase_write()?;
 
-        // Drain queue outside ECSData
         let commands = {
-            let mut queue = self
-                .deferred
-                .lock()
-                .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "deferred command queue" }))?;
+            let mut queue = self.deferred.lock().map_err(|_| {
+                ECSError::from(ExecutionError::LockPoisoned {
+                    what: "deferred command queue",
+                })
+            })?;
             std::mem::take(&mut *queue)
         };
 
         // SAFETY: We hold the exclusive phase lock (`_phase`).
         let data = unsafe { self.data_mut_unchecked(&_phase) };
-        data.apply_deferred_commands(commands)?;
-
-        Ok(())
+        data.apply_deferred_commands(commands)
     }
 
     #[inline]

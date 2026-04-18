@@ -10,10 +10,16 @@
 //! Descriptors are typically constructed via [`ComponentDesc::of::<T>()`] and finalized
 //! with a registry-assigned ID using [`ComponentDesc::with_id`]:
 //!
-//! ```rust
-//! let desc = ComponentDesc::of::<MyComponent>()
-//!     .use_gpu(true)
+//! ```
+//! use abm_framework::ComponentDesc;
+//!
+//! struct Health(f32);
+//!
+//! let desc = ComponentDesc::of::<Health>()
+//!     .use_gpu(false)
 //!     .with_id(42);
+//!
+//! assert_eq!(desc.component_id, Some(42));
 //! ```
 //!
 //! ## Design Notes

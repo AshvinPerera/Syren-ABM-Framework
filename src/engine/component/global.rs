@@ -108,7 +108,11 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
 /// * The alignment is compatible with GPU storage buffer rules.
 ///
 /// ## Example
-/// ```rust
+/// ```
+/// # #[cfg(feature = "gpu")]
+/// # {
+/// use abm_framework::GPUPod;
+///
 /// #[repr(C)]
 /// #[derive(Copy, Clone)]
 /// struct Position {
@@ -117,6 +121,7 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
 /// }
 ///
 /// unsafe impl GPUPod for Position {}
+/// # }
 /// ```
 
 #[cfg(feature = "gpu")]

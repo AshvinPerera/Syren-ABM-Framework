@@ -134,6 +134,9 @@ pub use engine::storage::{
 // Profiling public API
 pub use profiling::profiler::{init, shutdown, span, span_fmt, thread_name, next_arg, SpanGuard, SpanName, Arg};
 
+#[cfg(feature = "agents")]
+pub mod agents;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Prelude (Optional but recommended)
 // ─────────────────────────────────────────────────────────────────────────────
