@@ -22,16 +22,16 @@
 /// ## Usage
 ///
 /// ```no_run
-/// use abm_framework::profiler;
+/// use abm_framework::{init, shutdown, span};
 ///
-/// profiler::init("profile/trace.json");
+/// init("profile/trace.json");
 ///
 /// {
-///     let _g = profiler::span("Scheduler::run");
+///     let _g = span("Scheduler::run");
 ///     // run ECS / simulation tick
 /// }
 ///
-/// profiler::shutdown();
+/// shutdown();
 /// ```
 ///
 /// ## Design notes

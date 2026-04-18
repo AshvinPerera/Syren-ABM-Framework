@@ -410,11 +410,11 @@ fn dispatch_over_archetypes(
 
     // Submit
 
-    let submission = context.queue.submit(Some(encoder.finish()));
+    context.queue.submit(Some(encoder.finish()));
     context
         .device
         .poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
+            submission_index: None,
             timeout: None,
         })
         .map_err(|e| {

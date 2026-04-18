@@ -15,10 +15,19 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```
+//! use abm_framework::{Bundle, Signature};
+//!
+//! # #[derive(Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Clone)] struct Velocity { dx: f32, dy: f32 }
+//! # let position_id: abm_framework::ComponentID = 0;
+//! # let velocity_id: abm_framework::ComponentID = 1;
+//! # let mut archetype_requirements = Signature::default();
+//! # archetype_requirements.set(position_id);
+//! # archetype_requirements.set(velocity_id);
 //! let mut bundle = Bundle::new();
-//! bundle.insert(POSITION_ID, Position { x: 1.0, y: 2.0 });
-//! bundle.insert(VELOCITY_ID, Velocity { dx: 0.5, dy: 0.0 });
+//! bundle.insert(position_id, Position { x: 1.0, y: 2.0 });
+//! bundle.insert(velocity_id, Velocity { dx: 0.5, dy: 0.0 });
 //!
 //! assert!(bundle.is_complete_for(&archetype_requirements));
 //! ```
@@ -91,6 +100,16 @@ impl Bundle {
     #[inline]
     pub fn signature(&self) -> Signature {
         self.signature
+    }
+
+    /// Inserts a pre-boxed component value directly.
+    pub fn insert_boxed(&mut self, id: ComponentID, value: Box<dyn Any + Send>) {
+        self.signature.set(id);
+        if let Some((_, slot)) = self.values.iter_mut().find(|(cid, _)| *cid == id) {
+            *slot = value;
+        } else {
+            self.values.push((id, value));
+        }
     }
 }
 

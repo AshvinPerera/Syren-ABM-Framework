@@ -80,7 +80,7 @@ use crate::engine::error::{
 
 #[cfg(feature = "gpu")]
 use crate::engine::types::GPUResourceID;
-
+use crate::{ComponentID, Entity};
 #[cfg(feature = "gpu")]
 use crate::gpu::GPUResource;
 
@@ -117,7 +117,7 @@ impl<'a> ECSReference<'a> {
     }
 
     #[inline]
-    pub(crate) fn apply_deferred_commands(&self) -> ECSResult<()> {
+    pub(crate) fn apply_deferred_commands(&self) -> ECSResult<Vec<Entity>> {
         self.manager.apply_deferred_commands()
     }
 
@@ -629,5 +629,55 @@ impl ECSReference<'_> {
                 f(&a[i], &b[i], &mut c[i], &mut d[i]);
             }
         })
+    }
+
+    /// Reads a single component value for a specific entity.
+    ///
+    /// Unlike `for_each`, this performs a random-access lookup by entity
+    /// handle rather than iterating all matching archetypes. It is safe to
+    /// call both during and outside of iteration — it acquires a shared
+    /// phase lock (the same kind held by `for_each`) and delegates to
+    /// `ECSData::read_component`, which uses `try_read` on the column-level
+    /// `RwLock`.
+    ///
+    /// # Intended use
+    ///
+    /// Social networks, firm-worker relationships, predator-prey targeting,
+    /// or any system where agent A needs to read agent B's component by a
+    /// stored `Entity` handle.
+    ///
+    /// # Safety model
+    ///
+    /// * The shared phase lock prevents structural mutation.
+    /// * The column `RwLock` is acquired via `try_read`. If the calling
+    ///   system's query already holds a write lock on this component
+    ///   column, the call returns `Err(ExecutionError::BorrowConflict)`
+    ///   immediately rather than deadlocking. To read a component you are
+    ///   also writing, use the mutable slice already available in your
+    ///   `for_each` callback.
+    /// * The stored type is verified at runtime via `TypeId` before any
+    ///   raw pointer cast. A mismatch returns an error.
+    /// * The borrow tracker is not consulted. Borrow safety is enforced
+    ///   by the column lock directly.
+    ///
+    /// # Errors
+    ///
+    /// * `SpawnError::StaleEntity` — entity is dead or recycled.
+    /// * `ExecutionError::MissingComponent` — the entity's archetype does
+    ///   not contain this component.
+    /// * `ExecutionError::BorrowConflict` — the component column is
+    ///   currently write-locked by the calling system.
+    /// * `ExecutionError::InternalExecutionError` — the requested type `T`
+    ///   does not match the column's stored type, or the entity's row
+    ///   index is out of bounds.
+    /// * `ExecutionError::LockPoisoned` — column or phase lock is poisoned.
+    pub fn read_entity_component<T: 'static + Clone>(
+        &self,
+        entity: Entity,
+        component_id: ComponentID,
+    ) -> ECSResult<T> {
+        let _phase = self.manager.phase_read()?;
+        let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
+        data.read_component::<T>(entity, component_id)
     }
 }

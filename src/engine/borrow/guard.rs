@@ -20,7 +20,7 @@
 //! A guard is typically constructed by the scheduler immediately before a
 //! system runs and is dropped when the system's closure returns:
 //!
-//! ```rust
+//! ```ignore
 //! let guard = BorrowGuard::new(&tracker, &[position_id], &[velocity_id])?;
 //! // system executes here
 //! // borrows released automatically when `guard` is dropped
