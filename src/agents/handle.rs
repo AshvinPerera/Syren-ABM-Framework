@@ -91,7 +91,9 @@ impl AgentHandle {
     /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] — `id` not
     ///   in template signature.
     /// * [`AgentHandleError::ECS`] — entity is stale, component is missing
-    ///   from the archetype, or a lock is poisoned.
+    ///   from the archetype, the column is currently write-locked by the
+    ///   calling system, the requested type does not match the stored type,
+    ///   or a lock is poisoned.
     pub fn read<T: 'static + Clone>(
         &self,
         id: ComponentID,

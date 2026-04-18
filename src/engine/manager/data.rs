@@ -45,6 +45,8 @@
 //! - Component borrow rules (read/write exclusivity) are enforced at the call site.
 //! - Callbacks do not allow references to escape the closure.
 
+use std::any::TypeId;
+
 use std::sync::{
     Arc,
     RwLock,
@@ -1060,7 +1062,12 @@ impl ECSData {
             ),
         })?;
 
+        if col.element_type_id() != TypeId::of::<T>() {
+            return Err(ECSError::from(ExecutionError::InternalExecutionError));
+        }
+
         let chunk_len = arch.chunk_valid_length(loc.chunk as usize)?;
+
         let (ptr, bytes) = col.chunk_bytes(loc.chunk, chunk_len)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
