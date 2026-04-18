@@ -35,6 +35,7 @@ use crate::engine::commands::Command;
 use crate::engine::manager::ECSReference;
 use crate::engine::error::ECSResult;
 
+use super::error::{AgentError, AgentResult};
 use super::template::AgentTemplate;
 
 // ── AgentSpawner ─────────────────────────────────────────────────────────────
@@ -119,8 +120,6 @@ mod tests {
 
     #[test]
     fn spawner_set_overrides_are_stored() {
-        // Verify the set() chain compiles and stores overrides correctly by
-        // inspecting the override vec before spawn() is called.
         let tmpl = AgentTemplate::builder("A")
             .with_component::<Wealth>(0)
             .unwrap()
@@ -139,7 +138,9 @@ mod tests {
             .build();
         let spawner = tmpl.spawner()
             .set::<Wealth>(0, Wealth(1.0))
-            .set::<Wealth>(0, Wealth(2.0));
+            .unwrap()
+            .set::<Wealth>(0, Wealth(2.0))
+            .unwrap();
         assert_eq!(spawner.overrides.len(), 1);
     }
 
@@ -151,5 +152,5 @@ mod tests {
             .build();
         let err = tmpl.spawner().set::<Wealth>(99, Wealth(1.0)).unwrap_err();
         assert_eq!(err, AgentError::MissingComponent(99));
-    }    
+    }
 }

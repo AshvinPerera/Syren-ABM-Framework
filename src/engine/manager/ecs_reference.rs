@@ -637,7 +637,7 @@ impl ECSReference<'_> {
     /// handle rather than iterating all matching archetypes. It is safe to
     /// call both during and outside of iteration — it acquires a shared
     /// phase lock (the same kind held by `for_each`) and delegates to
-    /// `ECSData::read_component`, which acquires only the column-level
+    /// `ECSData::read_component`, which uses `try_read` on the column-level
     /// `RwLock`.
     ///
     /// # Intended use
@@ -649,18 +649,27 @@ impl ECSReference<'_> {
     /// # Safety model
     ///
     /// * The shared phase lock prevents structural mutation.
-    /// * The column `RwLock` prevents reading through a concurrent write on
-    ///   the same column. If the calling system's query holds a write lock
-    ///   on this component, the read will block — this is correct and
-    ///   prevents data races.
-    /// * The borrow tracker is not consulted. Borrow safety is enforced by
-    ///   the column lock directly.
+    /// * The column `RwLock` is acquired via `try_read`. If the calling
+    ///   system's query already holds a write lock on this component
+    ///   column, the call returns `Err(ExecutionError::BorrowConflict)`
+    ///   immediately rather than deadlocking. To read a component you are
+    ///   also writing, use the mutable slice already available in your
+    ///   `for_each` callback.
+    /// * The stored type is verified at runtime via `TypeId` before any
+    ///   raw pointer cast. A mismatch returns an error.
+    /// * The borrow tracker is not consulted. Borrow safety is enforced
+    ///   by the column lock directly.
     ///
     /// # Errors
     ///
     /// * `SpawnError::StaleEntity` — entity is dead or recycled.
     /// * `ExecutionError::MissingComponent` — the entity's archetype does
     ///   not contain this component.
+    /// * `ExecutionError::BorrowConflict` — the component column is
+    ///   currently write-locked by the calling system.
+    /// * `ExecutionError::InternalExecutionError` — the requested type `T`
+    ///   does not match the column's stored type, or the entity's row
+    ///   index is out of bounds.
     /// * `ExecutionError::LockPoisoned` — column or phase lock is poisoned.
     pub fn read_entity_component<T: 'static + Clone>(
         &self,
