@@ -113,6 +113,7 @@ impl<'t> AgentSpawner<'t> {
 #[cfg(test)]
 mod tests {
     use crate::agents::template::AgentTemplate;
+    use crate::agents::error::AgentError;
 
     #[allow(dead_code)]
     #[derive(Default, Clone)]
@@ -150,7 +151,7 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let err = tmpl.spawner().set::<Wealth>(99, Wealth(1.0)).unwrap_err();
-        assert_eq!(err, AgentError::MissingComponent(99));
+        let result = tmpl.spawner().set::<Wealth>(99, Wealth(1.0));
+        assert!(matches!(result, Err(AgentError::MissingComponent(99))));
     }
 }
