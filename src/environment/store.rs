@@ -276,6 +276,21 @@ impl Environment {
             .expect("dirty_keys lock poisoned")
             .clear();
     }
+
+    /// Removes the specified keys from the dirty set.
+    ///
+    /// Called after a GPU uniform buffer uploads only the keys it tracks,
+    /// leaving other keys dirty for other consumers.
+    #[inline]
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub(crate) fn clear_dirty_keys<'a>(&self, keys: impl Iterator<Item = &'a str>) {
+        let mut dirty = self.dirty_keys
+            .write()
+            .expect("dirty_keys lock poisoned");
+        for k in keys {
+            dirty.remove(k);
+        }
+    }    
 }
 
 #[cfg(test)]

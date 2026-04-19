@@ -224,7 +224,7 @@ impl GPUResource for EnvUniformBuffer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         self.gpu_buf = Some(buf);
-        self.env.clear_dirty();
+        self.env.clear_dirty_keys(self.packers.iter().map(|p| p.key.as_str()));
         Ok(())
     }
 
@@ -246,7 +246,7 @@ impl GPUResource for EnvUniformBuffer {
             })
         })?;
         ctx.queue.write_buffer(buf, 0, &self.cpu_buf);
-        self.env.clear_dirty();
+        self.env.clear_dirty_keys(self.packers.iter().map(|p| p.key.as_str()));
         Ok(())
     }
 
