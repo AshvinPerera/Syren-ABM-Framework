@@ -27,8 +27,9 @@ default = []
 gpu = ["wgpu", "bytemuck", "pollster"]
 profiling = []
 agents = []
+environment = []
 gpu_profiling = ["gpu", "profiling"]
-all = ["gpu", "agents", "profiling"]
+all = ["gpu", "agents", "environment", "profiling"]
 
 [[bench]]
 name = "spawn"

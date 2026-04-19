@@ -137,6 +137,9 @@ pub use profiling::profiler::{init, shutdown, span, span_fmt, thread_name, next_
 #[cfg(feature = "agents")]
 pub mod agents;
 
+#[cfg(feature = "environment")]
+pub mod environment;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Prelude (Optional but recommended)
 // ─────────────────────────────────────────────────────────────────────────────

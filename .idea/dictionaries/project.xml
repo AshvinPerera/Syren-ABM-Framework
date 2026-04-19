@@ -4,6 +4,7 @@
       <w>derefs</w>
       <w>dmeta</w>
       <w>grainsize</w>
+      <w>roundtrip</w>
       <w>smeta</w>
       <w>wgpu</w>
     </words>

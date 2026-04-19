@@ -137,6 +137,14 @@ pub enum ECSError {
     /// conditions. Each variant of [`InternalViolation`] maps to a specific
     /// invariant that was broken.
     Internal(InternalViolation),
+
+    /// Environment parameter store error.
+    ///
+    /// Wraps [`EnvironmentError`](crate::environment::error::EnvironmentError)
+    /// so that environment failures propagate with full diagnostic context
+    /// through scheduler and system boundaries.
+    #[cfg(feature = "environment")]
+    Environment(crate::environment::error::EnvironmentError),
 }
 
 impl std::fmt::Display for ECSError {
@@ -148,6 +156,8 @@ impl std::fmt::Display for ECSError {
             ECSError::Registry(e) => write!(f, "registry error: {e}"),
             ECSError::Attribute(e) => write!(f, "attribute error: {e}"),
             ECSError::Internal(v) => write!(f, "internal error: {v}"),
+            #[cfg(feature = "environment")]
+            ECSError::Environment(e) => write!(f, "environment error: {e}"),
         }
     }
 }
@@ -161,6 +171,8 @@ impl std::error::Error for ECSError {
             ECSError::Registry(e) => Some(e),
             ECSError::Attribute(e) => Some(e),
             ECSError::Internal(v) => Some(v),
+            #[cfg(feature = "environment")]
+            ECSError::Environment(e) => Some(e),
         }
     }
 }
@@ -182,6 +194,12 @@ impl From<AttributeError> for ECSError {
 }
 impl From<InternalViolation> for ECSError {
     fn from(v: InternalViolation) -> Self { ECSError::Internal(v) }
+}
+#[cfg(feature = "environment")]
+impl From<crate::environment::error::EnvironmentError> for ECSError {
+    fn from(e: crate::environment::error::EnvironmentError) -> Self {
+        ECSError::Environment(e)
+    }
 }
 
 /// Result type used by the ECS engine.
