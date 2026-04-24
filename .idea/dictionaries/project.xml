@@ -4,8 +4,10 @@
       <w>derefs</w>
       <w>dmeta</w>
       <w>grainsize</w>
+      <w>rbase</w>
       <w>roundtrip</w>
       <w>smeta</w>
+      <w>wbase</w>
       <w>wgpu</w>
     </words>
   </dictionary>

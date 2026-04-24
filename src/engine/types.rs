@@ -51,7 +51,7 @@
 //!
 //! - fit within cache-friendly data structures,
 //! - allow fast bitwise operations,
-//! - minimize memory overhead,
+//! - minimise memory overhead,
 //! - support large-scale simulations.
 
 
@@ -120,6 +120,25 @@ pub type ComponentID = u16;
 pub const COMPONENT_CAP: usize = 256;
 /// Number of `u64` words required to represent a full component signature.
 pub const SIGNATURE_SIZE: usize = (COMPONENT_CAP + 63) / 64;
+
+/// Opaque identifier for a non-component scheduling channel.
+///
+/// Channels are allocated by extension modules (messaging, environment) and
+/// recorded in `AccessSets::produces` / `AccessSets::consumes`. The engine
+/// treats them as opaque bitset indices; it does not interpret their meaning.
+///
+/// Assigned by [`ChannelAllocator`](crate::engine::channel_allocator::ChannelAllocator).
+/// One allocator exists per `Model`, shared by messaging and environment so
+/// both live in the same `u32` ID space and the scheduler can reason about
+/// them uniformly.
+pub type ChannelID = u32;
+
+/// Opaque identifier for a boundary resource registered on
+/// [`ECSManager`](crate::engine::manager::ECSManager).
+///
+/// Returned by `ECSManager::register_boundary` and used by systems to retrieve
+/// a typed reference to the resource via `ECSReference::boundary::<R>(id)`.
+pub type BoundaryID = u32;
 
 /// Unique identifier for a GPU resource.
 #[cfg(feature = "gpu")]

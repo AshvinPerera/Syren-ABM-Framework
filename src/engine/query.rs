@@ -286,6 +286,8 @@ impl QueryBuilder {
         AccessSets {
             read: self.signature.read,
             write: self.signature.write,
+            produces: Default::default(),
+            consumes: Default::default(),
         }
     }
 }

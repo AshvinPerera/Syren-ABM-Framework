@@ -81,6 +81,10 @@ pub use engine::systems::{FnSystem, SystemBackend, AccessSets};
 #[cfg(feature = "gpu")]
 pub use engine::systems::GpuSystem;
 
+// Channel-aware scheduling
+
+pub use engine::systems::{ChannelSet, ChannelOrder};
+
 pub use engine::scheduler::{
     Stage,
     Scheduler
@@ -101,6 +105,9 @@ pub use engine::error::{
     MoveError,
 };
 
+// User-attributable error context for boundary access.
+pub use engine::error::BoundaryAccessFailure;
+
 // Primitive type aliases and constants
 
 pub use engine::types::{
@@ -111,6 +118,9 @@ pub use engine::types::{
     ChunkID,
     CHUNK_CAP,
 };
+
+// Opaque scheduling identifiers.
+pub use engine::types::{ChannelID, BoundaryID};
 
 #[cfg(feature = "gpu")]
 pub use engine::types::{
@@ -130,6 +140,12 @@ pub use engine::storage::{
     cast_slice,
     cast_slice_mut,
 };
+
+pub use engine::boundary::BoundaryResource;
+pub use engine::activation::ActivationOrder;
+pub use engine::channel_allocator::ChannelAllocator;
+pub use engine::plan_display::PlanDisplay;
+pub use engine::dot_export::DotExport;
 
 // Profiling public API
 pub use profiling::profiler::{init, shutdown, span, span_fmt, thread_name, next_arg, SpanGuard, SpanName, Arg};

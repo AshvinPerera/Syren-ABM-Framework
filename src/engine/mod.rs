@@ -24,6 +24,12 @@ pub mod scheduler;
 pub mod manager;
 pub mod borrow;
 pub mod reduce;
+pub mod boundary;
+pub mod channel_allocator;
+pub mod activation;
+pub mod plan_display;
+pub mod dot_export;
+
 
 #[cfg(feature = "gpu")]
 pub mod dirty;

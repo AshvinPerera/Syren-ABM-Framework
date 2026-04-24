@@ -13,44 +13,35 @@
 //! | [`InvalidQueryAccess`] | Contradictory access declarations (e.g. read + write on the same component) |
 //! | [`MissingComponent`] | Query tried to fetch a component absent from the matched archetype |
 //! | [`SchedulerInvariantViolation`] | Scheduler broke its own declared access guarantees |
-//! | [`LockPoisoned`] | A thread panicked while holding a synchronization primitive |
+//! | [`SchedulerCycle`] | Channel or explicit-ordering edges form a dependency cycle |
+//! | [`LockPoisoned`] | A thread panicked while holding a synchronisation primitive |
 //! | `Gpu*` *(feature = "gpu")* | GPU unavailable, component not GPU-safe, or dispatch failure |
 //! | [`InternalExecutionError`] | Unsafe execution path invoked incorrectly |
-//!
-//! ## Guarantees
-//!
-//! All errors in this module are:
-//! - **Deterministic** — the same incorrect usage always produces the same error.
-//! - **Non-destructive** — an `ExecutionError` is never returned after a partial
-//!   mutation; the ECS state remains consistent.
-//! - **Bug indicators** — every variant reflects incorrect API usage or a
-//!   scheduling bug, never an expected runtime condition.
 //!
 //! [`StructuralMutationDuringIteration`]: ExecutionError::StructuralMutationDuringIteration
 //! [`BorrowConflict`]: ExecutionError::BorrowConflict
 //! [`InvalidQueryAccess`]: ExecutionError::InvalidQueryAccess
 //! [`MissingComponent`]: ExecutionError::MissingComponent
 //! [`SchedulerInvariantViolation`]: ExecutionError::SchedulerInvariantViolation
+//! [`SchedulerCycle`]: ExecutionError::SchedulerCycle
 //! [`LockPoisoned`]: ExecutionError::LockPoisoned
 //! [`InternalExecutionError`]: ExecutionError::InternalExecutionError
 
 use std::fmt;
 
-use crate::engine::types::{ComponentID};
+use crate::engine::types::ComponentID;
 
 #[cfg(feature = "gpu")]
-use crate::engine::types::{ArchetypeID};
+use crate::engine::types::ArchetypeID;
 
 #[cfg(feature = "gpu")]
 use crate::engine::types::GPUAccessMode;
 
 /// Kind of component access requested or held during ECS execution.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessKind {
     /// Shared, read-only access to a component.
     Read,
-
     /// Exclusive, mutable access to a component.
     Write,
 }
@@ -60,12 +51,23 @@ pub enum AccessKind {
 pub enum InvalidAccessReason {
     /// The same component was declared as both read and write.
     ReadAndWrite,
-
     /// The same component appeared multiple times in access set.
     DuplicateAccess,
-
     /// A component was declared writable while also excluded (`without`).
     WriteAndWithout,
+}
+
+/// Reason a boundary-resource access failed.
+///
+/// Carried by [`ExecutionError::BoundaryAccessFailed`] to distinguish the
+/// two user-attributable failure modes of
+/// [`ECSReference::boundary`](crate::engine::manager::ECSReference::boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryAccessFailure {
+    /// The supplied `BoundaryID` is outside the registered range.
+    OutOfRange,
+    /// The stored resource's concrete type does not match the requested `R`.
+    TypeMismatch,
 }
 
 /// Errors that occur during ECS execution and iteration.
@@ -77,72 +79,87 @@ pub enum InvalidAccessReason {
 /// * Caused by incorrect API usage
 /// * Always deterministic
 /// * Never indicate partial ECS mutation
-
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
 
     /// Attempted to mutate ECS structure while iteration was active.
     ///
-    /// This includes:
-    /// * spawning or despawning entities
-    /// * adding or removing components
-    /// * calling `with_exclusive` during iteration
-
+    /// This includes spawning, despawning, adding/removing components,
+    /// or calling `with_exclusive` during iteration.
     StructuralMutationDuringIteration,
 
     /// Component borrow rules were violated at runtime.
-    ///
-    /// This occurs when:
-    /// * two systems attempt conflicting access in parallel
-    /// * a query declares incompatible read/write sets
-    /// * the borrow tracker's spin limit was exceeded, indicating
-    ///   a probable scheduling bug
-
     BorrowConflict {
         /// Component whose borrow was violated.
         component_id: ComponentID,
-
         /// Existing access mode already held.
         held: AccessKind,
-
         /// Access mode that was requested.
         requested: AccessKind,
     },
 
     /// A query declared invalid or contradictory component access.
-    ///
-    /// Examples:
-    /// * component appears in both read and write sets
-    /// * duplicate component entries
-    /// * write access combined with `without`
-
     InvalidQueryAccess {
         /// The component whose access declaration was invalid.
         component_id: ComponentID,
-
         /// The specific reason the access was rejected.
         reason: InvalidAccessReason,
     },
 
-    /// A query attempted to access a component not present
-    /// in a matched archetype.
+    /// A system declared the same channel in both its `produces` and
+    /// `consumes` sets.
     ///
-    /// This indicates a bug in query construction or execution.
+    /// This is structurally unsound: the stage packer would place the system
+    /// in a stage where it both produces and consumes the channel in one
+    /// pass, so the `consumes` observation would read un-finalised channel
+    /// data. Always a bug in the system's `AccessSets` declaration.
+    ///
+    /// Surfaced by [`AccessSets::validate`](crate::engine::systems::AccessSets::validate)
+    /// at system-registration time.
+    SelfChannelAlias {
+        /// The channel ID that appeared in both `produces` and `consumes`.
+        channel_id: crate::engine::types::ChannelID,
+    },
 
+    /// An attempt to access a boundary resource via
+    /// [`ECSReference::boundary`](crate::engine::manager::ECSReference::boundary)
+    /// failed because the [`BoundaryID`](crate::engine::types::BoundaryID)
+    /// was out of range or the stored resource's concrete type did not
+    /// match the requested type.
+    ///
+    /// Distinct from [`InternalExecutionError`] because boundary-access
+    /// failures are caller-attributable: passing the wrong `BoundaryID` or
+    /// the wrong type parameter `R` is a user-level bug, not an engine
+    /// invariant violation.
+    BoundaryAccessFailed {
+        /// Which form the access failure took.
+        reason: BoundaryAccessFailure,
+        /// The `BoundaryID` that was passed to `ECSReference::boundary`.
+        id: crate::engine::types::BoundaryID,
+    },
+    
+    /// A query attempted to access a component not present in a matched archetype.
     MissingComponent {
         /// The missing component identifier.
         component_id: ComponentID,
     },
 
-    /// Execution was aborted because the scheduler violated
-    /// its declared access guarantees.
-
+    /// Execution was aborted because the scheduler violated its declared access guarantees.
     SchedulerInvariantViolation,
+
+    /// The scheduler detected a dependency cycle in the combined
+    /// (component-conflict + channel-ordering + explicit-ordering) partial order.
+    ///
+    /// Common cycle shape: system A produces channel X and consumes channel Y;
+    /// system B produces channel Y and consumes channel X. Break the cycle by
+    /// removing one dependency, or restructure communication through ECS
+    /// components / shared `Arc<Environment>` instead.
+    SchedulerCycle,
 
     /// A synchronization primitive was poisoned (panic while held).
     LockPoisoned {
-        /// message for the lock poisoned error
+        /// Description of the poisoned lock.
         what: &'static str,
     },
 
@@ -177,10 +194,8 @@ pub enum ExecutionError {
     GpuMissingBuffer {
         /// Archetype for which the GPU buffer was requested.
         archetype_id: ArchetypeID,
-
         /// Component whose GPU buffer was missing.
         component_id: ComponentID,
-
         /// Intended GPU access mode for the missing buffer.
         access: GPUAccessMode,
     },
@@ -192,59 +207,81 @@ pub enum ExecutionError {
 impl fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ExecutionError::StructuralMutationDuringIteration => {
-                f.write_str("structural mutation attempted during ECS iteration")
-            }
+            ExecutionError::StructuralMutationDuringIteration =>
+                f.write_str("structural mutation attempted during ECS iteration"),
 
-            ExecutionError::BorrowConflict { component_id, held, requested } => {
+            ExecutionError::BorrowConflict { component_id, held, requested } =>
+                write!(f,
+                       "borrow conflict on component {}: {:?} already held, {:?} requested",
+                       component_id, held, requested),
+
+            ExecutionError::InvalidQueryAccess { component_id, reason } =>
+                write!(f, "invalid query access for component {}: {:?}",
+                       component_id, reason),
+
+            ExecutionError::SelfChannelAlias { channel_id } => {
                 write!(
                     f,
-                    "borrow conflict on component {}: {:?} already held, {:?} requested",
-                    component_id, held, requested
+                    "system access sets alias channel {}: it appears in both produces and consumes",
+                    channel_id
                 )
             }
 
-            ExecutionError::InvalidQueryAccess { component_id, reason } => {
-                write!(
-                    f,
-                    "invalid query access for component {}: {:?}",
-                    component_id, reason
-                )
+            ExecutionError::BoundaryAccessFailed { reason, id } => {
+                match reason {
+                    BoundaryAccessFailure::OutOfRange => write!(
+                        f,
+                        "boundary access failed: BoundaryID {} is out of range",
+                        id
+                    ),
+                    BoundaryAccessFailure::TypeMismatch => write!(
+                        f,
+                        "boundary access failed: stored resource at BoundaryID {} has a different concrete type than requested",
+                        id
+                    ),
+                }
             }
+            
+            ExecutionError::MissingComponent { component_id } =>
+                write!(f, "query attempted to access missing component {}", component_id),
 
-            ExecutionError::MissingComponent { component_id } => {
-                write!(f, "query attempted to access missing component {}", component_id)
-            }
+            ExecutionError::SchedulerInvariantViolation =>
+                f.write_str("scheduler violated declared access invariants"),
 
-            ExecutionError::SchedulerInvariantViolation => {
-                f.write_str("scheduler violated declared access invariants")
-            }
+            ExecutionError::SchedulerCycle =>
+                f.write_str(
+                    "scheduler detected a dependency cycle in the system graph; \
+                     check AccessSets::produces/consumes and explicit ordering edges"
+                ),
 
-            ExecutionError::LockPoisoned { what } => write!(f, "lock poisoned: {}", what),
+            ExecutionError::LockPoisoned { what } =>
+                write!(f, "lock poisoned: {}", what),
 
-            ExecutionError::GpuNotEnabled => {
-                f.write_str("GPU execution requested but the `gpu` feature has not been enabled")
-            }
+            ExecutionError::GpuNotEnabled =>
+                f.write_str("GPU execution requested but the `gpu` feature has not been enabled"),
+
             #[cfg(feature = "gpu")]
-            ExecutionError::GpuUnsupportedComponent { component_id, name } => {
-                write!(f, "component {} ({}) is not GPU-safe (register_gpu_component required)", component_id, name)
-            }
-            #[cfg(feature = "gpu")]
-            ExecutionError::GpuInitFailed { message } => write!(f, "GPU initialization failed: {}", message),
-            #[cfg(feature = "gpu")]
-            ExecutionError::GpuDispatchFailed { message } => write!(f, "GPU dispatch failed: {}", message),
-            #[cfg(feature = "gpu")]
-            ExecutionError::GpuMissingBuffer {
-                archetype_id,
-                component_id,
-                access,
-            } => write!(
-                f,
-                "GPU dispatch failed: missing {:?} buffer for component {} in archetype {}",
-                access, component_id, archetype_id
-            ),
+            ExecutionError::GpuUnsupportedComponent { component_id, name } =>
+                write!(f,
+                       "component {} ({}) is not GPU-safe (register_gpu_component required)",
+                       component_id, name),
 
-            ExecutionError::InternalExecutionError => f.write_str("internal ECS execution error"),
+            #[cfg(feature = "gpu")]
+            ExecutionError::GpuInitFailed { message } =>
+                write!(f, "GPU initialization failed: {}", message),
+
+            #[cfg(feature = "gpu")]
+            ExecutionError::GpuDispatchFailed { message } =>
+                write!(f, "GPU dispatch failed: {}", message),
+
+            #[cfg(feature = "gpu")]
+            ExecutionError::GpuMissingBuffer { archetype_id, component_id, access } =>
+                write!(f,
+                       "GPU dispatch failed: missing {:?} buffer for component {} in archetype {}",
+                       access, component_id, archetype_id),
+
+            ExecutionError::InternalExecutionError =>
+                f.write_str("internal ECS execution error"),
         }
     }
 }

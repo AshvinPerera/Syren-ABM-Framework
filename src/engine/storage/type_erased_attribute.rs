@@ -13,12 +13,12 @@
 /// Attributes implementing this trait must internally store elements in fixed-size
 /// chunks (`CHUNK_CAP` rows per chunk), and must maintain the following invariants:
 ///
-/// - `length()` returns the total number of initialized elements.
+/// - `length()` returns the total number of initialised elements.
 /// - `chunk_count()` returns the number of allocated chunks.
-/// - `last_chunk_length()` returns the number of initialized elements in the final
+/// - `last_chunk_length()` returns the number of initialised elements in the final
 ///   chunk and must satisfy:
 ///   `0 < last_chunk_length <= CHUNK_CAP`, unless `length() == 0`.
-/// - All indices below `length()` correspond to initialized, valid elements.
+/// - All indices below `length()` correspond to initialised, valid elements.
 /// - Types exposed through `chunk_slice_ref`, `chunk_slice_mut`, and `push_dyn` must
 ///   correspond to the attribute's concrete element type.
 ///
@@ -72,10 +72,10 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// Returns the number of allocated chunks in this attribute.
     fn chunk_count(&self) -> usize;
 
-    /// Returns the total number of initialized elements stored.
+    /// Returns the total number of initialised elements stored.
     fn length(&self) -> usize;
 
-    /// Returns the number of initialized elements in the final chunk.
+    /// Returns the number of initialised elements in the final chunk.
     fn last_chunk_length(&self) -> usize;
 
     /// Returns an immutable type-erased reference for downcasting.
@@ -150,6 +150,32 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
         source_chunk: ChunkID,
         source_row: RowID
     ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError>;
+
+    /// Replaces the value at `(chunk, row)` **in place**, dropping the old
+    /// value correctly and consuming the provided boxed replacement.
+    ///
+    /// Semantics:
+    /// - No archetype transition, no growth, no swap-remove.
+    /// - The caller must guarantee `(chunk, row)` refers to an initialised
+    ///   slot (i.e., a live entity row).
+    /// - The dynamic type of `value` must match the column's stored type;
+    ///   mismatches return [`AttributeError::TypeMismatch`] and leave the
+    ///   slot untouched.
+    ///
+    /// Used by [`Command::Set`](crate::engine::commands::Command::Set) to
+    /// overwrite a single component without archetype migration. Correctly
+    /// drops the old value, so components do not need to be `Copy`.
+    ///
+    /// # Errors
+    /// - [`AttributeError::TypeMismatch`] — `value`'s type does not match `T`.
+    /// - [`AttributeError::Position`] — `(chunk, row)` is not an initialised
+    ///   slot in this attribute.
+    fn replace_slot_dyn(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+        value: Box<dyn Any>,
+    ) -> Result<(), AttributeError>;
 }
 
 impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
@@ -232,7 +258,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         }.min(valid_length);
 
         // SAFETY: The type check above guarantees `U == T`, so the pointer cast is
-        // layout-compatible. `len` is bounded by the chunk's initialized prefix.
+        // layout-compatible. `len` is bounded by the chunk's initialised prefix.
         // The slice borrows from `self`, so it cannot outlive the attribute.
         Some(unsafe {
             std::slice::from_raw_parts(
@@ -271,7 +297,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
 
         let chunk = self.chunks.get_mut(chunk_id as usize)?;
         // SAFETY: The type check above guarantees `U == T`, so the pointer cast is
-        // layout-compatible. `len` is bounded by the chunk's initialized prefix.
+        // layout-compatible. `len` is bounded by the chunk's initialised prefix.
         // We hold `&mut self`, so no aliasing mutable references can exist.
         Some(unsafe {
             std::slice::from_raw_parts_mut(
@@ -368,5 +394,76 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         };
 
         self.push_from(source_attribute, source_chunk, source_row)
+    }
+
+    /// Replaces the value at `(chunk, row)` in place.
+    ///
+    /// Drops the old value using the concrete `T`'s drop glue before writing
+    /// the new one, so this is correct for any `T: 'static + Send + Sync`
+    /// regardless of whether `T: Copy`.
+    ///
+    /// Type mismatch is reported without mutating the slot.
+    fn replace_slot_dyn(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+        value: Box<dyn Any>,
+    ) -> Result<(), AttributeError> {
+        // Type-check first; on mismatch the slot is untouched.
+        let actual_type = value.as_ref().type_id();
+        if actual_type != TypeId::of::<T>() {
+            return Err(AttributeError::TypeMismatch(TypeMismatchError {
+                expected: TypeId::of::<T>(),
+                actual: actual_type,
+                expected_name: type_name::<T>(),
+                actual_name: "",
+            }));
+        }
+
+        // Bounds check — the caller promises the slot is live, but verify.
+        if !self.valid_position(chunk, row) {
+            return Err(AttributeError::Position(
+                crate::engine::error::PositionOutOfBoundsError {
+                    chunk,
+                    row,
+                    chunks: self.chunks.len(),
+                    capacity: CHUNK_CAP,
+                    last_chunk_length: self.last_chunk_length,
+                }
+            ));
+        }
+
+        // Downcast the box so we own a `Box<T>` whose deallocation runs
+        // through the correct allocator without invoking the `Any` vtable.
+        let typed_box = match value.downcast::<T>() {
+            Ok(b) => b,
+            Err(_) => {
+                // Unreachable given the TypeId check above; defensive path.
+                return Err(AttributeError::TypeMismatch(TypeMismatchError {
+                    expected: TypeId::of::<T>(),
+                    actual: actual_type,
+                    expected_name: type_name::<T>(),
+                    actual_name: "",
+                }));
+            }
+        };
+        let new_value: T = *typed_box;
+
+        // SAFETY:
+        // - `valid_position` confirmed `(chunk, row)` refers to an
+        //   initialised slot, so `assume_init_drop` will correctly drop
+        //   the previously-stored `T` using its real drop glue.
+        // - After dropping, we write the new `T` into the now-uninit slot
+        //   via `MaybeUninit::write`, which does not drop the destination
+        //   a second time (the slot is uninit at that point).
+        // - No aliasing: we hold `&mut self`, so nothing else can see
+        //   the slot during this swap.
+        unsafe {
+            let slot = self.get_slot_unchecked(chunk as usize, row as usize);
+            slot.assume_init_drop();
+            slot.write(new_value);
+        }
+
+        Ok(())
     }
 }

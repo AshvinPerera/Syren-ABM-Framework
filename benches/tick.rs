@@ -48,6 +48,8 @@ fn tick_benchmark(c: &mut Criterion) {
                         s.set(wealth_id);
                         s
                     },
+                    produces: Default::default(),
+                    consumes: Default::default(),
                 };
 
                 scheduler.add_system(FnSystem::new(
@@ -71,6 +73,8 @@ fn tick_benchmark(c: &mut Criterion) {
                         s.set(wealth_id);
                         s
                     },
+                    produces: Default::default(),
+                    consumes: Default::default(),
                 };
 
                 scheduler.add_system(FnSystem::new(

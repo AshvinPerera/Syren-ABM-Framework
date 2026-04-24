@@ -149,7 +149,7 @@ impl<T> Attribute<T> {
     /// For the last chunk, only rows `< last_chunk_length` are initialized.
 
     #[inline]
-    fn valid_position(&self, chunk: ChunkID, row: RowID) -> bool {
+    pub(crate) fn valid_position(&self, chunk: ChunkID, row: RowID) -> bool {
         let chunk = chunk as usize;
         let row = row as usize;
         if chunk >= self.chunk_count() { return false; }
@@ -172,7 +172,7 @@ impl<T> Attribute<T> {
     /// Debug asserts fire in debug mode, but no runtime checks exist in release.
 
     #[inline]
-    unsafe fn get_slot_unchecked(&mut self, chunk: usize, row: usize) -> &mut MaybeUninit<T> {
+    pub(crate) unsafe fn get_slot_unchecked(&mut self, chunk: usize, row: usize) -> &mut MaybeUninit<T> {
         debug_assert!(chunk < self.chunk_count());
         debug_assert!(row < CHUNK_CAP);
         &mut self.chunks[chunk][row]
@@ -409,8 +409,8 @@ impl<T> Attribute<T> {
         let mut moved_from: Option<(ChunkID, RowID)> = None;
         if !is_last {
             moved_from = Some((
-                last_chunk as ChunkID,
-                last_row as RowID
+                last_chunk.try_into().map_err(|_| AttributeError::IndexOverflow("chunk"))?,
+                last_row.try_into().map_err(|_| AttributeError::IndexOverflow("row"))?,
             ));
         }
 

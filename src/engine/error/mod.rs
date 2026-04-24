@@ -110,13 +110,18 @@ pub use spawn::SpawnError;
 
 pub use move_error::MoveError;
 
-pub use execution::{AccessKind, InvalidAccessReason, ExecutionError};
+pub use execution::{
+    AccessKind,
+    InvalidAccessReason,
+    BoundaryAccessFailure,
+    ExecutionError,
+};
 
 pub use internal::InternalViolation;
 
 /// Unified error type for the public ECS API.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ECSError {
     /// Entity spawning error
     Spawn(SpawnError),

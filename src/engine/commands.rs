@@ -4,16 +4,16 @@
 //!
 //! ## Purpose
 //! Commands provide an explicit, ordered representation of structural world
-//! mutations such as entity creation, destruction, and component addition or
-//! removal.
+//! mutations such as entity creation, destruction, and component addition,
+//! removal, or in-place overwrite.
 //!
 //! Rather than mutating archetypes directly during system execution, systems
-//! emit `Command` values that are applied later at a synchronization point.
+//! emit `Command` values that are applied later at a synchronisation point.
 //! This enables safe parallel system execution and deterministic world updates.
 //!
 //! ## Design
 //! - Commands are plain data describing *what* change should occur, not *how*.
-//! - Execution is handled by a centralized command processor.
+//! - Execution is handled by a centralised command processor.
 //! - Commands may cause archetype transitions, including component row moves.
 //!
 //! ## Invariants
@@ -37,7 +37,7 @@ use crate::engine::component::Bundle;
 ///
 /// ## Purpose
 /// `Command` values describe structural changes to the ECS that are
-/// recorded and executed at a later synchronization point.
+/// recorded and executed at a later synchronisation point.
 ///
 /// This decouples system execution from direct ecs mutation, allowing
 /// safe parallelism and deterministic ordering of entity and component changes.
@@ -53,7 +53,7 @@ use crate::engine::component::Bundle;
 
 pub enum Command {
     /// Spawns a new entity into a specific archetype.
-    Spawn { 
+    Spawn {
         /// Data bundle for the new entity.
         bundle: Bundle
     },
@@ -64,9 +64,9 @@ pub enum Command {
     /// - Removes the entity from its archetype.
     /// - Releases the entity handle.
     /// - Performs swap-remove on component storage as needed
-    Despawn { 
+    Despawn {
         /// Entity to be removed from the world.
-        entity: Entity 
+        entity: Entity
     },
 
     /// Adds a component to an existing entity.
@@ -74,15 +74,15 @@ pub enum Command {
     /// ## Behaviour
     /// - Moves the entity to a new archetype that includes the added component.
     /// - The provided value is inserted into the destination archetype.    
-    Add { 
+    Add {
         /// Target entity receiving the component.        
-        entity: Entity, 
+        entity: Entity,
         /// Identifier of the component type to add.
-        component_id: ComponentID, 
+        component_id: ComponentID,
         /// Component value to insert.
         ///
         /// Must match the registered component type for `component_id`.
-        value: Box<dyn Any + Send> 
+        value: Box<dyn Any + Send>
     },
 
     /// Removes a component from an existing entity.
@@ -90,10 +90,46 @@ pub enum Command {
     /// ## Behaviour
     /// - Moves the entity to a new archetype that excludes the component.
     /// - The removed component value is dropped.    
-    Remove { 
+    Remove {
         /// Target entity losing the component.
-        entity: Entity, 
+        entity: Entity,
         /// Identifier of the component type to remove.
         component_id: ComponentID
+    },
+
+    /// Overwrites a component value on a specific entity **in place**.
+    ///
+    /// Unlike [`Add`](Command::Add), `Set` does **not** perform an archetype
+    /// transition. The entity's archetype must already contain `component_id`;
+    /// if it does not, the command is rejected with an error at apply time.
+    ///
+    /// ## Behaviour
+    /// - No archetype transition. Fails if the entity's current archetype does
+    ///   not contain the component.
+    /// - The concrete type of `value` is checked against the component registry
+    ///   at apply time; a mismatch returns an error.
+    /// - Applied during `apply_deferred_commands` under the exclusive phase lock.
+    ///
+    /// ## Visibility
+    /// A `Set` emitted in stage N is only visible to systems in stage N+1 or
+    /// later — identical to the visibility rules for `Add` / `Remove`. There
+    /// is no mid-stage visibility.
+    ///
+    /// ## Use case
+    /// Rare, low-frequency targeted writes (bankruptcy declarations,
+    /// administrative fiat, one-off resets) where emitting a message would be
+    /// overkill. **Not** a substitute for messaging in hot paths — the boxing
+    /// cost dominates above a few thousand calls per tick.
+    Set {
+        /// Target entity whose component value is being overwritten.
+        entity: Entity,
+        /// Identifier of the component type to overwrite.
+        component_id: ComponentID,
+        /// New component value.
+        ///
+        /// The dynamic type must exactly match the registered storage type for
+        /// `component_id`. A mismatch is detected at apply time and returns
+        /// `ExecutionError::InternalExecutionError`.
+        value: Box<dyn Any + Send>,
     },
 }
