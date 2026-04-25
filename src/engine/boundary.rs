@@ -49,7 +49,11 @@ use crate::engine::types::ChannelID;
 /// interior mutability on their own fields.
 pub trait BoundaryResource: Any + Send + Sync {
     /// Human-readable name for diagnostics and the plan display.
-    fn name(&self) -> &'static str;
+    ///
+    /// Returning a borrow from `&self` is permitted, so implementations that
+    /// need dynamic names can store an owned `String` and return `&self.name`
+    /// without leaking memory.
+    fn name(&self) -> &str;
 
     /// Called at the start of each tick, before any system runs.
     ///

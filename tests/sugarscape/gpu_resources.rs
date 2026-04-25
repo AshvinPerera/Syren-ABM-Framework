@@ -33,7 +33,7 @@ impl SugarGrid {
 }
 
 impl GPUResource for SugarGrid {
-    fn name(&self) -> &'static str { "SugarGrid" }
+    fn name(&self) -> &str { "SugarGrid" }
 
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()> {
         let sugar = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -245,7 +245,7 @@ fn write_buffer_u32(ctx: &GPUContext, buf: &wgpu::Buffer, data: &[u32]) {
 }
 
 impl GPUResource for AgentIntentBuffers {
-    fn name(&self) -> &'static str { "AgentIntentBuffers" }
+    fn name(&self) -> &str { "AgentIntentBuffers" }
 
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()> {
         let zeros_u32 = vec![0xffffffffu32; self.capacity];

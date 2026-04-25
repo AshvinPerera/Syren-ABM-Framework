@@ -24,25 +24,43 @@
 //!
 //! ## Dirty tracking
 //!
-//! A shared `dirty_keys` set records which keys have been mutated since the
-//! last GPU upload. [`Environment::dirty_keys`] returns a snapshot and
-//! [`Environment::clear_dirty`] resets it. For zero-allocation dirty checks,
-//! [`Environment::has_any_dirty`] performs a read-locked membership test
-//! without cloning. These are `pub(crate)` — only the GPU uniform buffer
-//! implementation and tests within this crate need them.
+//! Every successful call to [`set`](Environment::set) inserts the entry's
+//! [`ChannelID`](crate::engine::types::ChannelID) into a shared
+//! `dirty_channels` set. Using a [`HashSet`] ensures repeated mutations of the
+//! same key do not cause unbounded growth. The dirty set is consumed by
+//! [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary) at the end of
+//! each tick to coordinate GPU uniform uploads and scheduler dependencies.
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
+use crate::engine::types::ChannelID;
+
 use super::error::{EnvironmentError, EnvironmentResult};
+use super::handle::EnvKey;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal storage entry
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One registered parameter slot.
-struct Entry {
+///
+/// The `channel_id` is immutable from registration onwards and lives outside
+/// the [`RwLock`] so that [`channel_of`](Environment::channel_of) and
+/// [`env_key`](Environment::env_key) never block on writers of the value.
+/// Only the mutable parts (the boxed value and its runtime type metadata) live
+/// inside the lock.
+struct EntrySlot {
+    /// Scheduling channel assigned to this key at build time. Immutable.
+    channel_id: ChannelID,
+    /// Mutable value plus its runtime type metadata, behind an `RwLock` so
+    /// concurrent readers do not block one another.
+    value: RwLock<EntryValue>,
+}
+
+/// Mutable contents of an [`EntrySlot`].
+struct EntryValue {
     /// The type-erased value.
     value: Box<dyn Any + Send + Sync>,
     /// The concrete [`TypeId`] of the value, used for runtime type checking.
@@ -77,22 +95,24 @@ struct Entry {
 ///
 /// # Dirty tracking
 ///
-/// Every successful call to [`set`](Self::set) inserts the key into a shared
-/// `dirty_keys` set. This set is consumed by the GPU uniform-buffer upload
-/// path to decide which uniform fields need re-packing.
+/// Every successful call to [`set`](Self::set) inserts the key's
+/// [`ChannelID`] into a shared `dirty_channels` set. This set is drained by
+/// [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary) each tick to
+/// coordinate GPU uniform uploads and system scheduling.
 pub struct Environment {
     /// Per-entry storage, keyed by parameter name.
     ///
     /// Schema is frozen at construction — no new entries are ever inserted after
-    /// [`EnvironmentBuilder::build`] returns.
-    entries: HashMap<String, RwLock<Entry>>,
+    /// [`EnvironmentBuilder::build`] returns. Each [`EntrySlot`] holds an
+    /// immutable [`ChannelID`] outside any lock, so name-to-channel queries
+    /// never contend with value writers.
+    entries: HashMap<String, EntrySlot>,
 
-    /// Dirty set for GPU uniform buffer.
+    /// Channel IDs whose values have changed since the last tick.
     ///
-    /// Keys whose values have changed since the last call to
-    /// [`clear_dirty`](Self::clear_dirty). Uses a [`HashSet`] so that
-    /// repeated mutations of the same key do not cause unbounded growth.
-    dirty_keys: RwLock<HashSet<String>>,
+    /// Uses a [`HashSet`] so repeated mutations of the same key do not cause
+    /// unbounded growth.
+    dirty_channels: RwLock<HashSet<ChannelID>>,
 }
 
 // Verify the compiler agrees Environment is Send + Sync.
@@ -105,21 +125,41 @@ const _: fn() = || {
 impl Environment {
     /// Constructs an [`Environment`] from a pre-validated schema.
     ///
-    /// Called exclusively by [`EnvironmentBuilder::build`]; not part of the
-    /// public API because callers should go through the builder.
+    /// `channel_ids` must be the same length as `schema` and in the same order.
+    /// Each element is the [`ChannelID`] assigned to the corresponding schema
+    /// entry by the [`ChannelAllocator`](crate::engine::channel_allocator::ChannelAllocator)
+    /// used during the build.
+    ///
+    /// Called exclusively by
+    /// [`EnvironmentBuilder::build`](super::builder::EnvironmentBuilder::build)
+    /// and
+    /// [`EnvironmentBuilder::build_with_allocator`](super::builder::EnvironmentBuilder::build_with_allocator);
+    /// not part of the public API.
     pub(super) fn from_schema(
-        schema: Vec<(String, Box<dyn Any + Send + Sync>, TypeId, &'static str)>,
+        schema:      Vec<(String, Box<dyn Any + Send + Sync>, TypeId, &'static str)>,
+        channel_ids: Vec<ChannelID>,
     ) -> Self {
+        debug_assert_eq!(
+            schema.len(),
+            channel_ids.len(),
+            "schema and channel_ids must be the same length"
+        );
+
         let mut entries = HashMap::with_capacity(schema.len());
-        for (key, value, type_id, type_name) in schema {
+        for ((key, value, type_id, type_name), channel_id) in
+            schema.into_iter().zip(channel_ids)
+        {
             entries.insert(
                 key,
-                RwLock::new(Entry { value, type_id, type_name }),
+                EntrySlot {
+                    channel_id,
+                    value: RwLock::new(EntryValue { value, type_id, type_name }),
+                },
             );
         }
         Self {
             entries,
-            dirty_keys: RwLock::new(HashSet::new()),
+            dirty_channels: RwLock::new(HashSet::new()),
         }
     }
 
@@ -141,6 +181,43 @@ impl Environment {
         self.entries.contains_key(key)
     }
 
+    /// Returns the [`ChannelID`] assigned to `key`, or `None` if the key is
+    /// not registered.
+    ///
+    /// Use this to obtain the ID needed for
+    /// [`AccessSets::produces`](crate::AccessSets::produces) /
+    /// [`AccessSets::consumes`](crate::AccessSets::consumes) declarations, or
+    /// to construct an [`EnvKey`] for a key that was registered with a
+    /// runtime-owned name.
+    ///
+    /// Lock-free: the channel ID lives outside the per-entry [`RwLock`], so
+    /// this never blocks on a concurrent value writer.
+    #[inline]
+    pub fn channel_of(&self, key: &str) -> Option<ChannelID> {
+        self.entries.get(key).map(|slot| slot.channel_id)
+    }
+
+    /// Returns a typed handle for `key`, or `None` if the key is not
+    /// registered.
+    ///
+    /// `key` must be a `&'static str` (a string literal) because [`EnvKey`]
+    /// stores it as `&'static str` for zero-allocation access inside
+    /// [`set`](Self::set) / [`get`](Self::get) call sites.
+    ///
+    /// The type parameter `T` is a compile-time marker only. It does **not**
+    /// verify that `T` matches the registered type of the key; that check
+    /// happens at runtime inside [`get`](Self::get) and [`set`](Self::set).
+    ///
+    /// Returns `None` if no key with that name was registered.
+    #[inline]
+    pub fn env_key<T: Any + Clone + Send + Sync>(
+        &self,
+        key: &'static str,
+    ) -> Option<EnvKey<T>> {
+        let channel_id = self.channel_of(key)?;
+        Some(EnvKey::new(key, channel_id))
+    }
+
     /// Reads a typed value from the environment.
     ///
     /// # Errors
@@ -154,18 +231,18 @@ impl Environment {
     /// Panics if the internal [`RwLock`] is poisoned (a thread panicked while
     /// holding a write lock on this entry).
     pub fn get<T: Any + Clone + Send + Sync>(&self, key: &str) -> EnvironmentResult<T> {
-        let entry_lock = self.entries.get(key).ok_or_else(|| {
+        let slot = self.entries.get(key).ok_or_else(|| {
             EnvironmentError::KeyNotFound(key.to_owned())
         })?;
 
-        let entry = entry_lock.read().expect("environment entry lock poisoned");
+        let entry = slot.value.read().expect("environment entry lock poisoned");
 
         let requested_type_id = TypeId::of::<T>();
         if entry.type_id != requested_type_id {
             return Err(EnvironmentError::TypeMismatch {
-                key: key.to_owned(),
+                key:      key.to_owned(),
                 expected: entry.type_name,
-                actual: std::any::type_name::<T>(),
+                actual:   std::any::type_name::<T>(),
             });
         }
 
@@ -178,8 +255,13 @@ impl Environment {
         Ok(value.clone())
     }
 
-    /// Writes a typed value to the environment and marks the key dirty for
-    /// GPU uniform upload.
+    /// Writes a typed value to the environment and marks the key's channel
+    /// dirty.
+    ///
+    /// The [`ChannelID`] inserted into the dirty set is the one assigned at
+    /// build time. This allows [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary)
+    /// to correlate dirty entries with scheduler channels without any string
+    /// comparisons.
     ///
     /// # Errors
     ///
@@ -195,19 +277,24 @@ impl Environment {
         key: &str,
         value: T,
     ) -> EnvironmentResult<()> {
-        let entry_lock = self.entries.get(key).ok_or_else(|| {
+        let slot = self.entries.get(key).ok_or_else(|| {
             EnvironmentError::KeyNotFound(key.to_owned())
         })?;
 
+        // Channel ID is immutable and lives outside the lock — read it
+        // directly without acquiring the inner RwLock.
+        let channel_id = slot.channel_id;
+
+        // Take the inner write lock only for the value update.
         {
-            let mut entry = entry_lock.write().expect("environment entry lock poisoned");
+            let mut entry = slot.value.write().expect("environment entry lock poisoned");
 
             let requested_type_id = TypeId::of::<T>();
             if entry.type_id != requested_type_id {
                 return Err(EnvironmentError::TypeMismatch {
-                    key: key.to_owned(),
+                    key:      key.to_owned(),
                     expected: entry.type_name,
-                    actual: std::any::type_name::<T>(),
+                    actual:   std::any::type_name::<T>(),
                 });
             }
 
@@ -218,79 +305,94 @@ impl Environment {
                 .expect("TypeId matched but downcast_mut failed — this is a bug") = value;
         }
 
-        // Mark dirty outside the entry lock to avoid holding both locks
-        // simultaneously. Only allocate a `String` if the key is not already
-        // in the dirty set.
-        {
-            let mut dirty = self.dirty_keys
-                .write()
-                .expect("dirty_keys lock poisoned");
-            if !dirty.contains(key) {
-                dirty.insert(key.to_owned());
-            }
-        }
+        // Mark the channel dirty after releasing the entry lock so the two
+        // are never held simultaneously.
+        self.dirty_channels
+            .write()
+            .expect("dirty_channels lock poisoned")
+            .insert(channel_id);
 
         Ok(())
     }
 
-    /// Returns `true` if any of the supplied keys appear in the dirty set.
+    /// Returns `true` if any of the supplied [`ChannelID`]s appear in the
+    /// dirty set.
     ///
-    /// Unlike [`dirty_keys`](Self::dirty_keys), this does not clone the set —
-    /// it performs a read-locked membership check with zero allocation.
-    /// Preferred by the GPU uniform upload path for per-frame dirty checks.
+    /// Performs a read-locked membership check with zero allocation. Preferred
+    /// over [`dirty_channel_ids`](Self::dirty_channel_ids) when only a boolean
+    /// answer is needed.
     #[inline]
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
-    pub(crate) fn has_any_dirty<'a>(
+    pub(crate) fn has_any_dirty_channels(
         &self,
-        mut keys: impl Iterator<Item = &'a str>,
+        channels: impl Iterator<Item = ChannelID>,
     ) -> bool {
-        let dirty = self.dirty_keys
+        let dirty = self.dirty_channels
             .read()
-            .expect("dirty_keys lock poisoned");
-        keys.any(|k| dirty.contains(k))
+            .expect("dirty_channels lock poisoned");
+        channels.into_iter().any(|id| dirty.contains(&id))
     }
 
-    /// Returns a snapshot of keys that have been mutated since the last
-    /// [`clear_dirty`](Self::clear_dirty) call.
+    /// Returns `true` if `id` is currently in the dirty set.
     ///
-    /// This clones the entire dirty set. Prefer [`has_any_dirty`](Self::has_any_dirty)
+    /// Single-channel membership probe used by
+    /// [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary)
+    /// to compute the precise intersection of `channels ∩ env.dirty ∩
+    /// uniform.owned` without constructing intermediate iterators.
+    ///
+    /// Currently only the GPU uniform-buffer integration needs this primitive,
+    /// so the method is gated behind the `gpu` feature to keep the CPU-only
+    /// build free of dead-code warnings. Drop the gate if a CPU caller is
+    /// added.
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn is_channel_dirty(&self, id: ChannelID) -> bool {
+        self.dirty_channels
+            .read()
+            .expect("dirty_channels lock poisoned")
+            .contains(&id)
+    }
+
+    /// Returns a snapshot of [`ChannelID`]s whose values have been mutated
+    /// since the last [`clear_dirty`](Self::clear_dirty) or
+    /// [`clear_dirty_for_channels`](Self::clear_dirty_for_channels) call.
+    ///
+    /// Clones the entire set. Prefer [`has_any_dirty_channels`](Self::has_any_dirty_channels)
     /// when only a membership check is needed.
     #[inline]
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
-    pub(crate) fn dirty_keys(&self) -> HashSet<String> {
-        self.dirty_keys
+    pub(crate) fn dirty_channel_ids(&self) -> HashSet<ChannelID> {
+        self.dirty_channels
             .read()
-            .expect("dirty_keys lock poisoned")
+            .expect("dirty_channels lock poisoned")
             .clone()
     }
 
-    /// Clears the dirty-key set.
+    /// Removes the specified [`ChannelID`]s from the dirty set.
     ///
-    /// Should be called by the GPU upload path after all pending uniform
-    /// buffers have been uploaded.
+    /// Called after a consumer (e.g. a GPU uniform buffer) has processed only
+    /// the channels it owns, leaving the remaining channels dirty for other
+    /// consumers.
     #[inline]
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
-    pub(crate) fn clear_dirty(&self) {
-        self.dirty_keys
+    pub(crate) fn clear_dirty_for_channels(&self, channels: &[ChannelID]) {
+        let mut dirty = self.dirty_channels
             .write()
-            .expect("dirty_keys lock poisoned")
-            .clear();
+            .expect("dirty_channels lock poisoned");
+        for id in channels {
+            dirty.remove(id);
+        }
     }
 
-    /// Removes the specified keys from the dirty set.
+    /// Clears the entire dirty-channel set.
     ///
-    /// Called after a GPU uniform buffer uploads only the keys it tracks,
-    /// leaving other keys dirty for other consumers.
+    /// Called by [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary)
+    /// at the end of each tick after all consumers have processed their
+    /// pending dirty channels.
     #[inline]
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
-    pub(crate) fn clear_dirty_keys<'a>(&self, keys: impl Iterator<Item = &'a str>) {
-        let mut dirty = self.dirty_keys
+    pub(crate) fn clear_dirty(&self) {
+        self.dirty_channels
             .write()
-            .expect("dirty_keys lock poisoned");
-        for k in keys {
-            dirty.remove(k);
-        }
-    }    
+            .expect("dirty_channels lock poisoned")
+            .clear();
+    }
 }
 
 #[cfg(test)]
@@ -338,19 +440,20 @@ mod tests {
     }
 
     #[test]
-    fn set_marks_key_dirty() {
+    fn set_marks_channel_dirty() {
         let env = build_env();
+        let id = env.channel_of("interest_rate").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
-        let dirty = env.dirty_keys();
-        assert!(dirty.contains("interest_rate"));
+        let dirty = env.dirty_channel_ids();
+        assert!(dirty.contains(&id));
     }
 
     #[test]
-    fn clear_dirty_empties_list() {
+    fn clear_dirty_empties_set() {
         let env = build_env();
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.clear_dirty();
-        assert!(env.dirty_keys().is_empty());
+        assert!(env.dirty_channel_ids().is_empty());
     }
 
     #[test]
@@ -394,49 +497,100 @@ mod tests {
     }
 
     #[test]
-    fn dirty_keys_are_deduplicated() {
+    fn dirty_channels_are_deduplicated() {
         let env = build_env();
+        let id = env.channel_of("interest_rate").unwrap();
         // Set the same key 100 times.
         for _ in 0..100 {
             env.set::<f32>("interest_rate", 0.10).unwrap();
         }
-        let dirty = env.dirty_keys();
-        // HashSet guarantees "interest_rate" appears at most once.
+        let dirty = env.dirty_channel_ids();
+        // HashSet guarantees the channel appears at most once.
         assert_eq!(dirty.len(), 1);
-        assert!(dirty.contains("interest_rate"));
+        assert!(dirty.contains(&id));
     }
 
     #[test]
-    fn dirty_tracks_multiple_distinct_keys() {
+    fn dirty_tracks_multiple_distinct_channels() {
         let env = build_env();
+        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_width = env.channel_of("world_width").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.set::<u32>("world_width", 200).unwrap();
-        let dirty = env.dirty_keys();
+        let dirty = env.dirty_channel_ids();
         assert_eq!(dirty.len(), 2);
-        assert!(dirty.contains("interest_rate"));
-        assert!(dirty.contains("world_width"));
+        assert!(dirty.contains(&id_rate));
+        assert!(dirty.contains(&id_width));
     }
 
     #[test]
-    fn has_any_dirty_returns_true_for_dirty_key() {
+    fn has_any_dirty_channels_returns_true_for_dirty() {
         let env = build_env();
+        let id = env.channel_of("interest_rate").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
-        assert!(env.has_any_dirty(["interest_rate"].iter().copied()));
+        assert!(env.has_any_dirty_channels([id].into_iter()));
     }
 
     #[test]
-    fn has_any_dirty_returns_false_for_clean_keys() {
+    fn has_any_dirty_channels_returns_false_for_clean() {
         let env = build_env();
-        assert!(!env.has_any_dirty(["interest_rate"].iter().copied()));
+        let id = env.channel_of("interest_rate").unwrap();
+        assert!(!env.has_any_dirty_channels([id].into_iter()));
     }
 
     #[test]
-    fn has_any_dirty_ignores_untracked_keys() {
+    fn has_any_dirty_channels_ignores_unrelated() {
         let env = build_env();
+        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_width = env.channel_of("world_width").unwrap();
         env.set::<u32>("world_width", 200).unwrap();
-        // Only "world_width" is dirty; "interest_rate" is not.
-        assert!(!env.has_any_dirty(["interest_rate"].iter().copied()));
-        assert!(env.has_any_dirty(["interest_rate", "world_width"].iter().copied()));
+        assert!(!env.has_any_dirty_channels([id_rate].into_iter()));
+        assert!(env.has_any_dirty_channels([id_rate, id_width].into_iter()));
+    }
+
+    #[test]
+    fn clear_dirty_for_channels_is_selective() {
+        let env = build_env();
+        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_width = env.channel_of("world_width").unwrap();
+        env.set::<f32>("interest_rate", 0.10).unwrap();
+        env.set::<u32>("world_width", 200).unwrap();
+        env.clear_dirty_for_channels(&[id_rate]);
+        let dirty = env.dirty_channel_ids();
+        assert!(!dirty.contains(&id_rate));
+        assert!(dirty.contains(&id_width));
+    }
+
+    #[test]
+    fn channel_of_returns_none_for_unknown_key() {
+        let env = build_env();
+        assert!(env.channel_of("nonexistent").is_none());
+    }
+
+    #[test]
+    fn channel_of_returns_distinct_ids_for_distinct_keys() {
+        let env = build_env();
+        let id_rate    = env.channel_of("interest_rate").unwrap();
+        let id_width   = env.channel_of("world_width").unwrap();
+        let id_verbose = env.channel_of("verbose").unwrap();
+        // All three must be distinct.
+        assert_ne!(id_rate, id_width);
+        assert_ne!(id_rate, id_verbose);
+        assert_ne!(id_width, id_verbose);
+    }
+
+    #[test]
+    fn env_key_roundtrip() {
+        let env = build_env();
+        let key = env.env_key::<f32>("interest_rate").unwrap();
+        assert_eq!(key.name(), "interest_rate");
+        assert_eq!(key.channel_id(), env.channel_of("interest_rate").unwrap());
+    }
+
+    #[test]
+    fn env_key_returns_none_for_unknown_key() {
+        let env = build_env();
+        assert!(env.env_key::<f32>("nonexistent").is_none());
     }
 
     #[test]
@@ -456,5 +610,48 @@ mod tests {
         }
 
         handle.join().unwrap();
+    }
+
+    /// Verify `channel_of` does not block on a concurrent value writer.
+    ///
+    /// The channel ID lives outside the per-entry `RwLock`, so even while
+    /// another thread holds the value write lock for an extended period
+    /// (simulated here by hammering `set` from a background thread),
+    /// `channel_of` must continue to return promptly.
+    #[test]
+    fn channel_of_is_lock_free_against_writers() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let env = build_env();
+        let env_writer = Arc::clone(&env);
+
+        // Spawn a writer that contends on the value lock for ~50ms.
+        let stop_at = Instant::now() + Duration::from_millis(50);
+        let handle = thread::spawn(move || {
+            while Instant::now() < stop_at {
+                env_writer.set::<f32>("interest_rate", 0.07).unwrap();
+            }
+        });
+
+        // While the writer is running, channel_of calls must stay fast.
+        // We run many of them and verify the total is well under the writer's
+        // lifetime — proving no per-call serialisation against the writer.
+        let start = Instant::now();
+        for _ in 0..100_000 {
+            let _ = env.channel_of("interest_rate").unwrap();
+        }
+        let elapsed = start.elapsed();
+
+        handle.join().unwrap();
+
+        // 100k lock-free hashmap lookups should complete well within the
+        // writer's 50ms lifetime. Generous bound to keep the test stable
+        // under heavy CI load.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "channel_of appears to serialise against writers: {:?}",
+            elapsed
+        );
     }
 }

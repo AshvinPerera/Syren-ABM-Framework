@@ -14,15 +14,13 @@
 //!
 //! ## System names
 //!
-//! The [`System`] trait requires `fn name(&self) -> &'static str`. To support
-//! dynamic names (e.g. generated from configuration), [`EnvironmentSystem::new`]
-//! accepts `impl Into<String>` and interns the result into a global string
-//! table. Repeated calls with the same name return the same `&'static str`
-//! without allocating, bounding memory usage in batch-run scenarios where the
-//! same system names are registered across many isolated `Model` instances.
+//! The [`System`] trait declares `fn name(&self) -> &str`, allowing
+//! implementors to return a borrow from `&self`. [`EnvironmentSystem`] stores
+//! its name as an owned [`String`] and returns it by reference. Dynamic names
+//! generated from configuration are supported with no leak — every system
+//! drops its name when the system itself is dropped.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::engine::error::ECSResult;
 use crate::engine::manager::ECSReference;
@@ -30,30 +28,6 @@ use crate::engine::systems::{AccessSets, System, SystemBackend};
 use crate::engine::types::SystemID;
 
 use super::store::Environment;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Name interning
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Interns a system name string, returning a `&'static str`.
-///
-/// If the same name has been interned before, returns the existing reference
-/// without allocating. This bounds memory usage when the same system names
-/// are registered across many isolated `Model` instances in batch runs.
-fn intern_system_name(name: String) -> &'static str {
-    static INTERNED: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
-
-    let mut guard = INTERNED.lock().expect("system name intern lock poisoned");
-    let set = guard.get_or_insert_with(HashSet::new);
-
-    if let Some(&existing) = set.get(name.as_str()) {
-        return existing;
-    }
-
-    let leaked: &'static str = Box::leak(name.into_boxed_str());
-    set.insert(leaked);
-    leaked
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EnvironmentSystem
@@ -82,8 +56,8 @@ fn intern_system_name(name: String) -> &'static str {
 /// ```
 pub struct EnvironmentSystem {
     id: SystemID,
-    /// Interned `&'static str` for [`System::name`] trait compliance.
-    name_static: &'static str,
+    /// Owned name string; returned by reference from [`System::name`].
+    name: String,
     access: AccessSets,
     env: Arc<Environment>,
     func: Box<
@@ -98,9 +72,9 @@ impl EnvironmentSystem {
     ///
     /// - `id`: Unique system identifier (must not collide with any other system
     ///   in the same scheduler).
-    /// - `name`: Human-readable name used for debugging and profiling. The name
-    ///   is interned into a global string table; repeated calls with the same
-    ///   name reuse the same allocation.
+    /// - `name`: Human-readable name used for debugging and profiling. Stored
+    ///   as an owned [`String`] and returned by reference from
+    ///   [`System::name`]. Dynamic names are supported with no leak.
     /// - `access`: Declared component read/write sets; used by the scheduler for
     ///   conflict detection. If the system only reads/writes the environment and
     ///   does not touch ECS components, pass [`AccessSets::default()`].
@@ -116,10 +90,9 @@ impl EnvironmentSystem {
     where
         F: Fn(Arc<Environment>, ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static,
     {
-        let name_static: &'static str = intern_system_name(name.into());
         Self {
             id,
-            name_static,
+            name: name.into(),
             access,
             env,
             func: Box::new(func),
@@ -134,8 +107,8 @@ impl System for EnvironmentSystem {
     }
 
     #[inline]
-    fn name(&self) -> &'static str {
-        self.name_static
+    fn name(&self) -> &str {
+        &self.name
     }
 
     #[inline]
@@ -231,9 +204,10 @@ mod tests {
         assert_eq!(env.get::<i32>("val").unwrap(), 99);
     }
 
-    /// Verify that interning deduplicates identical system names.
+    /// Verify that two systems with the same name don't conflict —
+    /// each owns its own name allocation.
     #[test]
-    fn intern_deduplicates_names() {
+    fn duplicate_names_are_independent() {
         let env = EnvironmentBuilder::new()
             .register::<f32>("x", 0.0)
             .build();
@@ -245,7 +219,9 @@ mod tests {
             1u16, "SharedName", AccessSets::default(), Arc::clone(&env), |_, _| Ok(()),
         );
 
-        // Same pointer — the name was interned, not allocated twice.
-        assert!(std::ptr::eq(a.name(), b.name()));
+        assert_eq!(a.name(), "SharedName");
+        assert_eq!(b.name(), "SharedName");
+        // Each system holds its own owned String — pointers are distinct.
+        assert!(!std::ptr::eq(a.name().as_ptr(), b.name().as_ptr()));
     }
 }

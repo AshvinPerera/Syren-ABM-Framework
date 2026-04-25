@@ -85,6 +85,16 @@ fn make_registry() -> Arc<RwLock<ComponentRegistry>> {
     registry
 }
 
+/// Total agent population for this test.
+///
+/// This is a single source of truth used for both the spawn loop and any
+/// per-agent GPU buffer allocations (e.g. [`AgentIntentBuffers`]). Keeping
+/// these in lockstep avoids out-of-bounds storage-buffer writes on the GPU,
+/// which on D3D12/Vulkan typically surface asynchronously as
+/// `Device::poll: device lost` (the queue is killed by the driver, then the
+/// next blocking poll observes the loss).
+const N_AGENTS: u32 = 1_000_000;
+
 #[test]
 fn sugarscape_basic_abm() -> ECSResult<()> {
     // ─── PROFILER SETUP ───────────────────────────────────────────────────────
@@ -131,8 +141,16 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
         let sugar_grid_id = world.register_gpu_resource(
             SugarGrid::new(w as u32, h as u32, capacity)
         )?;
+        // IMPORTANT: AgentIntentBuffers must be sized to the maximum agent
+        // population, not a smaller arbitrary constant. Compute shaders are
+        // dispatched with `entity_len` equal to the live agent count, and
+        // every thread `i < entity_len` writes to `agent_target[i]` /
+        // `agent_score[i]`. If the buffer is shorter than `entity_len`,
+        // those writes go out-of-bounds, the GPU queue is killed
+        // asynchronously, and the next `Device::poll` panics with
+        // "Parent device is lost".
         let intent_id = world.register_gpu_resource(
-            AgentIntentBuffers::new(200_000)
+            AgentIntentBuffers::new(N_AGENTS as usize)
         )?;
 
         (sugar_grid_id, intent_id)
@@ -151,7 +169,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
         let alive_id = reg.id_of::<Alive>().unwrap();
 
         world.with_exclusive(|_| {
-            for i in 0..1_000_000u32 {
+            for i in 0..N_AGENTS {
                 let mut seed = i as u64 ^ 0x9E3779B97F4A7C15;
                 let x = rng_range(&mut seed, w as u32) as i32;
                 let y = rng_range(&mut seed, h as u32) as i32;

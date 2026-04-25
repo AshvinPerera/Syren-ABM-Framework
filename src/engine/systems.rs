@@ -371,8 +371,13 @@ pub trait GpuSystem {
 
 pub trait System: Send + Sync {
     /// Human-readable name (used for debugging/profiling).
+    ///
+    /// The default implementation returns `std::any::type_name_of_val(self)`,
+    /// which is `&'static str` and coerces to the `&str` return type. Concrete
+    /// implementations may return a borrow from `&self` to support dynamic
+    /// names without leaking memory.
     #[inline]
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         std::any::type_name_of_val(self)
     }
 
@@ -454,7 +459,7 @@ where
     + Sync
     + 'static,
 {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.name
     }
 

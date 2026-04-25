@@ -9,10 +9,29 @@
 //!
 //! ### Dirty detection
 //!
-//! The buffer checks [`Environment::has_any_dirty`] on every
-//! [`GPUResource::upload`] call via [`EnvUniformBuffer::is_cpu_dirty`]. If any
-//! of the tracked keys have been mutated since the last upload, the CPU buffer
-//! is repacked from the current environment values and written to the GPU buffer.
+//! The buffer maintains an internal `cpu_dirty` flag that is independent of the
+//! environment's dirty channel set. The flag is set to `true` by
+//! [`mark_cpu_dirty`](EnvUniformBuffer::mark_cpu_dirty), which is called by
+//! [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary) when
+//! it detects that at least one channel owned by this buffer appears in the
+//! environment's dirty set.
+//!
+//! On every [`GPUResource::upload`] call, the buffer checks `cpu_dirty`. If the
+//! flag is set, the CPU buffer is repacked from current environment values and
+//! written to the GPU buffer, then the flag is cleared.
+//!
+//! The decoupling between the environment dirty set and the `cpu_dirty` flag
+//! ensures that [`EnvironmentBoundary::finalise`] can clear the environment's
+//! dirty channels immediately (preventing double-marking) without racing with
+//! the GPU upload path, which may execute later in the same tick.
+//!
+//! ### Channel ownership
+//!
+//! Each included key is assigned a [`ChannelID`] at
+//! [`EnvUniformBufferBuilder::include`] time by querying
+//! [`Environment::channel_of`]. [`EnvUniformBuffer::owns_channel`] performs a
+//! linear scan over the included packers to answer ownership queries from
+//! [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary).
 //!
 //! ### Struct layout
 //!
@@ -38,23 +57,6 @@
 //! the types they pack into the uniform buffer are supported by their target
 //! GPU and shader profile.
 //!
-//! ## Integration with `GPUResourceRegistry`
-//!
-//! The [`GPUResourceRegistry`](crate::gpu::GPUResourceRegistry) tracks its own
-//! `cpu_dirty` flag per resource and only calls [`GPUResource::upload`] when
-//! that flag is set. [`Environment::set`] marks keys in the environment's
-//! internal dirty set but does **not** notify the registry. The owning layer
-//! (typically `Model`) must bridge these two systems:
-//!
-//! ```ignore
-//! // Before each GPU boundary stage:
-//! if env_uniform.is_cpu_dirty() {
-//!     gpu_registry.mark_cpu_dirty(env_uniform_resource_id);
-//! }
-//! ```
-//!
-//! Failing to do this will cause GPU shaders to read stale uniform values.
-//!
 //! ## Feature flag
 //!
 //! This entire module is gated behind the `gpu` feature.
@@ -67,6 +69,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 use crate::engine::error::{ECSResult, ECSError, ExecutionError};
+use crate::engine::types::ChannelID;
 use crate::gpu::{GPUResource, GPUBindingDesc, GPUContext};
 
 use super::store::Environment;
@@ -111,17 +114,19 @@ unsafe impl EnvPod for i8 {}
 /// A type-erased closure that reads one environment key and appends its raw
 /// bytes to a `Vec<u8>`.
 struct Packer {
-    key: String,
-    byte_size: usize,
+    key:        String,
+    channel_id: ChannelID,
+    byte_size:  usize,
     pack: Box<dyn Fn(&Environment, &mut Vec<u8>) -> Result<(), String> + Send + Sync>,
 }
 
 impl Packer {
-    fn new<T: EnvPod>(key: impl Into<String>) -> Self {
+    fn new<T: EnvPod>(key: impl Into<String>, channel_id: ChannelID) -> Self {
         let key = key.into();
         let key2 = key.clone();
         Self {
             byte_size: std::mem::size_of::<T>(),
+            channel_id,
             pack: Box::new(move |env, buf| {
                 let v: T = env.get::<T>(&key2).map_err(|e| e.to_string())?;
                 let bytes: &[u8] = bytemuck::bytes_of(&v);
@@ -141,8 +146,11 @@ impl Packer {
 /// buffer.
 ///
 /// Parameters included must implement [`EnvPod`] (i.e., `bytemuck::Pod`).
-/// The buffer reports itself as dirty when any included key changes via
-/// [`Environment::set`], allowing the owning layer to trigger a re-upload.
+/// The buffer is marked dirty by
+/// [`mark_cpu_dirty`](Self::mark_cpu_dirty), which is driven by
+/// [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary) whenever it
+/// detects that one of the channels owned by this buffer has been written in
+/// the current tick.
 ///
 /// # Usage
 ///
@@ -161,6 +169,10 @@ pub struct EnvUniformBuffer {
     cpu_buf: Vec<u8>,
     /// GPU buffer (created lazily by `create_gpu`).
     gpu_buf: Option<wgpu::Buffer>,
+    /// Set to `true` by [`mark_cpu_dirty`](Self::mark_cpu_dirty); cleared
+    /// to `false` after a successful [`GPUResource::upload`] or
+    /// [`GPUResource::create_gpu`].
+    cpu_dirty: bool,
 }
 
 impl EnvUniformBuffer {
@@ -182,10 +194,30 @@ impl EnvUniformBuffer {
         self.packers.iter().map(|p| p.byte_size).sum()
     }
 
-    /// Returns `true` if any tracked key appears in the environment's dirty
-    /// set. Uses [`Environment::has_any_dirty`] for a zero-allocation check.
-    fn any_tracked_dirty(&self) -> bool {
-        self.env.has_any_dirty(self.packers.iter().map(|p| p.key.as_str()))
+    /// Marks the CPU buffer as dirty, indicating that a re-pack and GPU upload
+    /// are required on the next [`GPUResource::upload`] call.
+    ///
+    /// Called by
+    /// [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary)
+    /// when it detects that at least one channel owned by this buffer appears
+    /// in the environment's dirty channel set. This decouples the environment's
+    /// dirty-tracking lifecycle (cleared per-tick by the boundary) from the
+    /// GPU upload lifecycle (cleared only after a successful upload).
+    pub fn mark_cpu_dirty(&mut self) {
+        self.cpu_dirty = true;
+    }
+
+    /// Returns `true` if this buffer owns the given [`ChannelID`].
+    ///
+    /// Used by
+    /// [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary)
+    /// to decide which uniform buffers need to be marked dirty after detecting
+    /// channel writes in the environment's dirty set.
+    ///
+    /// Performs a linear scan over the included packers; this is acceptable
+    /// since the number of keys per uniform buffer is typically small.
+    pub fn owns_channel(&self, id: ChannelID) -> bool {
+        self.packers.iter().any(|p| p.channel_id == id)
     }
 
     /// Repacks `cpu_buf` from current environment values.
@@ -206,11 +238,16 @@ impl EnvUniformBuffer {
 }
 
 impl GPUResource for EnvUniformBuffer {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "EnvUniformBuffer"
     }
 
     /// Allocates the GPU uniform buffer and performs an initial upload.
+    ///
+    /// After the initial upload the environment's dirty channels for all
+    /// included keys are cleared and `cpu_dirty` is reset, so that no
+    /// redundant upload occurs on the first call to
+    /// [`GPUResource::upload`] in the first tick.
     ///
     /// # Errors
     ///
@@ -219,16 +256,24 @@ impl GPUResource for EnvUniformBuffer {
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()> {
         self.repack()?;
         let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("EnvUniformBuffer"),
+            label:    Some("EnvUniformBuffer"),
             contents: &self.cpu_buf,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage:    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         self.gpu_buf = Some(buf);
-        self.env.clear_dirty_keys(self.packers.iter().map(|p| p.key.as_str()));
+        // Clear dirty tracking for all channels owned by this buffer so that
+        // any marks created before GPU initialisation don't trigger a
+        // redundant upload on the first tick.
+        let owned: Vec<ChannelID> = self.packers.iter().map(|p| p.channel_id).collect();
+        self.env.clear_dirty_for_channels(&owned);
+        self.cpu_dirty = false;
         Ok(())
     }
 
-    /// Uploads the CPU buffer to the GPU if any tracked key is dirty.
+    /// Uploads the CPU buffer to the GPU if the `cpu_dirty` flag is set.
+    ///
+    /// The flag is cleared after a successful upload. If the flag is not set
+    /// this call is a no-op.
     ///
     /// # Errors
     ///
@@ -236,7 +281,7 @@ impl GPUResource for EnvUniformBuffer {
     /// - The GPU buffer has not been created yet (call [`create_gpu`] first).
     /// - A tracked key cannot be read from the environment.
     fn upload(&mut self, ctx: &GPUContext) -> ECSResult<()> {
-        if !self.is_cpu_dirty() {
+        if !self.cpu_dirty {
             return Ok(());
         }
         self.repack()?;
@@ -246,7 +291,7 @@ impl GPUResource for EnvUniformBuffer {
             })
         })?;
         ctx.queue.write_buffer(buf, 0, &self.cpu_buf);
-        self.env.clear_dirty_keys(self.packers.iter().map(|p| p.key.as_str()));
+        self.cpu_dirty = false;
         Ok(())
     }
 
@@ -276,7 +321,7 @@ impl GPUResource for EnvUniformBuffer {
             })
         })?;
         out.push(wgpu::BindGroupEntry {
-            binding: base,
+            binding:  base,
             resource: buf.as_entire_binding(),
         });
         Ok(())
@@ -292,13 +337,13 @@ impl GPUResource for EnvUniformBuffer {
 }
 
 impl EnvUniformBuffer {
-    /// Returns `true` if any tracked environment key has changed since the
-    /// last upload.
+    /// Returns `true` if [`mark_cpu_dirty`](Self::mark_cpu_dirty) has been
+    /// called since the last upload.
     ///
     /// The [`GPUResourceRegistry`](crate::gpu::GPUResourceRegistry) tracks its
-    /// own per-resource dirty flag from the environment's internal
-    /// dirty set. The owning layer must query this method and call
-    /// [`GPUResourceRegistry::mark_cpu_dirty`] to bridge the two:
+    /// own per-resource dirty flag. The owning layer must query this method and
+    /// call [`GPUResourceRegistry::mark_cpu_dirty`] to bridge the two when
+    /// integrating the uniform buffer into a registry-based upload pipeline:
     ///
     /// ```ignore
     /// if env_uniform.is_cpu_dirty() {
@@ -306,7 +351,7 @@ impl EnvUniformBuffer {
     /// }
     /// ```
     pub fn is_cpu_dirty(&self) -> bool {
-        self.any_tracked_dirty()
+        self.cpu_dirty
     }
 }
 
@@ -320,7 +365,7 @@ impl EnvUniformBuffer {
 /// [`include`](Self::include)d. The WGSL `struct` on the shader side must
 /// match this order and layout exactly.
 pub struct EnvUniformBufferBuilder {
-    env: Arc<Environment>,
+    env:     Arc<Environment>,
     packers: Vec<Packer>,
 }
 
@@ -328,18 +373,24 @@ impl EnvUniformBufferBuilder {
     /// Includes a typed key in the uniform buffer.
     ///
     /// Keys are packed in the order they are included here; the WGSL `struct`
-    /// must match.
+    /// must match. The key's [`ChannelID`] is resolved from the environment at
+    /// this point and stored in the packer so that
+    /// [`EnvUniformBuffer::owns_channel`] can answer ownership queries without
+    /// a string comparison.
     ///
     /// # Panics
     ///
-    /// Panics in debug mode if `key` is not registered in the environment.
+    /// Panics if `key` is not registered in the environment. This is a build-
+    /// time misconfiguration and is always checked regardless of the `debug`
+    /// profile.
     pub fn include<T: EnvPod>(mut self, key: impl Into<String>) -> Self {
         let key = key.into();
-        debug_assert!(
-            self.env.contains_key(&key),
-            "EnvUniformBuffer: key '{key}' is not registered in the environment"
-        );
-        self.packers.push(Packer::new::<T>(key));
+        let channel_id = self.env.channel_of(&key).unwrap_or_else(|| {
+            panic!(
+                "EnvUniformBuffer: key '{key}' is not registered in the environment"
+            )
+        });
+        self.packers.push(Packer::new::<T>(key, channel_id));
         self
     }
 
@@ -381,10 +432,11 @@ impl EnvUniformBufferBuilder {
     pub fn build(self) -> EnvUniformBuffer {
         let byte_size: usize = self.packers.iter().map(|p| p.byte_size).sum();
         EnvUniformBuffer {
-            env: self.env,
-            packers: self.packers,
-            cpu_buf: Vec::with_capacity(byte_size),
-            gpu_buf: None,
+            env:       self.env,
+            packers:   self.packers,
+            cpu_buf:   Vec::with_capacity(byte_size),
+            gpu_buf:   None,
+            cpu_dirty: false,
         }
     }
 }
@@ -444,25 +496,38 @@ mod tests {
     }
 
     #[test]
-    fn dirty_detection_after_set() {
+    fn is_cpu_dirty_starts_false() {
         let env = make_env();
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
             .build();
-        // env is clean initially.
         assert!(!buf.is_cpu_dirty());
-        env.set::<f32>("rate", 0.10).unwrap();
+    }
+
+    #[test]
+    fn mark_cpu_dirty_sets_flag() {
+        let env = make_env();
+        let mut buf = EnvUniformBuffer::builder(Arc::clone(&env))
+            .include::<f32>("rate")
+            .build();
+        assert!(!buf.is_cpu_dirty());
+        buf.mark_cpu_dirty();
         assert!(buf.is_cpu_dirty());
     }
 
     #[test]
-    fn untracked_key_does_not_trigger_dirty() {
+    fn owns_channel_tracks_included_keys() {
         let env = make_env();
+        let id_rate = env.channel_of("rate").unwrap();
+        let id_size = env.channel_of("size").unwrap();
+
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
             .build();
-        // Mutate a key NOT tracked by this buffer.
-        env.set::<u32>("size", 200).unwrap();
-        assert!(!buf.is_cpu_dirty());
+
+        assert!(buf.owns_channel(id_rate));
+        assert!(!buf.owns_channel(id_size));
+        // An arbitrary ID that was never registered.
+        assert!(!buf.owns_channel(999));
     }
 }

@@ -12,6 +12,19 @@
 //!     .build();
 //! ```
 //!
+//! When constructing an environment as part of a larger model that already
+//! owns a [`ChannelAllocator`], use [`build_with_allocator`] instead so that
+//! the environment's channel IDs do not collide with those assigned to other
+//! subsystems:
+//!
+//! ```ignore
+//! let mut alloc = ChannelAllocator::new();
+//! let env = EnvironmentBuilder::new()
+//!     .register::<f32>("interest_rate", 0.05)
+//!     .build_with_allocator(&mut alloc);
+//! // alloc.peek_next() is now past the IDs consumed by the environment.
+//! ```
+//!
 //! ## Design
 //!
 //! The builder collects schema entries as a `Vec` in declaration order.
@@ -20,6 +33,11 @@
 //! immediately — this catches configuration bugs at setup time rather than
 //! producing silent runtime type-mismatch errors later.
 //!
+//! Each key is assigned a monotonically increasing [`ChannelID`] during
+//! [`build`] / [`build_with_allocator`]. The IDs are stored inside the
+//! environment's entries and are used by the scheduler to order writers before
+//! readers of the same key.
+//!
 //! [`build`](EnvironmentBuilder::build) consumes `self` and returns an
 //! `Arc<Environment>` so that the store can be shared across systems,
 //! the GPU uniform buffer, and the scheduler with zero cloning of values.
@@ -27,13 +45,15 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
+use crate::engine::channel_allocator::ChannelAllocator;
+
 use super::store::Environment;
 
 /// Fluent builder for [`Environment`].
 ///
 /// Call [`register`](Self::register) for each simulation parameter, then
-/// [`build`](Self::build) to freeze the schema and obtain a shared
-/// [`Environment`] handle.
+/// [`build`](Self::build) (or [`build_with_allocator`](Self::build_with_allocator))
+/// to freeze the schema and obtain a shared [`Environment`] handle.
 pub struct EnvironmentBuilder {
     /// Ordered entries: `(key, initial_value, TypeId, type_name)`.
     ///
@@ -54,7 +74,8 @@ impl EnvironmentBuilder {
     /// the last default value wins. This is useful in generated or conditional
     /// setup code where a parameter may be overridden.
     ///
-    /// Must be called before [`build`](Self::build).
+    /// Must be called before [`build`](Self::build) or
+    /// [`build_with_allocator`](Self::build_with_allocator).
     ///
     /// # Type parameters
     ///
@@ -98,10 +119,40 @@ impl EnvironmentBuilder {
 
     /// Freezes the schema and returns a shared [`Environment`].
     ///
+    /// Each registered key is assigned a [`ChannelID`](crate::engine::types::ChannelID)
+    /// from a freshly created [`ChannelAllocator`] starting at `0`. This is
+    /// suitable for tests and standalone environments that do not share a
+    /// channel namespace with other subsystems.
+    ///
+    /// When the environment must coexist with other channel-bearing resources
+    /// in a shared model, use [`build_with_allocator`](Self::build_with_allocator)
+    /// so the IDs are drawn from a shared allocator and cannot overlap.
+    ///
     /// After this call, no new keys can be added. The returned `Arc` can be
     /// cloned and shared across systems, uniform buffers, and the scheduler.
     pub fn build(self) -> Arc<Environment> {
-        Arc::new(Environment::from_schema(self.schema))
+        let mut alloc = ChannelAllocator::new();
+        self.build_with_allocator(&mut alloc)
+    }
+
+    /// Freezes the schema and returns a shared [`Environment`], drawing
+    /// [`ChannelID`](crate::engine::types::ChannelID)s from a caller-supplied
+    /// [`ChannelAllocator`].
+    ///
+    /// Each registered key consumes exactly one ID from `allocator` in
+    /// declaration order. After this call, `allocator.peek_next()` is advanced
+    /// past all IDs assigned to the environment. Subsequent calls to
+    /// `alloc` on the same allocator will produce IDs that do not collide with
+    /// any environment key.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic. If the allocator's counter would overflow `u32::MAX`
+    /// the allocator itself will panic (see
+    /// [`ChannelAllocator::alloc`](crate::engine::channel_allocator::ChannelAllocator::alloc)).
+    pub fn build_with_allocator(self, allocator: &mut ChannelAllocator) -> Arc<Environment> {
+        let channel_ids: Vec<_> = self.schema.iter().map(|_| allocator.alloc()).collect();
+        Arc::new(Environment::from_schema(self.schema, channel_ids))
     }
 }
 
@@ -171,5 +222,56 @@ mod tests {
         let env2 = Arc::clone(&env);
         env.set::<i32>("counter", 42).unwrap();
         assert_eq!(env2.get::<i32>("counter").unwrap(), 42);
+    }
+
+    #[test]
+    fn build_assigns_channel_ids_in_order() {
+        let env = EnvironmentBuilder::new()
+            .register::<f32>("a", 0.0)
+            .register::<u32>("b", 0)
+            .register::<bool>("c", false)
+            .build();
+
+        let id_a = env.channel_of("a").unwrap();
+        let id_b = env.channel_of("b").unwrap();
+        let id_c = env.channel_of("c").unwrap();
+
+        // build() starts from 0; IDs must be sequential.
+        assert_eq!(id_a, 0);
+        assert_eq!(id_b, 1);
+        assert_eq!(id_c, 2);
+    }
+
+    #[test]
+    fn build_with_allocator_continues_from_offset() {
+        let mut alloc = ChannelAllocator::new();
+        // Consume the first two IDs for some other subsystem.
+        let _ = alloc.alloc();
+        let _ = alloc.alloc();
+
+        let env = EnvironmentBuilder::new()
+            .register::<f32>("rate", 0.05)
+            .register::<u32>("width", 100)
+            .build_with_allocator(&mut alloc);
+
+        // Environment IDs should start at 2.
+        assert_eq!(env.channel_of("rate").unwrap(), 2);
+        assert_eq!(env.channel_of("width").unwrap(), 3);
+
+        // Allocator should now be past all four IDs.
+        assert_eq!(alloc.peek_next(), 4);
+    }
+
+    #[test]
+    fn build_with_allocator_does_not_overlap_with_subsequent_allocs() {
+        let mut alloc = ChannelAllocator::new();
+        let env = EnvironmentBuilder::new()
+            .register::<f32>("rate", 0.05)
+            .build_with_allocator(&mut alloc);
+
+        let env_id   = env.channel_of("rate").unwrap();
+        let other_id = alloc.alloc();
+
+        assert_ne!(env_id, other_id);
     }
 }

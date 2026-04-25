@@ -70,7 +70,9 @@
 pub mod error;
 pub mod store;
 pub mod builder;
+pub mod handle;
 pub mod system;
+pub mod boundary;
 
 #[cfg(feature = "gpu")]
 pub mod uniform;
@@ -78,7 +80,9 @@ pub mod uniform;
 pub use error::{EnvironmentError, EnvironmentResult};
 pub use store::Environment;
 pub use builder::EnvironmentBuilder;
+pub use handle::EnvKey;
 pub use system::EnvironmentSystem;
+pub use boundary::EnvironmentBoundary;
 
 #[cfg(feature = "gpu")]
 pub use uniform::{EnvUniformBuffer, EnvPod};

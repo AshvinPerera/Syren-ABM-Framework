@@ -34,6 +34,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     if (i >= params.entity_len || alive[i] == 0u) { return; }
 
+    // Defensive: bail if the intent buffer is undersized for this dispatch.
+    if (i >= arrayLength(&agent_target)) { return; }
+
     let tgt = agent_target[i];
     if (tgt == INVALID) { return; }
 
