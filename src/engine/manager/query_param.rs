@@ -41,9 +41,9 @@
 //! - uphold the aliasing guarantees required by `cast_slice` /
 //!   `cast_slice_mut`.
 
+use crate::engine::error::InternalViolation;
 use crate::engine::query::BuiltQuery;
 use crate::engine::storage::{cast_slice, cast_slice_mut};
-use crate::engine::error::InternalViolation;
 
 /// Marker for a read-only component parameter in a tuple-based query.
 pub struct Read<T>(std::marker::PhantomData<T>);
@@ -81,11 +81,7 @@ pub unsafe trait QueryParam: Send + Sync {
     ///   for the corresponding component,
     /// - all byte slices represent the same number of entities,
     /// - read/write aliasing rules are upheld by the borrow tracker.
-    unsafe fn for_each_chunk(
-        reads: &[&[u8]],
-        writes: &mut [&mut [u8]],
-        f: &Self::Closure,
-    );
+    unsafe fn for_each_chunk(reads: &[&[u8]], writes: &mut [&mut [u8]], f: &Self::Closure);
 }
 
 // --- Implementations for single Read/Write ---
@@ -104,11 +100,7 @@ unsafe impl<A: 'static + Send + Sync> QueryParam for Read<A> {
         Ok(())
     }
 
-    unsafe fn for_each_chunk(
-        reads: &[&[u8]],
-        _writes: &mut [&mut [u8]],
-        f: &Self::Closure,
-    ) {
+    unsafe fn for_each_chunk(reads: &[&[u8]], _writes: &mut [&mut [u8]], f: &Self::Closure) {
         // SAFETY: Caller guarantees the byte slice is correctly typed for A.
         let a = unsafe { cast_slice::<A>(reads[0].as_ptr(), reads[0].len()) };
         for v in a {
@@ -131,11 +123,7 @@ unsafe impl<A: 'static + Send + Sync> QueryParam for Write<A> {
         Ok(())
     }
 
-    unsafe fn for_each_chunk(
-        _reads: &[&[u8]],
-        writes: &mut [&mut [u8]],
-        f: &Self::Closure,
-    ) {
+    unsafe fn for_each_chunk(_reads: &[&[u8]], writes: &mut [&mut [u8]], f: &Self::Closure) {
         // SAFETY: Caller guarantees the byte slice is correctly typed for A.
         let a = unsafe { cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len()) };
         for v in a {

@@ -78,7 +78,8 @@ impl Runtime {
         registry: &ComponentRegistry,
     ) -> ECSResult<()> {
         let ctx = &self.context;
-        self.mirror.download_signature(ctx, archetypes_mut, pending, registry)
+        self.mirror
+            .download_signature(ctx, archetypes_mut, pending, registry)
     }
 }
 
@@ -105,9 +106,11 @@ fn runtime() -> ECSResult<MutexGuard<'static, Runtime>> {
         }
     };
 
-    mutex
-        .lock()
-        .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "gpu runtime" }))
+    mutex.lock().map_err(|_| {
+        ECSError::from(ExecutionError::LockPoisoned {
+            what: "gpu runtime",
+        })
+    })
 }
 
 /// Synchronize pending GPU downloads into ECS storage.
@@ -121,7 +124,8 @@ pub fn sync_pending_to_cpu(
         data.gpu_resources_mut().ensure_created(&run_time.context)?;
 
         if affected_resources.is_empty() {
-            data.gpu_resources_mut().download_pending(&run_time.context)?;
+            data.gpu_resources_mut()
+                .download_pending(&run_time.context)?;
         } else {
             data.gpu_resources_mut()
                 .download_pending_filtered(&run_time.context, affected_resources)?;
@@ -136,8 +140,11 @@ pub fn sync_pending_to_cpu(
         };
 
         let registry_arc = data.registry().clone();
-        let registry = registry_arc.read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "component registry" }))?;
+        let registry = registry_arc.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component registry",
+            })
+        })?;
 
         let archetypes_mut: &mut [Archetype] = data.archetypes_mut();
         run_time.download_pending_into(archetypes_mut, &pending, &registry)?;
@@ -160,7 +167,12 @@ pub fn execute_gpu_system(
 
         #[cfg(debug_assertions)]
         {
-            for (r, w) in access.read.components.iter().zip(access.write.components.iter()) {
+            for (r, w) in access
+                .read
+                .components
+                .iter()
+                .zip(access.write.components.iter())
+            {
                 debug_assert_eq!(r & w, 0, "AccessSets overlap after normalization");
             }
         }
@@ -176,15 +188,26 @@ pub fn execute_gpu_system(
         data.gpu_resources_mut().upload_dirty(&run_time.context)?;
 
         let registry_arc = data.registry().clone();
-        let registry = registry_arc.read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "component registry" }))?;
+        let registry = registry_arc.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component registry",
+            })
+        })?;
 
         {
             let archetypes: &[Archetype] = data.archetypes();
 
             {
-                let Runtime { context, mirror, .. } = &mut *run_time;
-                mirror.upload_signature_dirty_chunks(context, archetypes, &union, data.gpu_dirty_chunks(), &registry)?;
+                let Runtime {
+                    context, mirror, ..
+                } = &mut *run_time;
+                mirror.upload_signature_dirty_chunks(
+                    context,
+                    archetypes,
+                    &union,
+                    data.gpu_dirty_chunks(),
+                    &registry,
+                )?;
             }
 
             dispatch_over_archetypes(
@@ -345,14 +368,12 @@ fn dispatch_over_archetypes(
             };
 
             if recreate {
-                *params_buffer = Some(
-                    context.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("abm_params"),
-                        size,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }),
-                );
+                *params_buffer = Some(context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("abm_params"),
+                    size,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
             }
 
             let params_buf = params_buffer.as_ref().unwrap();
@@ -365,32 +386,30 @@ fn dispatch_over_archetypes(
                 resource: params_buf.as_entire_binding(),
             });
 
-            let bind_group0 = context.device.create_bind_group(
-                &wgpu::BindGroupDescriptor {
+            let bind_group0 = context
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("abm_bind_group_group0"),
                     layout: bgl0,
                     entries: &entries0,
-                },
-            );
+                });
 
             // Bind group 1 (GPU resources)
 
             let bind_group1 = if let Some(bgl1) = bgl1_opt {
                 let mut entries1 = Vec::with_capacity(resource_layout.len());
 
-                gpu_resources.append_bind_group_entries(
-                    &resource_ids,
-                    0,
-                    &mut entries1,
-                )?;
+                gpu_resources.append_bind_group_entries(&resource_ids, 0, &mut entries1)?;
 
-                Some(context.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
-                        label: Some("abm_bind_group_group1"),
-                        layout: bgl1,
-                        entries: &entries1,
-                    },
-                ))
+                Some(
+                    context
+                        .device
+                        .create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("abm_bind_group_group1"),
+                            layout: bgl1,
+                            entries: &entries1,
+                        }),
+                )
             } else {
                 None
             };
@@ -471,7 +490,12 @@ fn is_signature_empty(sig: &Signature) -> bool {
 
 #[inline]
 fn normalize_access_sets(access: &mut crate::engine::systems::AccessSets) {
-    for (r, w) in access.read.components.iter_mut().zip(access.write.components.iter()) {
+    for (r, w) in access
+        .read
+        .components
+        .iter_mut()
+        .zip(access.write.components.iter())
+    {
         *r &= !*w;
     }
 }

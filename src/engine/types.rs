@@ -54,7 +54,6 @@
 //! - minimise memory overhead,
 //! - support large-scale simulations.
 
-
 /// Bit-width type used for compile-time layout calculations.
 pub type Bits = u8;
 
@@ -87,7 +86,11 @@ const _: [(); 1] = [(); (INDEX_BITS < ENTITY_BITS) as usize];
 const _: [(); 1] = [(); (SHARD_BITS < ENTITY_BITS) as usize];
 
 const fn mask(bits: Bits) -> EntityID {
-    if bits == 0 { 0 } else { ((1 as EntityID) << bits) - 1 }
+    if bits == 0 {
+        0
+    } else {
+        ((1 as EntityID) << bits) - 1
+    }
 }
 
 /// Mask selecting the index portion of an [`EntityID`].

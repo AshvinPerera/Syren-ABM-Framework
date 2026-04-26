@@ -39,7 +39,7 @@
 
 use std::sync::Arc;
 
-use crate::engine::boundary::BoundaryResource;
+use crate::engine::boundary::{BoundaryContext, BoundaryResource};
 use crate::engine::error::ECSResult;
 use crate::engine::types::ChannelID;
 
@@ -70,6 +70,11 @@ use super::uniform::EnvUniformBuffer;
 pub struct EnvironmentBoundary {
     env: Arc<Environment>,
 
+    /// Cached snapshot of the channel IDs owned by `env`, returned from
+    /// [`channels`](BoundaryResource::channels). Populated at construction
+    /// time so the engine can index them once at boundary registration.
+    owned_channels: Vec<ChannelID>,
+
     #[cfg(feature = "gpu")]
     uniform: Option<EnvUniformBuffer>,
 }
@@ -81,11 +86,18 @@ impl EnvironmentBoundary {
     /// [`with_uniform`](Self::with_uniform) (requires `gpu` feature) to attach
     /// one.
     pub fn new(env: Arc<Environment>) -> Self {
+        let owned_channels = env.all_channel_ids();
         Self {
             env,
+            owned_channels,
             #[cfg(feature = "gpu")]
             uniform: None,
         }
+    }
+
+    /// Returns the environment owned by this boundary.
+    pub fn environment(&self) -> &Arc<Environment> {
+        &self.env
     }
 
     /// Attaches a GPU uniform buffer to this boundary.
@@ -119,9 +131,13 @@ impl BoundaryResource for EnvironmentBoundary {
         "EnvironmentBoundary"
     }
 
+    fn channels(&self) -> &[ChannelID] {
+        &self.owned_channels
+    }
+
     /// No per-tick reset is needed: environment values are persistent and the
     /// dirty channel set is managed by `finalise` and `end_tick`.
-    fn begin_tick(&mut self) -> ECSResult<()> {
+    fn begin_tick(&mut self, _ctx: &mut BoundaryContext<'_>) -> ECSResult<()> {
         Ok(())
     }
 
@@ -141,7 +157,11 @@ impl BoundaryResource for EnvironmentBoundary {
     /// 3. Removes `channels` from the environment's dirty set via
     ///    [`Environment::clear_dirty_for_channels`]. IDs that are not in the
     ///    dirty set are silently ignored.
-    fn finalise(&mut self, channels: &[ChannelID]) -> ECSResult<()> {
+    fn finalise(
+        &mut self,
+        _ctx: &mut BoundaryContext<'_>,
+        channels: &[ChannelID],
+    ) -> ECSResult<()> {
         // Restrict to channels that are actually dirty in the environment.
         // `channels` may include IDs from other subsystems that share the same
         // channel namespace.
@@ -154,9 +174,9 @@ impl BoundaryResource for EnvironmentBoundary {
             // Mark dirty only if a uniform-owned channel is *actually* dirty
             // in the environment. Owning a channel that appears in `channels`
             // but was not written this tick must not trigger an upload.
-            let touched_owned = channels.iter().any(|&id|
-                uniform.owns_channel(id) && self.env.is_channel_dirty(id)
-            );
+            let touched_owned = channels
+                .iter()
+                .any(|&id| uniform.owns_channel(id) && self.env.is_channel_dirty(id));
             if touched_owned {
                 uniform.mark_cpu_dirty();
             }
@@ -173,7 +193,7 @@ impl BoundaryResource for EnvironmentBoundary {
     /// stage). If a GPU uniform buffer is attached and any of those remaining
     /// channels are owned by it, the buffer is marked dirty before the set is
     /// cleared.
-    fn end_tick(&mut self) -> ECSResult<()> {
+    fn end_tick(&mut self, _ctx: &mut BoundaryContext<'_>) -> ECSResult<()> {
         let remaining = self.env.dirty_channel_ids();
         if remaining.is_empty() {
             return Ok(());
@@ -201,9 +221,9 @@ impl BoundaryResource for EnvironmentBoundary {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
     use crate::environment::builder::EnvironmentBuilder;
+    use std::sync::Arc;
 
     fn make_boundary() -> (Arc<Environment>, EnvironmentBoundary) {
         let env = EnvironmentBuilder::new()
@@ -218,24 +238,32 @@ mod tests {
     fn begin_tick_is_noop() {
         let (_env, mut boundary) = make_boundary();
         // begin_tick must not fail and must not alter environment state.
-        boundary.begin_tick().unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.begin_tick(&mut ctx).unwrap();
     }
 
     #[test]
     fn finalise_clears_specified_dirty_channels() {
         let (env, mut boundary) = make_boundary();
-        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_rate = env.channel_of("interest_rate").unwrap();
         let id_width = env.channel_of("world_width").unwrap();
 
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.set::<u32>("world_width", 200).unwrap();
 
         // Finalise only the interest_rate channel.
-        boundary.finalise(&[id_rate]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_rate]).unwrap();
 
         let dirty = env.dirty_channel_ids();
-        assert!(!dirty.contains(&id_rate),  "interest_rate should have been cleared");
-        assert!(dirty.contains(&id_width),  "world_width should still be dirty");
+        assert!(
+            !dirty.contains(&id_rate),
+            "interest_rate should have been cleared"
+        );
+        assert!(
+            dirty.contains(&id_width),
+            "world_width should still be dirty"
+        );
     }
 
     #[test]
@@ -247,7 +275,8 @@ mod tests {
 
         // Pass a completely unrelated channel ID to finalise.
         let unrelated_id: ChannelID = 9999;
-        boundary.finalise(&[unrelated_id]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[unrelated_id]).unwrap();
 
         // interest_rate must still be dirty — finalise saw only an unrelated ID.
         let dirty = env.dirty_channel_ids();
@@ -260,7 +289,8 @@ mod tests {
         let id_rate = env.channel_of("interest_rate").unwrap();
 
         // Do not set any values — env is clean.
-        boundary.finalise(&[id_rate]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_rate]).unwrap();
 
         assert!(env.dirty_channel_ids().is_empty());
     }
@@ -272,7 +302,8 @@ mod tests {
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.set::<u32>("world_width", 200).unwrap();
 
-        boundary.end_tick().unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.end_tick(&mut ctx).unwrap();
 
         assert!(env.dirty_channel_ids().is_empty());
     }
@@ -281,21 +312,23 @@ mod tests {
     fn end_tick_noop_when_already_clean() {
         let (env, mut boundary) = make_boundary();
         // No sets — nothing to drain.
-        boundary.end_tick().unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.end_tick(&mut ctx).unwrap();
         assert!(env.dirty_channel_ids().is_empty());
     }
 
     #[test]
     fn finalise_then_end_tick_leaves_env_clean() {
         let (env, mut boundary) = make_boundary();
-        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_rate = env.channel_of("interest_rate").unwrap();
         let id_width = env.channel_of("world_width").unwrap();
 
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.set::<u32>("world_width", 200).unwrap();
 
-        boundary.finalise(&[id_rate]).unwrap();
-        boundary.end_tick().unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_rate]).unwrap();
+        boundary.end_tick(&mut ctx).unwrap();
 
         // After end_tick, the remaining world_width channel must also be gone.
         assert!(env.dirty_channel_ids().is_empty());
@@ -309,26 +342,25 @@ mod tests {
 
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_tests {
-    use std::sync::Arc;
     use super::*;
     use crate::environment::builder::EnvironmentBuilder;
     use crate::environment::uniform::EnvUniformBuffer;
+    use std::sync::Arc;
 
     /// Build an env with two keys, attach a uniform that tracks only `rate`.
     /// Returns `(env, boundary, rate_id, width_id)`.
     fn make_gpu_boundary() -> (Arc<Environment>, EnvironmentBoundary, ChannelID, ChannelID) {
         let env = EnvironmentBuilder::new()
-            .register::<f32>("rate",  0.05_f32)
+            .register::<f32>("rate", 0.05_f32)
             .register::<u32>("width", 100_u32)
             .build();
-        let id_rate  = env.channel_of("rate").unwrap();
+        let id_rate = env.channel_of("rate").unwrap();
         let id_width = env.channel_of("width").unwrap();
 
         let uniform = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
             .build();
-        let boundary = EnvironmentBoundary::new(Arc::clone(&env))
-            .with_uniform(uniform);
+        let boundary = EnvironmentBoundary::new(Arc::clone(&env)).with_uniform(uniform);
 
         (env, boundary, id_rate, id_width)
     }
@@ -341,10 +373,13 @@ mod gpu_tests {
         assert!(!boundary.uniform().unwrap().is_cpu_dirty());
 
         env.set::<f32>("rate", 0.10).unwrap();
-        boundary.finalise(&[id_rate]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_rate]).unwrap();
 
-        assert!(boundary.uniform().unwrap().is_cpu_dirty(),
-            "uniform should be marked dirty when its owned channel was written");
+        assert!(
+            boundary.uniform().unwrap().is_cpu_dirty(),
+            "uniform should be marked dirty when its owned channel was written"
+        );
     }
 
     /// A non-tracked key is written, finalise is called for that key only:
@@ -354,10 +389,13 @@ mod gpu_tests {
         let (env, mut boundary, _id_rate, id_width) = make_gpu_boundary();
 
         env.set::<u32>("width", 200).unwrap();
-        boundary.finalise(&[id_width]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_width]).unwrap();
 
-        assert!(!boundary.uniform().unwrap().is_cpu_dirty(),
-            "uniform should NOT be marked dirty when only an untracked channel was written");
+        assert!(
+            !boundary.uniform().unwrap().is_cpu_dirty(),
+            "uniform should NOT be marked dirty when only an untracked channel was written"
+        );
     }
 
     /// Regression test for the intersection fix.
@@ -374,11 +412,14 @@ mod gpu_tests {
         // Only `width` is actually written; `rate` is in the produces set
         // (passed to finalise) but was not written this tick.
         env.set::<u32>("width", 200).unwrap();
-        boundary.finalise(&[id_rate, id_width]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_rate, id_width]).unwrap();
 
-        assert!(!boundary.uniform().unwrap().is_cpu_dirty(),
+        assert!(
+            !boundary.uniform().unwrap().is_cpu_dirty(),
             "uniform should stay clean: rate is in `channels` but was not written, \
-             and width was written but is not uniform-owned");
+             and width was written but is not uniform-owned"
+        );
     }
 
     /// Mixed case: both an owned and a non-owned channel are written, all
@@ -390,10 +431,13 @@ mod gpu_tests {
 
         env.set::<f32>("rate", 0.10).unwrap();
         env.set::<u32>("width", 200).unwrap();
-        boundary.finalise(&[id_rate, id_width]).unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.finalise(&mut ctx, &[id_rate, id_width]).unwrap();
 
-        assert!(boundary.uniform().unwrap().is_cpu_dirty(),
-            "uniform should be marked dirty because owned channel `rate` was written");
+        assert!(
+            boundary.uniform().unwrap().is_cpu_dirty(),
+            "uniform should be marked dirty because owned channel `rate` was written"
+        );
     }
 
     /// `end_tick` is the safety net: if an owned channel's dirty mark was
@@ -406,11 +450,16 @@ mod gpu_tests {
 
         // Write an owned key but never call finalise for it.
         env.set::<f32>("rate", 0.10).unwrap();
-        boundary.end_tick().unwrap();
+        let mut ctx = BoundaryContext::empty();
+        boundary.end_tick(&mut ctx).unwrap();
 
-        assert!(boundary.uniform().unwrap().is_cpu_dirty(),
-            "end_tick should mark the uniform dirty for any still-dirty owned channel");
-        assert!(env.dirty_channel_ids().is_empty(),
-            "end_tick should drain the dirty set");
+        assert!(
+            boundary.uniform().unwrap().is_cpu_dirty(),
+            "end_tick should mark the uniform dirty for any still-dirty owned channel"
+        );
+        assert!(
+            env.dirty_channel_ids().is_empty(),
+            "end_tick should drain the dirty set"
+        );
     }
 }

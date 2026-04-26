@@ -6,76 +6,91 @@
 //! # Architecture
 //!
 //! ```text
-//!                        ┌─────────────────────┐
-//!                        │     ECSManager      │
-//!                        │                     │
-//!                        │  UnsafeCell<ECSData>│  ← owns all ECS state
-//!                        │  RwLock<()> phase   │  ← read/write phase gate
-//!                        │  BorrowTracker      │  ← per-component borrows
-//!                        │  AtomicUsize iters  │  ← active iteration count
-//!                        │  Mutex<Vec<Command>>│  ← deferred command queue
-//!                        │  Mutex<Vec<Box<dyn  │
-//!                        │    BoundaryResource>│  ← tick-lifecycle hooks
-//!                        │  >>                 │    (messaging, env, ...)
-//!                        └────────┬────────────┘
-//!                                 │ .world_ref()
-//!                                 ▼
-//!                        ┌─────────────────────┐
-//!                        │    ECSReference     │  ← shared, lightweight handle
-//!                        └─────────────────────┘
+//!                        ┌─────────────────────────┐
+//!                        │      ECSManager         │
+//!                        │                         │
+//!                        │  UnsafeCell<ECSData>    │  ← owns all ECS state
+//!                        │  RwLock<()> phase       │  ← read/write phase gate
+//!                        │  BorrowTracker          │  ← per-component borrows
+//!                        │  AtomicUsize iters      │  ← active iteration count
+//!                        │  Mutex<Vec<Command>>    │  ← deferred command queue
+//!                        │  Mutex<BoundaryRegistry>│  ← tick-lifecycle hooks
+//!                        │                         │    (per-resource locks)
+//!                        └─────────┬───────────────┘
+//!                                  │ .world_ref()
+//!                                  ▼
+//!                        ┌─────────────────────────┐
+//!                        │      ECSReference       │  ← shared, lightweight handle
+//!                        └─────────────────────────┘
 //! ```
 //!
 //! # Boundary Resources
 //!
-//! messaging, environment, and logging register objects
-//! that implement [`BoundaryResource`] before the simulation starts. The
-//! manager calls lifecycle hooks on all of them at the right points:
+//! Messaging, environment, and other extension modules register objects
+//! that implement [`BoundaryResource`] before the simulation starts. Each
+//! registration returns a stable [`BoundaryID`]; the resource is wrapped in
+//! an [`Arc<RwLock<dyn BoundaryResource>>`] so consumers can hold a typed
+//! handle that does not block other resources' access. The manager calls
+//! lifecycle hooks on each resource at the appropriate points:
 //!
 //! - [`begin_tick`](ECSManager::begin_tick) — before any stage.
 //! - [`finalise_boundaries`](ECSManager::finalise_boundaries) — at each
-//!   scheduler boundary stage, after `apply_deferred_commands`.
+//!   scheduler boundary stage, after `apply_deferred_commands`. Routed only
+//!   to resources that own at least one of the channels in the boundary's
+//!   `finalised_channels` set.
 //! - [`end_tick`](ECSManager::end_tick) — after the final stage.
 //!
 //! Systems access individual resources via `ECSReference::boundary::<R>(id)`.
 //!
 //! # Concurrency Model
 //!
-//! The `boundary_resources` mutex is acquired in three distinct situations:
-//!
-//! 1. **Boundary stages** — exclusively, no systems running.
-//! 2. **`begin_tick` / `end_tick`** — exclusively, no systems running.
-//! 3. **`ECSReference::boundary` called from within a running system** —
-//!    the returned [`BoundaryHandle`] holds the mutex guard for its entire
-//!    lifetime. Two systems in the same parallel CPU stage that both hold a
-//!    `BoundaryHandle` will serialise on this mutex for the duration of
-//!    their handles. The scheduler does **not** currently detect this
-//!    co-scheduling hazard; modules that access boundary resources from
-//!    systems must either:
-//!    - declare a channel dependency via `AccessSets::produces` /
-//!      `AccessSets::consumes` so the scheduler places them in different
-//!      stages, or
-//!    - use [`Scheduler::add_ordering`](Scheduler::add_ordering)
-//!      to force an explicit ordering.
+//! Each registered resource has its own [`parking_lot::RwLock`]. The outer
+//! [`Mutex`] over the resource vector is taken only at registration time.
+//! From a running system, [`ECSReference::boundary`] clones the resource's
+//! `Arc` and acquires the per-resource read lock; two systems in the same
+//! stage that touch *different* resources never contend, and two systems
+//! that touch the *same* resource take read locks in parallel. Lifecycle
+//! hooks acquire the per-resource write lock; phase discipline prevents
+//! these from racing with system access.
 
 use std::cell::UnsafeCell;
-use std::sync::{Arc, RwLock, Mutex};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
-use crate::engine::boundary::BoundaryResource;
-use crate::engine::commands::Command;
-use crate::engine::scheduler::Scheduler;
-use crate::engine::borrow::BorrowTracker;
-use crate::engine::component::ComponentRegistry;
-use crate::engine::types::{BoundaryID, ChannelID};
-use crate::engine::error::{
-    ECSResult,
-    ECSError,
-    ExecutionError,
-};
-use crate::Entity;
-use super::phase::{PhaseRead, PhaseWrite};
+use parking_lot::RwLock as ResourceLock;
+
 use super::data::ECSData;
 use super::ecs_reference::ECSReference;
+use super::phase::{PhaseRead, PhaseWrite};
+use crate::engine::borrow::BorrowTracker;
+use crate::engine::boundary::{BoundaryContext, BoundaryResource};
+use crate::engine::commands::Command;
+use crate::engine::component::ComponentRegistry;
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
+use crate::engine::scheduler::Scheduler;
+use crate::engine::types::{BoundaryID, ChannelID};
+use crate::Entity;
+
+/// Per-resource lock used to serialise lifecycle writes against system
+/// reads while keeping inter-resource access independent.
+pub(super) type BoundarySlot = Arc<ResourceLock<dyn BoundaryResource>>;
+
+/// Internal owner of all registered boundary resources, plus the
+/// `ChannelID → BoundaryID` index used to route `finalise` calls.
+pub(super) struct BoundaryRegistry {
+    pub(super) slots: Vec<BoundarySlot>,
+    pub(super) channel_owner: HashMap<ChannelID, BoundaryID>,
+}
+
+impl BoundaryRegistry {
+    fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            channel_owner: HashMap::new(),
+        }
+    }
+}
 
 /// Thread-safe entry point to the ECS world.
 ///
@@ -121,21 +136,13 @@ pub struct ECSManager {
     /// Extension-owned boundary resources (message buffers, env boundary,
     /// future per-tick accumulators, ...).
     ///
-    /// Keyed by [`BoundaryID`] assigned at registration time: the ID is the
-    /// index into this `Vec`. The `Vec` grows monotonically; IDs are stable.
-    ///
-    /// **Lock discipline**: this mutex is acquired at:
-    /// - boundary stages (no systems running),
-    /// - `begin_tick` / `end_tick` (no systems running),
-    /// - `ECSReference::boundary` from within a running system — the
-    ///   returned `BoundaryHandle` holds the guard for its lifetime.
-    ///
-    /// The third case means co-scheduled systems that both acquire
-    /// boundary handles will contend on this mutex. The scheduler does
-    /// **not** detect this automatically; see the module-level
-    /// `Concurrency Model` section for the constraints extension authors
-    /// must manage themselves.
-    pub(super) boundary_resources: Mutex<Vec<Box<dyn BoundaryResource>>>,
+    /// The outer mutex protects only the slot vector itself — pushed at
+    /// registration time. Individual resources are wrapped in their own
+    /// [`parking_lot::RwLock`] inside an `Arc`, so handles obtained via
+    /// [`ECSReference::boundary`](super::ecs_reference::ECSReference::boundary)
+    /// hold a per-resource read guard rather than blocking the whole
+    /// registry.
+    pub(super) boundary_resources: Mutex<BoundaryRegistry>,
 }
 
 // SAFETY: `ECSManager` is `Sync` because:
@@ -144,7 +151,8 @@ pub struct ECSManager {
 // 3. `borrows` (BorrowTracker) enforces per-component read/write rules.
 // 4. `data_mut_unchecked` requires a `PhaseWrite` token.
 // 5. `data_ref_unchecked` requires a `PhaseRead` token.
-// 6. `boundary_resources` is behind a `Mutex`.
+// 6. `boundary_resources` outer mutex serialises registration; each slot is
+//    a separately-locked `Arc<RwLock<dyn BoundaryResource>>`.
 // 7. `registry` is `Arc<RwLock<ComponentRegistry>>` — the `Arc` is `Sync`
 //    and the `RwLock` serialises its own contents; the field is never
 //    reassigned after construction.
@@ -164,7 +172,7 @@ impl ECSManager {
             active_iters: AtomicUsize::new(0),
             deferred: Mutex::new(Vec::new()),
             registry,
-            boundary_resources: Mutex::new(Vec::new()),
+            boundary_resources: Mutex::new(BoundaryRegistry::new()),
         }
     }
 
@@ -186,7 +194,7 @@ impl ECSManager {
             active_iters: AtomicUsize::new(0),
             deferred: Mutex::new(Vec::new()),
             registry,
-            boundary_resources: Mutex::new(Vec::new()),
+            boundary_resources: Mutex::new(BoundaryRegistry::new()),
         }
     }
 
@@ -247,7 +255,7 @@ impl ECSManager {
     pub fn apply_deferred_commands(&self) -> ECSResult<Vec<Entity>> {
         if self.active_iters.load(Ordering::Acquire) != 0 {
             return Err(ECSError::from(
-                ExecutionError::StructuralMutationDuringIteration
+                ExecutionError::StructuralMutationDuringIteration,
             ));
         }
 
@@ -277,47 +285,68 @@ impl ECSManager {
     /// `ModelBuilder::build`). The returned ID is stored by the caller and
     /// passed to `ECSReference::boundary::<R>(id)` at system runtime.
     ///
-    /// # Panics
+    /// The resource's [`channels`](BoundaryResource::channels) declaration
+    /// is read once and indexed for routing. Each channel ID may be owned by
+    /// at most one resource across the whole registry.
     ///
-    /// Panics if the boundary-resource mutex is poisoned (indicates a prior
-    /// panic inside a boundary lifecycle method, which is a hard error).
-    pub fn register_boundary<R: BoundaryResource + 'static>(&self, r: R) -> BoundaryID {
-        let mut guard = self.boundary_resources.lock()
-            .expect("boundary_resources mutex poisoned");
-        let id = guard.len() as BoundaryID;
-        guard.push(Box::new(r));
-        id
+    /// # Errors
+    ///
+    /// Returns
+    /// [`ExecutionError::DuplicateChannelRegistration`](crate::engine::error::ExecutionError::DuplicateChannelRegistration)
+    /// if any channel claimed by the resource is already owned by an
+    /// earlier-registered resource.
+    pub fn register_boundary<R: BoundaryResource + 'static>(&self, r: R) -> ECSResult<BoundaryID> {
+        let mut guard = self.boundary_resources.lock().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "boundary_resources (register)",
+            })
+        })?;
+
+        for &cid in r.channels() {
+            if let Some(&existing) = guard.channel_owner.get(&cid) {
+                return Err(ECSError::from(
+                    ExecutionError::DuplicateChannelRegistration {
+                        channel_id: cid,
+                        existing_boundary: existing,
+                    },
+                ));
+            }
+        }
+
+        let id = guard.slots.len() as BoundaryID;
+        for &cid in r.channels() {
+            guard.channel_owner.insert(cid, id);
+        }
+        let slot: BoundarySlot = Arc::new(ResourceLock::new(r));
+        guard.slots.push(slot);
+        Ok(id)
     }
 
     /// Called by `Model::tick` before running any stage.
     ///
     /// Iterates all registered boundary resources and calls their
-    /// [`begin_tick`](BoundaryResource::begin_tick) method in registration order.
+    /// [`begin_tick`](BoundaryResource::begin_tick) method in registration
+    /// order. Each resource is locked for write individually so concurrent
+    /// access via [`ECSReference::boundary`](super::ecs_reference::ECSReference::boundary)
+    /// to other resources is unaffected (callers must not invoke this from
+    /// inside a parallel stage; phase discipline guarantees no system holds
+    /// any handle when the manager calls into a lifecycle method).
     pub fn begin_tick(&self) -> ECSResult<()> {
-        let mut guard = self.boundary_resources.lock().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned {
-                what: "boundary_resources (begin_tick)",
-            })
-        })?;
-        for r in guard.iter_mut() {
-            r.begin_tick()?;
+        let slots = self.snapshot_slots("boundary_resources (begin_tick)")?;
+        let mut ctx = self.make_boundary_context();
+        for slot in &slots {
+            slot.write().begin_tick(&mut ctx)?;
         }
         Ok(())
     }
 
     /// Called by `Model::tick` after the last stage and final
     /// `apply_deferred_commands`.
-    ///
-    /// Iterates all registered boundary resources and calls their
-    /// [`end_tick`](BoundaryResource::end_tick) method in registration order.
     pub fn end_tick(&self) -> ECSResult<()> {
-        let mut guard = self.boundary_resources.lock().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned {
-                what: "boundary_resources (end_tick)",
-            })
-        })?;
-        for r in guard.iter_mut() {
-            r.end_tick()?;
+        let slots = self.snapshot_slots("boundary_resources (end_tick)")?;
+        let mut ctx = self.make_boundary_context();
+        for slot in &slots {
+            slot.write().end_tick(&mut ctx)?;
         }
         Ok(())
     }
@@ -325,20 +354,75 @@ impl ECSManager {
     /// Called by the scheduler at each boundary stage, after
     /// `clear_borrows`, GPU sync, and `apply_deferred_commands`.
     ///
-    /// `channels` is the set of channel IDs whose last producer just
-    /// completed — consumers in subsequent stages will read them.
-    /// Each boundary resource receives the full `channels` slice and
-    /// decides internally which IDs are relevant to it.
+    /// Routes the call to each resource that owns at least one of
+    /// `channels`. A resource that owns no listed channel is skipped.
     pub(crate) fn finalise_boundaries(&self, channels: &[ChannelID]) -> ECSResult<()> {
-        let mut guard = self.boundary_resources.lock().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned {
-                what: "boundary_resources (finalise)",
-            })
-        })?;
-        for r in guard.iter_mut() {
-            r.finalise(channels)?;
+        if channels.is_empty() {
+            return Ok(());
+        }
+
+        // Collect the unique set of resources whose owned channels
+        // intersect `channels`, preserving registration order.
+        let (slots, channel_owner) = {
+            let guard = self.boundary_resources.lock().map_err(|_| {
+                ECSError::from(ExecutionError::LockPoisoned {
+                    what: "boundary_resources (finalise)",
+                })
+            })?;
+            (guard.slots.clone(), guard.channel_owner.clone())
+        };
+
+        let mut targets: Vec<BoundaryID> = Vec::new();
+        for &cid in channels {
+            if let Some(&id) = channel_owner.get(&cid) {
+                if !targets.contains(&id) {
+                    targets.push(id);
+                }
+            }
+        }
+        targets.sort_unstable();
+
+        let mut ctx = self.make_boundary_context();
+        for id in targets {
+            slots[id as usize].write().finalise(&mut ctx, channels)?;
         }
         Ok(())
+    }
+
+    /// Internal helper: clones the slot vector under the registration mutex,
+    /// dropping the mutex immediately so per-resource locks can be acquired
+    /// without contention.
+    fn snapshot_slots(&self, what: &'static str) -> ECSResult<Vec<BoundarySlot>> {
+        let guard = self
+            .boundary_resources
+            .lock()
+            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what }))?;
+        Ok(guard.slots.clone())
+    }
+
+    /// Builds the [`BoundaryContext`] passed to lifecycle hooks.
+    ///
+    /// On builds with the `gpu` feature the context exposes the world's
+    /// GPU resource registry through a phase-write borrow; without `gpu`
+    /// it is empty. Lifecycle hooks run while no system is iterating, so
+    /// taking the phase write here is uncontended.
+    #[cfg(feature = "gpu")]
+    fn make_boundary_context(&self) -> BoundaryContext<'_> {
+        // GPU resource access during a lifecycle hook would require the
+        // phase-write lock, which conflicts with the layered locking the
+        // scheduler already does at boundary stages. The current shape
+        // exposes `None` here so resources that need GPU access during
+        // finalise should drive uploads through their own
+        // [`crate::gpu::GPUResource`] registration; future work may thread
+        // a properly-acquired registry handle through the boundary
+        // dispatch path.
+        BoundaryContext::empty()
+    }
+
+    /// Builds an empty [`BoundaryContext`] for non-GPU builds.
+    #[cfg(not(feature = "gpu"))]
+    fn make_boundary_context(&self) -> BoundaryContext<'_> {
+        BoundaryContext::empty()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -347,17 +431,20 @@ impl ECSManager {
 
     #[inline]
     pub(crate) fn phase_read(&self) -> ECSResult<PhaseRead<'_>> {
-        let g = self
-            .phase
-            .read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "ECS phase (read)" }))?;
+        let g = self.phase.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "ECS phase (read)",
+            })
+        })?;
         Ok(PhaseRead(g))
     }
 
     #[inline]
     pub(crate) fn phase_write(&self) -> ECSResult<PhaseWrite<'_>> {
         let g = self.phase.write().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned { what: "ECS phase (write)" })
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "ECS phase (write)",
+            })
         })?;
         Ok(PhaseWrite(g))
     }

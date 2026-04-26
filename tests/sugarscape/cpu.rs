@@ -4,20 +4,17 @@
 use std::sync::{Arc, Mutex};
 
 use abm_framework::{
-    System, SystemBackend, AccessSets, ComponentRegistry,
-    ECSReference, ECSResult,
-    cast_slice, cast_slice_mut,
+    cast_slice, cast_slice_mut, AccessSets, ComponentRegistry, ECSReference, ECSResult, System,
+    SystemBackend,
 };
 
 #[cfg(feature = "gpu")]
-use abm_framework::{GPUResourceID, ECSError, ExecutionError};
+use abm_framework::{ECSError, ExecutionError, GPUResourceID};
 
 #[cfg(feature = "gpu")]
 use crate::sugarscape::gpu_resources::{AgentIntentBuffers, SugarGrid};
 
-
 use crate::sugarscape::components::*;
-
 
 /// Deterministic RNG
 #[inline]
@@ -146,13 +143,17 @@ impl SugarRegrowthSystem {
 }
 
 impl System for SugarRegrowthSystem {
-    fn id(&self) -> u16 { 1 }
+    fn id(&self) -> u16 {
+        1
+    }
 
     fn backend(&self) -> SystemBackend {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
         let mut grid = self.grid.lock().unwrap();
@@ -179,13 +180,17 @@ impl MoveAndHarvestSystem {
 }
 
 impl System for MoveAndHarvestSystem {
-    fn id(&self) -> u16 { 2 }
+    fn id(&self) -> u16 {
+        2
+    }
 
     fn backend(&self) -> SystemBackend {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
         let grid = self.grid.clone();
@@ -199,7 +204,8 @@ impl System for MoveAndHarvestSystem {
 
         //INTENT + RESOLVE
 
-        let q = ecs.query()?
+        let q = ecs
+            .query()?
             .read::<Vision>()?
             .read::<Alive>()?
             .write::<Position>()?
@@ -207,21 +213,11 @@ impl System for MoveAndHarvestSystem {
             .build()?;
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
-            let vision =
-                cast_slice::<Vision>(reads[0].as_ptr(), reads[0].len());
-            let alive =
-                cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
+            let vision = cast_slice::<Vision>(reads[0].as_ptr(), reads[0].len());
+            let alive = cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
 
-            let pos =
-                cast_slice_mut::<Position>(
-                    writes[0].as_mut_ptr(),
-                    writes[0].len(),
-                );
-            let sugar =
-                cast_slice_mut::<Sugar>(
-                    writes[1].as_mut_ptr(),
-                    writes[1].len(),
-                );
+            let pos = cast_slice_mut::<Position>(writes[0].as_mut_ptr(), writes[0].len());
+            let sugar = cast_slice_mut::<Sugar>(writes[1].as_mut_ptr(), writes[1].len());
 
             let mut g = grid.lock().unwrap();
 
@@ -291,28 +287,30 @@ impl MetabolismSystem {
 }
 
 impl System for MetabolismSystem {
-    fn id(&self) -> u16 { 3 }
+    fn id(&self) -> u16 {
+        3
+    }
 
     fn backend(&self) -> SystemBackend {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let q = ecs.query()?
+        let q = ecs
+            .query()?
             .read::<Metabolism>()?
             .read::<Alive>()?
             .write::<Sugar>()?
             .build()?;
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
-            let metab =
-                cast_slice::<Metabolism>(reads[0].as_ptr(), reads[0].len());
-            let alive =
-                cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
-            let sugar =
-                cast_slice_mut::<Sugar>(writes[0].as_mut_ptr(), writes[0].len());
+            let metab = cast_slice::<Metabolism>(reads[0].as_ptr(), reads[0].len());
+            let alive = cast_slice::<Alive>(reads[1].as_ptr(), reads[1].len());
+            let sugar = cast_slice_mut::<Sugar>(writes[0].as_mut_ptr(), writes[0].len());
 
             for i in 0..alive.len() {
                 if alive[i].0 == 0 {
@@ -340,25 +338,24 @@ impl DeathSystem {
 }
 
 impl System for DeathSystem {
-    fn id(&self) -> u16 { 4 }
+    fn id(&self) -> u16 {
+        4
+    }
 
     fn backend(&self) -> SystemBackend {
         SystemBackend::CPU
     }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let q = ecs.query()?
-            .read::<Sugar>()?
-            .write::<Alive>()?
-            .build()?;
+        let q = ecs.query()?.read::<Sugar>()?.write::<Alive>()?.build()?;
 
         ecs.for_each_abstraction(q, move |reads, writes| unsafe {
-            let sugar =
-                cast_slice::<Sugar>(reads[0].as_ptr(), reads[0].len());
-            let alive =
-                cast_slice_mut::<Alive>(writes[0].as_mut_ptr(), writes[0].len());
+            let sugar = cast_slice::<Sugar>(reads[0].as_ptr(), reads[0].len());
+            let alive = cast_slice_mut::<Alive>(writes[0].as_mut_ptr(), writes[0].len());
 
             for i in 0..alive.len() {
                 if alive[i].0 == 0 {
@@ -384,16 +381,26 @@ pub struct ResolveIntentCpuSystem {
 #[cfg(feature = "gpu")]
 impl ResolveIntentCpuSystem {
     pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID) -> Self {
-        Self { sugar_grid, intent, access: AccessSets::default() }
+        Self {
+            sugar_grid,
+            intent,
+            access: AccessSets::default(),
+        }
     }
 }
 
 #[cfg(feature = "gpu")]
 impl System for ResolveIntentCpuSystem {
-    fn id(&self) -> u16 { 14 }
-    fn backend(&self) -> SystemBackend { SystemBackend::CPU }
+    fn id(&self) -> u16 {
+        14
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::CPU
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
         const INVALID: u32 = 0xffffffff;
@@ -403,11 +410,11 @@ impl System for ResolveIntentCpuSystem {
             let grid_len = {
                 let sugar = gpu_resources
                     .get_typed::<SugarGrid>(self.sugar_grid)
-                    .ok_or_else(|| ECSError::from(
-                        ExecutionError::GpuDispatchFailed {
+                    .ok_or_else(|| {
+                        ECSError::from(ExecutionError::GpuDispatchFailed {
                             message: "missing SugarGrid resource".into(),
-                        }
-                    ))?;
+                        })
+                    })?;
 
                 (sugar.w * sugar.h) as usize
             };
@@ -418,11 +425,11 @@ impl System for ResolveIntentCpuSystem {
 
             let intent = gpu_resources
                 .get_mut_typed::<AgentIntentBuffers>(self.intent)
-                .ok_or_else(|| ECSError::from(
-                    ExecutionError::GpuDispatchFailed {
+                .ok_or_else(|| {
+                    ECSError::from(ExecutionError::GpuDispatchFailed {
                         message: "missing AgentIntentBuffers resource".into(),
-                    }
-                ))?;
+                    })
+                })?;
 
             let mut winner_agent: Vec<u32> = vec![INVALID; grid_len];
             let mut winner_score: Vec<f32> = vec![-1.0; grid_len];
@@ -430,10 +437,14 @@ impl System for ResolveIntentCpuSystem {
             let n = intent.len();
             for i in 0..n {
                 let tgt = intent.target_cpu[i];
-                if tgt == INVALID { continue; }
+                if tgt == INVALID {
+                    continue;
+                }
 
                 let cell = tgt as usize;
-                if cell >= grid_len { continue; }
+                if cell >= grid_len {
+                    continue;
+                }
 
                 let score = intent.score_cpu[i];
 
@@ -453,7 +464,9 @@ impl System for ResolveIntentCpuSystem {
 
             for i in 0..n {
                 let tgt = intent.target_cpu[i];
-                if tgt == INVALID { continue; }
+                if tgt == INVALID {
+                    continue;
+                }
 
                 let cell = tgt as usize;
                 if cell >= grid_len || winner_agent[cell] != (i as u32) {

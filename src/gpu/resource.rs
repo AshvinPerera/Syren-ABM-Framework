@@ -34,8 +34,8 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::types::GPUResourceID;
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 
 use crate::gpu::GPUContext;
 
@@ -50,7 +50,11 @@ impl GPUBindingDesc {
     /// Compact key for pipeline-cache hashing.
     #[inline]
     pub fn key(self) -> u8 {
-        if self.read_only { 1 } else { 2 }
+        if self.read_only {
+            1
+        } else {
+            2
+        }
     }
 }
 

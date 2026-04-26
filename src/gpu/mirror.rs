@@ -4,14 +4,13 @@ use std::collections::HashMap;
 
 use crate::engine::archetype::Archetype;
 use crate::engine::component::{iter_bits_from_words, ComponentRegistry, Signature};
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
-use crate::engine::types::{ArchetypeID, ComponentID, ChunkID};
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
+use crate::engine::types::{ArchetypeID, ChunkID, ComponentID};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::DirtyChunks;
 
 use crate::gpu::GPUContext;
-
 
 #[inline]
 fn align_to_4(bytes: usize) -> usize {
@@ -21,12 +20,12 @@ fn align_to_4(bytes: usize) -> usize {
 #[derive(Debug)]
 struct BufferEntry {
     buffer: wgpu::Buffer,
-    bytes: usize
+    bytes: usize,
 }
 
 #[derive(Debug)]
 pub struct Mirror {
-    buffers: HashMap<(ArchetypeID, ComponentID), BufferEntry>
+    buffers: HashMap<(ArchetypeID, ComponentID), BufferEntry>,
 }
 
 impl Mirror {
@@ -47,7 +46,8 @@ impl Mirror {
         component_id: ComponentID,
         registry: &ComponentRegistry,
     ) -> ECSResult<(usize, &'static str)> {
-        let description = registry.description_by_component_id(component_id)
+        let description = registry
+            .description_by_component_id(component_id)
             .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
 
         if !description.gpu_usage {
@@ -74,7 +74,9 @@ impl Mirror {
 
         for archetype in archetypes {
             let chunk_count = archetype.chunk_count()?;
-            if chunk_count == 0 { continue; }
+            if chunk_count == 0 {
+                continue;
+            }
 
             for &component_id in &component_ids {
                 if archetype.has(component_id) {
@@ -94,7 +96,8 @@ impl Mirror {
         signature: &Signature,
         registry: &ComponentRegistry,
     ) -> ECSResult<()> {
-        let mut component_ids: Vec<ComponentID> = iter_bits_from_words(&signature.components).collect();
+        let mut component_ids: Vec<ComponentID> =
+            iter_bits_from_words(&signature.components).collect();
         component_ids.sort_unstable();
 
         for archetype in archetypes {
@@ -108,8 +111,14 @@ impl Mirror {
         Ok(())
     }
 
-    pub fn buffer_for(&self, archetype: ArchetypeID, component_id: ComponentID) -> Option<&wgpu::Buffer> {
-        self.buffers.get(&(archetype, component_id)).map(|e| &e.buffer)
+    pub fn buffer_for(
+        &self,
+        archetype: ArchetypeID,
+        component_id: ComponentID,
+    ) -> Option<&wgpu::Buffer> {
+        self.buffers
+            .get(&(archetype, component_id))
+            .map(|e| &e.buffer)
     }
 
     fn ensure_buffer(
@@ -137,10 +146,7 @@ impl Mirror {
                     | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-            self.buffers.insert(key, BufferEntry {
-                buffer,
-                bytes
-            });
+            self.buffers.insert(key, BufferEntry { buffer, bytes });
         }
     }
 
@@ -153,17 +159,22 @@ impl Mirror {
         dirty: &DirtyChunks,
     ) -> ECSResult<()> {
         let len = archetype.length()?;
-        if len == 0 { return Ok(()); }
+        if len == 0 {
+            return Ok(());
+        }
 
         let chunk_count = archetype.chunk_count()?;
-        if chunk_count == 0 { return Ok(()); }
+        if chunk_count == 0 {
+            return Ok(());
+        }
         let require_aligned = (component_size % 4) == 0;
 
         let bytes_total = align_to_4(len * component_size);
         self.ensure_buffer(context, archetype.archetype_id(), component_id, bytes_total);
 
         // Determine dirty chunks and clear them in the tracker.
-        let mut dirty_chunks = dirty.take_dirty_chunks(archetype.archetype_id(), component_id, chunk_count);
+        let mut dirty_chunks =
+            dirty.take_dirty_chunks(archetype.archetype_id(), component_id, chunk_count);
 
         if dirty_chunks.is_empty() {
             return Ok(());
@@ -176,12 +187,19 @@ impl Mirror {
             return self.upload_column_full(context, archetype, component_id, component_size);
         }
 
-        let storage = self.buffers.get(&(archetype.archetype_id(), component_id)).unwrap();
+        let storage = self
+            .buffers
+            .get(&(archetype.archetype_id(), component_id))
+            .unwrap();
 
-        let locked = archetype.component_locked(component_id)
+        let locked = archetype
+            .component_locked(component_id)
             .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
-        let guard = locked.read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "attribute read lock (upload)" }))?;
+        let guard = locked.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "attribute read lock (upload)",
+            })
+        })?;
 
         let mut prefix_rows: Vec<usize> = Vec::with_capacity(chunk_count + 1);
         prefix_rows.push(0);
@@ -194,9 +212,13 @@ impl Mirror {
         // Upload each dirty chunk slice into the correct offset in the packed GPU buffer.
         for &chunk in &dirty_chunks {
             let valid = archetype.chunk_valid_length(chunk)?;
-            if valid == 0 { continue; }
+            if valid == 0 {
+                continue;
+            }
 
-            let chunk_id: ChunkID = chunk.try_into().map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
+            let chunk_id: ChunkID = chunk
+                .try_into()
+                .map_err(|_| ECSError::from(ExecutionError::InternalExecutionError))?;
 
             let (ptr, bytes) = guard
                 .chunk_bytes(chunk_id, valid)
@@ -212,12 +234,13 @@ impl Mirror {
             }
 
             let src = unsafe { std::slice::from_raw_parts(ptr, bytes) };
-            context.queue.write_buffer(&storage.buffer, byte_off as u64, src);
+            context
+                .queue
+                .write_buffer(&storage.buffer, byte_off as u64, src);
         }
 
         Ok(())
     }
-
 
     fn upload_column_full(
         &mut self,
@@ -227,17 +250,26 @@ impl Mirror {
         component_size: usize,
     ) -> ECSResult<()> {
         let len = archetype.length()?;
-        if len == 0 { return Ok(()); }
+        if len == 0 {
+            return Ok(());
+        }
 
         let bytes_total = align_to_4(len * component_size);
         self.ensure_buffer(context, archetype.archetype_id(), component_id, bytes_total);
 
-        let storage = self.buffers.get(&(archetype.archetype_id(), component_id)).unwrap();
+        let storage = self
+            .buffers
+            .get(&(archetype.archetype_id(), component_id))
+            .unwrap();
 
-        let locked = archetype.component_locked(component_id)
+        let locked = archetype
+            .component_locked(component_id)
             .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
-        let guard = locked.read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "attribute read lock (full upload)" }))?;
+        let guard = locked.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "attribute read lock (full upload)",
+            })
+        })?;
 
         let mut host = vec![0u8; bytes_total];
         let mut offset = 0usize;
@@ -245,9 +277,12 @@ impl Mirror {
         let chunks = archetype.chunk_count()?;
         for chunk in 0..chunks {
             let valid = archetype.chunk_valid_length(chunk)?;
-            if valid == 0 { continue; }
+            if valid == 0 {
+                continue;
+            }
 
-            let (pointer, bytes) = guard.chunk_bytes(chunk as ChunkID, valid)
+            let (pointer, bytes) = guard
+                .chunk_bytes(chunk as ChunkID, valid)
                 .ok_or_else(|| ECSError::from(ExecutionError::InternalExecutionError))?;
             let source = unsafe { std::slice::from_raw_parts(pointer, bytes) };
 
@@ -259,29 +294,38 @@ impl Mirror {
         Ok(())
     }
 
-    fn download_column(&mut self, context: &GPUContext, archetype: &mut Archetype, component_id: ComponentID, component_size: usize) -> ECSResult<()> {
+    fn download_column(
+        &mut self,
+        context: &GPUContext,
+        archetype: &mut Archetype,
+        component_id: ComponentID,
+        component_size: usize,
+    ) -> ECSResult<()> {
         let len = archetype.length()?;
-        if len == 0 { return Ok(()); }
+        if len == 0 {
+            return Ok(());
+        }
 
         let bytes_total = align_to_4(len * component_size);
         self.ensure_buffer(context, archetype.archetype_id(), component_id, bytes_total);
 
-        let storage = self.buffers.get(&(archetype.archetype_id(), component_id)).unwrap();
+        let storage = self
+            .buffers
+            .get(&(archetype.archetype_id(), component_id))
+            .unwrap();
 
-        let staging = context.device.create_buffer(
-            &wgpu::BufferDescriptor {
-                label: Some("abm_readback_staging"),
-                size: bytes_total as u64,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }
-        );
+        let staging = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("abm_readback_staging"),
+            size: bytes_total as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
-        let mut encoder = context.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("abm_readback_encoder"),
-            }
-        );
+            });
 
         encoder.copy_buffer_to_buffer(&storage.buffer, 0, &staging, 0, bytes_total as u64);
         context.queue.submit(Some(encoder.finish()));
@@ -316,26 +360,34 @@ impl Mirror {
                 })
             })?;
 
-
         receiver.recv().ok().transpose().map_err(|_| {
-            ECSError::from(ExecutionError::GpuDispatchFailed { message: "failed to map readback buffer".into() })
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: "failed to map readback buffer".into(),
+            })
         })?;
 
         let data = slice.get_mapped_range();
         let host: &[u8] = &data;
 
-        let locked = archetype.component_locked(component_id)
+        let locked = archetype
+            .component_locked(component_id)
             .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
-        let mut guard = locked.write()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "attribute write lock (download)" }))?;
+        let mut guard = locked.write().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "attribute write lock (download)",
+            })
+        })?;
 
         let mut offset = 0usize;
         let chunks = archetype.chunk_count()?;
         for chunk in 0..chunks {
             let valid = archetype.chunk_valid_length(chunk)?;
-            if valid == 0 { continue; }
+            if valid == 0 {
+                continue;
+            }
 
-            let (pointer, bytes) = guard.chunk_bytes_mut(chunk as ChunkID, valid)
+            let (pointer, bytes) = guard
+                .chunk_bytes_mut(chunk as ChunkID, valid)
                 .ok_or_else(|| ECSError::from(ExecutionError::InternalExecutionError))?;
             let destination = unsafe { std::slice::from_raw_parts_mut(pointer, bytes) };
 

@@ -29,11 +29,11 @@
 
 use std::any::Any;
 
-use crate::engine::types::ComponentID;
-use crate::engine::component::Bundle;
 use crate::engine::commands::Command;
-use crate::engine::manager::ECSReference;
+use crate::engine::component::Bundle;
 use crate::engine::error::ECSResult;
+use crate::engine::manager::ECSReference;
+use crate::engine::types::ComponentID;
 
 use super::error::{AgentError, AgentResult};
 use super::template::AgentTemplate;
@@ -53,18 +53,17 @@ pub struct AgentSpawner<'t> {
 impl<'t> AgentSpawner<'t> {
     /// Creates a spawner seeded with `template`'s defaults.
     pub fn new(template: &'t AgentTemplate) -> Self {
-        Self { template, overrides: Vec::new() }
+        Self {
+            template,
+            overrides: Vec::new(),
+        }
     }
 
     /// Overrides the value for component `id` in this spawn instance.
     ///
     /// If `set` is called multiple times with the same `id`, the last value
     /// wins.
-    pub fn set<T: Any + Send + 'static>(
-        mut self,
-        id: ComponentID,
-        value: T,
-    ) -> AgentResult<Self> {
+    pub fn set<T: Any + Send + 'static>(mut self, id: ComponentID, value: T) -> AgentResult<Self> {
         if !self.template.signature.has(id) {
             return Err(AgentError::MissingComponent(id));
         }
@@ -112,8 +111,8 @@ impl<'t> AgentSpawner<'t> {
 
 #[cfg(test)]
 mod tests {
-    use crate::agents::template::AgentTemplate;
     use crate::agents::error::AgentError;
+    use crate::agents::template::AgentTemplate;
 
     #[allow(dead_code)]
     #[derive(Default, Clone)]
@@ -137,7 +136,8 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let spawner = tmpl.spawner()
+        let spawner = tmpl
+            .spawner()
             .set::<Wealth>(0, Wealth(1.0))
             .unwrap()
             .set::<Wealth>(0, Wealth(2.0))

@@ -34,34 +34,30 @@
 //! serialized writes.  Instance-owned registries are wrapped in
 //! `Arc<RwLock<ComponentRegistry>>` by `ECSData`.
 
-mod signature;
-mod descriptor;
 mod bundle;
-mod registry;
+mod descriptor;
 mod global;
+mod registry;
+mod signature;
 
 // -- Signature & helpers --
-pub use signature::{Signature, iter_bits_from_words};
 pub(crate) use signature::or_signature_in_place;
+pub use signature::{iter_bits_from_words, Signature};
 
 // -- Component descriptor --
 pub use descriptor::ComponentDesc;
 
 // -- Bundle --
-pub use bundle::{DynamicBundle, Bundle};
+pub use bundle::{Bundle, DynamicBundle};
 
 // -- Instance-owned registry --
-pub use registry::{ComponentRegistry};
+pub use registry::ComponentRegistry;
 
 // -- Global convenience API --
 // These remain available for internal use and single-world convenience,
 // but are no longer re-exported from the crate root.
 #[allow(unused)]
-pub(crate) use global::{
-    register_component,
-    freeze_components,
-    component_id_of,
-};
+pub(crate) use global::{component_id_of, freeze_components, register_component};
 
 #[cfg(feature = "gpu")]
-pub use global::{GPUPod, register_gpu_component};
+pub use global::{register_gpu_component, GPUPod};

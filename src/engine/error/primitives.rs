@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use crate::engine::types::{ShardID, ChunkID, RowID};
+use crate::engine::types::{ChunkID, RowID, ShardID};
 
 /// Returned when the system cannot satisfy a request to create or place
 /// additional entities because the target container has insufficient capacity.
@@ -39,7 +39,6 @@ use crate::engine::types::{ShardID, ChunkID, RowID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
-
     /// Total entities the operation attempted to allocate.
     pub entities_needed: u64,
 
@@ -76,7 +75,6 @@ impl std::error::Error for CapacityError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardBoundsError {
-
     /// Offending shard index that was requested.
     pub index: ShardID,
 
@@ -132,7 +130,6 @@ impl std::error::Error for StaleEntityError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionOutOfBoundsError {
-
     /// Chunk index that was addressed.
     pub chunk: ChunkID,
 
@@ -189,7 +186,6 @@ impl std::error::Error for PositionOutOfBoundsError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeMismatchError {
-
     /// Destination storage's declared element type.
     pub expected: std::any::TypeId,
 
@@ -208,8 +204,7 @@ impl fmt::Display for TypeMismatchError {
         write!(
             f,
             "type mismatch: expected {} ({:?}), actual {} ({:?})",
-            self.expected_name, self.expected,
-            self.actual_name, self.actual
+            self.expected_name, self.expected, self.actual_name, self.actual
         )
     }
 }

@@ -33,7 +33,11 @@ impl std::fmt::Display for EnvironmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EnvironmentError::KeyNotFound(k) => write!(f, "key not found: {k}"),
-            EnvironmentError::TypeMismatch { key, expected, actual } => write!(
+            EnvironmentError::TypeMismatch {
+                key,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "type mismatch for key '{key}': expected {expected}, got {actual}"
             ),

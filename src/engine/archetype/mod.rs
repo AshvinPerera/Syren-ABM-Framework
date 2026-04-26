@@ -58,11 +58,11 @@
 //! * parallel execution using Rayon,
 //! * low-level performance optimizations.
 
-mod core;
+mod access;
 mod columns;
+mod core;
 mod lifecycle;
 mod migration;
-mod access;
 
-pub use core::{Archetype, ArchetypeMatch};
 pub use access::ChunkBorrow;
+pub use core::{Archetype, ArchetypeMatch};

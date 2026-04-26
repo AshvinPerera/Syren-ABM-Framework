@@ -22,8 +22,8 @@
 
 use std::fmt;
 
-use crate::engine::types::ComponentID;
 use crate::engine::error::{ECSError, ExecutionError};
+use crate::engine::types::ComponentID;
 
 /// Errors specific to the `agents` domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +49,17 @@ impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AgentError::TemplateNotFound(name) => write!(f, "agent template not found: {name}"),
-            AgentError::MissingComponent(id) => write!(f, "component {id} is not in the template signature"),
+            AgentError::MissingComponent(id) => {
+                write!(f, "component {id} is not in the template signature")
+            }
             AgentError::StaleHandle => write!(f, "stale agent handle: entity no longer exists"),
-            AgentError::DuplicateComponent(id) => write!(f, "component {id} is already registered in this template"),
-            AgentError::RegistrySealed => write!(f, "agent registry is sealed; no further templates may be registered"),
+            AgentError::DuplicateComponent(id) => {
+                write!(f, "component {id} is already registered in this template")
+            }
+            AgentError::RegistrySealed => write!(
+                f,
+                "agent registry is sealed; no further templates may be registered"
+            ),
         }
     }
 }
@@ -112,6 +119,9 @@ mod tests {
     fn into_ecs_error_does_not_panic() {
         let e = AgentError::TemplateNotFound("X".into());
         let ecs: ECSError = e.into();
-        assert!(matches!(ecs, ECSError::Execute(ExecutionError::SchedulerInvariantViolation)));
+        assert!(matches!(
+            ecs,
+            ECSError::Execute(ExecutionError::SchedulerInvariantViolation)
+        ));
     }
 }

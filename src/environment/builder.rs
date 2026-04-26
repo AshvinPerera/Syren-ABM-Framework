@@ -46,6 +46,7 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use crate::engine::channel_allocator::ChannelAllocator;
+use crate::engine::types::ChannelID;
 
 use super::store::Environment;
 
@@ -55,11 +56,17 @@ use super::store::Environment;
 /// [`build`](Self::build) (or [`build_with_allocator`](Self::build_with_allocator))
 /// to freeze the schema and obtain a shared [`Environment`] handle.
 pub struct EnvironmentBuilder {
-    /// Ordered entries: `(key, initial_value, TypeId, type_name)`.
+    /// Ordered entries: `(key, initial_value, TypeId, type_name, preassigned_channel)`.
     ///
     /// Stored as a `Vec` (not a `HashMap`) to preserve declaration order,
     /// which matters for deterministic unit tests and for GPU struct layout.
-    schema: Vec<(String, Box<dyn Any + Send + Sync>, TypeId, &'static str)>,
+    schema: Vec<(
+        String,
+        Box<dyn Any + Send + Sync>,
+        TypeId,
+        &'static str,
+        Option<ChannelID>,
+    )>,
 }
 
 impl EnvironmentBuilder {
@@ -96,10 +103,11 @@ impl EnvironmentBuilder {
 
         let new_type_id = TypeId::of::<T>();
 
-        if let Some(pos) = self.schema.iter().position(|(k, _, _, _)| k == &key) {
-            let (_, _, existing_type_id, existing_type_name) = &self.schema[pos];
+        if let Some(pos) = self.schema.iter().position(|(k, _, _, _, _)| k == &key) {
+            let (_, _, existing_type_id, existing_type_name, _) = &self.schema[pos];
             assert_eq!(
-                *existing_type_id, new_type_id,
+                *existing_type_id,
+                new_type_id,
                 "EnvironmentBuilder: key '{key}' was previously registered as \
                  {existing_type_name}, cannot re-register as {}",
                 std::any::type_name::<T>()
@@ -112,6 +120,45 @@ impl EnvironmentBuilder {
                 Box::new(default),
                 new_type_id,
                 std::any::type_name::<T>(),
+                None,
+            ));
+        }
+        self
+    }
+
+    /// Registers a typed key with a preassigned scheduler channel.
+    pub(crate) fn register_with_channel<T>(
+        mut self,
+        key: impl Into<String>,
+        default: T,
+        channel_id: ChannelID,
+    ) -> Self
+    where
+        T: Any + Clone + Send + Sync + 'static,
+    {
+        let key = key.into();
+        let new_type_id = TypeId::of::<T>();
+
+        if let Some(pos) = self.schema.iter().position(|(k, _, _, _, _)| k == &key) {
+            {
+                let (_, _, existing_type_id, existing_type_name, _) = &self.schema[pos];
+                assert_eq!(
+                    *existing_type_id,
+                    new_type_id,
+                    "EnvironmentBuilder: key '{key}' was previously registered as \
+                     {existing_type_name}, cannot re-register as {}",
+                    std::any::type_name::<T>()
+                );
+            }
+            self.schema[pos].1 = Box::new(default);
+            self.schema[pos].4 = Some(channel_id);
+        } else {
+            self.schema.push((
+                key,
+                Box::new(default),
+                new_type_id,
+                std::any::type_name::<T>(),
+                Some(channel_id),
             ));
         }
         self
@@ -151,8 +198,15 @@ impl EnvironmentBuilder {
     /// the allocator itself will panic (see
     /// [`ChannelAllocator::alloc`](crate::engine::channel_allocator::ChannelAllocator::alloc)).
     pub fn build_with_allocator(self, allocator: &mut ChannelAllocator) -> Arc<Environment> {
-        let channel_ids: Vec<_> = self.schema.iter().map(|_| allocator.alloc()).collect();
-        Arc::new(Environment::from_schema(self.schema, channel_ids))
+        let mut channel_ids = Vec::with_capacity(self.schema.len());
+        let mut schema = Vec::with_capacity(self.schema.len());
+
+        for (key, value, type_id, type_name, preassigned) in self.schema {
+            channel_ids.push(preassigned.unwrap_or_else(|| allocator.alloc()));
+            schema.push((key, value, type_id, type_name));
+        }
+
+        Arc::new(Environment::from_schema(schema, channel_ids))
     }
 }
 
@@ -269,7 +323,7 @@ mod tests {
             .register::<f32>("rate", 0.05)
             .build_with_allocator(&mut alloc);
 
-        let env_id   = env.channel_of("rate").unwrap();
+        let env_id = env.channel_of("rate").unwrap();
         let other_id = alloc.alloc();
 
         assert_ne!(env_id, other_id);

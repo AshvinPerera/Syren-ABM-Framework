@@ -15,21 +15,12 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::engine::types::ComponentID;
-use crate::engine::component::{
-    Signature,
-    component_id_of,
-    ComponentRegistry,
+use crate::engine::component::{component_id_of, ComponentRegistry, Signature};
+use crate::engine::error::{
+    ECSError, ECSResult, ExecutionError, InvalidAccessReason, RegistryError,
 };
 use crate::engine::systems::AccessSets;
-use crate::engine::error::{
-    ExecutionError,
-    InvalidAccessReason,
-    RegistryError,
-    ECSError,
-    ECSResult,
-};
-
+use crate::engine::types::ComponentID;
 
 /// Component signature used for query matching.
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,10 +41,10 @@ impl QuerySignature {
         archetype_signature.contains_all(&self.read)
             && archetype_signature.contains_all(&self.write)
             && archetype_signature
-            .components
-            .iter()
-            .zip(self.without.components.iter())
-            .all(|(arch_word, without_word)| (arch_word & without_word) == 0)
+                .components
+                .iter()
+                .zip(self.without.components.iter())
+                .all(|(arch_word, without_word)| (arch_word & without_word) == 0)
     }
 }
 
@@ -110,9 +101,7 @@ impl RegistrySource {
         match self {
             RegistrySource::Global => component_id_of::<T>(),
             RegistrySource::Instance(registry) => {
-                let registry = registry
-                    .read()
-                    .map_err(|_| RegistryError::PoisonedLock)?;
+                let registry = registry.read().map_err(|_| RegistryError::PoisonedLock)?;
                 Ok(registry.require_id_of::<T>()?)
             }
         }
@@ -205,7 +194,6 @@ impl QueryBuilder {
         self.writes.push(id);
         Ok(self)
     }
-
 
     /// Excludes component `T` from matching archetypes.
     pub fn without<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {

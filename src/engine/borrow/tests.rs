@@ -16,10 +16,10 @@
 //!   and a stress test asserting that state `1` is never transiently
 //!   observable during concurrent read-only access.
 
-use std::sync::atomic::Ordering;
-use crate::engine::types::ComponentID;
-use crate::engine::error::{AccessKind, ExecutionError, InvalidAccessReason};
 use super::*;
+use crate::engine::error::{AccessKind, ExecutionError, InvalidAccessReason};
+use crate::engine::types::ComponentID;
+use std::sync::atomic::Ordering;
 
 // Helpers
 
@@ -27,7 +27,11 @@ use super::*;
 macro_rules! assert_borrow_conflict {
     ($result:expr, $id:expr, $held:expr, $requested:expr) => {
         match $result.unwrap_err() {
-            ExecutionError::BorrowConflict { component_id, held, requested } => {
+            ExecutionError::BorrowConflict {
+                component_id,
+                held,
+                requested,
+            } => {
                 assert_eq!(component_id, $id);
                 assert_eq!(held, $held);
                 assert_eq!(requested, $requested);
@@ -265,7 +269,10 @@ fn guard_rejects_read_write_overlap() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        ExecutionError::InvalidQueryAccess { component_id, reason } => {
+        ExecutionError::InvalidQueryAccess {
+            component_id,
+            reason,
+        } => {
             assert_eq!(component_id, 5);
             assert_eq!(reason, InvalidAccessReason::ReadAndWrite);
         }
@@ -344,8 +351,8 @@ fn concurrent_release_read_never_produces_state_one() {
     // Stress test: many readers acquire and release concurrently.
     // At no point should the state ever be observed as 1 (write-locked),
     // which was possible with the old fetch_sub + store implementation.
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     let tracker = Arc::new(BorrowTracker::new());
     let id: ComponentID = 99;

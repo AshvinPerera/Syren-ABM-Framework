@@ -34,41 +34,22 @@ pub(crate) mod profiling;
 
 // Core ECS manager and world access
 
-pub use engine::manager::{
-    ECSManager,
-    ECSReference,
-    ECSData,
-    Read,
-    Write,
-};
+pub use engine::manager::{ECSData, ECSManager, ECSReference, Read, Write};
 
 // Entity types
 
-pub use engine::entity::{
-    Entity,
-    EntityLocation,
-    EntityShards,
-};
+pub use engine::entity::{Entity, EntityLocation, EntityShards};
 
 // Component registry and registration
 
-pub use engine::component::{
-    Signature,
-    ComponentRegistry,
-    DynamicBundle,
-    Bundle,
-    ComponentDesc,
-};
+pub use engine::component::{Bundle, ComponentDesc, ComponentRegistry, DynamicBundle, Signature};
 
 #[cfg(feature = "gpu")]
-pub use engine::component::{
-    GPUPod,
-    register_gpu_component,
-};
+pub use engine::component::{register_gpu_component, GPUPod};
 
 // Reduction primitives
 
-pub use engine::reduce::{Count, Sum, MinMax, Welford};
+pub use engine::reduce::{Count, MinMax, Sum, Welford};
 
 // Query construction
 
@@ -76,19 +57,16 @@ pub use engine::query::QueryBuilder;
 
 // Systems and scheduling
 
-pub use engine::systems::System;
-pub use engine::systems::{FnSystem, SystemBackend, AccessSets};
 #[cfg(feature = "gpu")]
 pub use engine::systems::GpuSystem;
+pub use engine::systems::System;
+pub use engine::systems::{AccessSets, FnSystem, SystemBackend};
 
 // Channel-aware scheduling
 
-pub use engine::systems::{ChannelSet, ChannelOrder};
+pub use engine::systems::{ChannelOrder, ChannelSet};
 
-pub use engine::scheduler::{
-    Stage,
-    Scheduler
-};
+pub use engine::scheduler::{Scheduler, Stage};
 
 // Deferred commands
 
@@ -97,12 +75,7 @@ pub use engine::commands::Command;
 // Error types
 
 pub use engine::error::{
-    ECSResult,
-    ECSError,
-    SpawnError,
-    AttributeError,
-    ExecutionError,
-    MoveError,
+    AttributeError, ECSError, ECSResult, ExecutionError, MoveError, SpawnError,
 };
 
 // User-attributable error context for boundary access.
@@ -110,23 +83,13 @@ pub use engine::error::BoundaryAccessFailure;
 
 // Primitive type aliases and constants
 
-pub use engine::types::{
-    EntityID,
-    ComponentID,
-    ArchetypeID,
-    SystemID,
-    ChunkID,
-    CHUNK_CAP,
-};
+pub use engine::types::{ArchetypeID, ChunkID, ComponentID, EntityID, SystemID, CHUNK_CAP};
 
 // Opaque scheduling identifiers.
-pub use engine::types::{ChannelID, BoundaryID};
+pub use engine::types::{BoundaryID, ChannelID};
 
 #[cfg(feature = "gpu")]
-pub use engine::types::{
-    GPUAccessMode,
-    GPUResourceID,
-};
+pub use engine::types::{GPUAccessMode, GPUResourceID};
 
 // Archetype and chunk borrowing
 
@@ -134,27 +97,31 @@ pub use engine::archetype::{Archetype, ChunkBorrow};
 
 // Storage utilities
 
-pub use engine::storage::{
-    Attribute,
-    TypeErasedAttribute,
-    cast_slice,
-    cast_slice_mut,
-};
+pub use engine::storage::{cast_slice, cast_slice_mut, Attribute, TypeErasedAttribute};
 
-pub use engine::boundary::BoundaryResource;
 pub use engine::activation::ActivationOrder;
+pub use engine::boundary::{BoundaryContext, BoundaryResource};
 pub use engine::channel_allocator::ChannelAllocator;
-pub use engine::plan_display::PlanDisplay;
 pub use engine::dot_export::DotExport;
+pub use engine::plan_display::PlanDisplay;
+pub use engine::workers::{max_workers, worker_id};
 
 // Profiling public API
-pub use profiling::profiler::{init, shutdown, span, span_fmt, thread_name, next_arg, SpanGuard, SpanName, Arg};
+pub use profiling::profiler::{
+    init, next_arg, shutdown, span, span_fmt, thread_name, Arg, SpanGuard, SpanName,
+};
 
 #[cfg(feature = "agents")]
 pub mod agents;
 
 #[cfg(feature = "environment")]
 pub mod environment;
+
+#[cfg(feature = "messaging")]
+pub mod messaging;
+
+#[cfg(feature = "model")]
+pub mod model;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Prelude (Optional but recommended)
@@ -168,14 +135,7 @@ pub mod environment;
 /// ```
 pub mod prelude {
     pub use crate::{
-        ECSManager,
-        ECSReference,
-        Entity,
-        QueryBuilder,
-        System,
-        FnSystem,
-        SystemBackend,
-        Signature,
-        ComponentRegistry,
+        ComponentRegistry, ECSManager, ECSReference, Entity, FnSystem, QueryBuilder, Signature,
+        System, SystemBackend,
     };
 }

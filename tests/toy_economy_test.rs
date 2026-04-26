@@ -1,9 +1,8 @@
 use std::sync::{Arc, RwLock};
 
 use abm_framework::{
-    Bundle, ComponentRegistry, ECSData, ECSError, ECSManager, ECSReference,
-    EntityShards, Scheduler, Command, ECSResult, AccessSets, System,
-    Count, Sum, Read, Write,
+    AccessSets, Bundle, Command, ComponentRegistry, Count, ECSData, ECSError, ECSManager,
+    ECSReference, ECSResult, EntityShards, Read, Scheduler, Sum, System, Write,
 };
 
 use abm_framework::{init, shutdown, span, thread_name, Arg};
@@ -60,12 +59,17 @@ impl ProductionSystem {
 }
 
 impl System for ProductionSystem {
-    fn id(&self) -> u16 { 1 }
+    fn id(&self) -> u16 {
+        1
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let query = ecs.query()?
+        let query = ecs
+            .query()?
             .read::<Production>()?
             .read::<TargetInventory>()?
             .write::<Inventory>()?
@@ -99,23 +103,29 @@ impl WagePaymentSystem {
 }
 
 impl System for WagePaymentSystem {
-    fn id(&self) -> u16 { 2 }
+    fn id(&self) -> u16 {
+        2
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let query = ecs.query()?
+        let query = ecs
+            .query()?
             .read::<Production>()?
             .read::<Wage>()?
             .write::<Cash>()?
             .build()?;
 
-        ecs.for_each::<(Read<Production>, Read<Wage>, Write<Cash>)>(
-            query,
-            &|(prod, wage, cash)| {
-                cash.0 -= prod.0 * wage.0;
-            },
-        )?;
+        ecs.for_each::<(Read<Production>, Read<Wage>, Write<Cash>)>(query, &|(
+            prod,
+            wage,
+            cash,
+        )| {
+            cash.0 -= prod.0 * wage.0;
+        })?;
 
         Ok(())
     }
@@ -135,24 +145,22 @@ impl SpendingSystem {
 }
 
 impl System for SpendingSystem {
-    fn id(&self) -> u16 { 3 }
+    fn id(&self) -> u16 {
+        3
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let query = ecs.query()?
-            .read::<AgentTag>()?
-            .write::<Cash>()?
-            .build()?;
+        let query = ecs.query()?.read::<AgentTag>()?.write::<Cash>()?.build()?;
 
-        ecs.for_each::<(Read<AgentTag>, Write<Cash>)>(
-            query,
-            &|(_, cash)| {
-                if cash.0 >= 1.0 {
-                    cash.0 -= 1.0;
-                }
-            },
-        )?;
+        ecs.for_each::<(Read<AgentTag>, Write<Cash>)>(query, &|(_, cash)| {
+            if cash.0 >= 1.0 {
+                cash.0 -= 1.0;
+            }
+        })?;
 
         Ok(())
     }
@@ -173,12 +181,17 @@ impl PriceSystem {
 }
 
 impl System for PriceSystem {
-    fn id(&self) -> u16 { 4 }
+    fn id(&self) -> u16 {
+        4
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let query = ecs.query()?
+        let query = ecs
+            .query()?
             .read::<Inventory>()?
             .read::<TargetInventory>()?
             .write::<Price>()?
@@ -213,26 +226,24 @@ impl HungerSystem {
 }
 
 impl System for HungerSystem {
-    fn id(&self) -> u16 { 5 }
+    fn id(&self) -> u16 {
+        5
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let query = ecs.query()?
-            .read::<Cash>()?
-            .write::<Hunger>()?
-            .build()?;
+        let query = ecs.query()?.read::<Cash>()?.write::<Hunger>()?.build()?;
 
-        ecs.for_each::<(Read<Cash>, Write<Hunger>)>(
-            query,
-            &|(cash, hunger)| {
-                if cash.0 >= 0.0 {
-                    hunger.0 = (hunger.0 - 1.0).max(0.0);
-                } else {
-                    hunger.0 += 1.0;
-                }
-            },
-        )?;
+        ecs.for_each::<(Read<Cash>, Write<Hunger>)>(query, &|(cash, hunger)| {
+            if cash.0 >= 0.0 {
+                hunger.0 = (hunger.0 - 1.0).max(0.0);
+            } else {
+                hunger.0 += 1.0;
+            }
+        })?;
 
         Ok(())
     }
@@ -325,15 +336,12 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
 
     // ─── SIMULATION LOOP ──────────────────────────────────────────────────────
     for step in 0..1000 {
-        let _tick = span("tick")
-            .arg("step", Arg::U64(step as u64));
+        let _tick = span("tick").arg("step", Arg::U64(step as u64));
 
         ecs.run(&mut scheduler)?;
 
         let world = ecs.world_ref();
-        let query = world.query()?
-            .read::<Price>()?
-            .build()?;
+        let query = world.query()?.read::<Price>()?.build()?;
 
         let sum = {
             let _g = span("reduce::sum_price");

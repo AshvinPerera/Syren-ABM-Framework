@@ -47,35 +47,19 @@
 
 use std::any::TypeId;
 
-use std::sync::{
-    Arc,
-    RwLock,
-    RwLockReadGuard,
-    RwLockWriteGuard,
-    Mutex,
-};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-use smallvec::SmallVec;
-
+use crate::engine::archetype::Archetype;
 use crate::engine::commands::Command;
-use crate::engine::types::{
-    ComponentID,
-    ArchetypeID,
-    ShardID,
-    SIGNATURE_SIZE,
-};
-use crate::engine::query::{QuerySignature, BuiltQuery};
-use crate::engine::archetype::{Archetype, ArchetypeMatch};
+use crate::engine::component::{ComponentRegistry, Signature};
 use crate::engine::entity::{Entity, EntityShards};
-use crate::engine::storage::TypeErasedAttribute;
-use crate::engine::component::{Signature, ComponentRegistry};
 use crate::engine::error::{
-    ECSResult, ECSError, ExecutionError, InternalViolation,
-    RegistryError, SpawnError, StaleEntityError, AccessKind,
-    AttributeError,
+    AccessKind, AttributeError, ECSError, ECSResult, ExecutionError, InternalViolation,
+    RegistryError, SpawnError, StaleEntityError,
 };
+use crate::engine::query::BuiltQuery;
+use crate::engine::types::{ArchetypeID, ComponentID, ShardID, SIGNATURE_SIZE};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::DirtyChunks;
@@ -85,8 +69,6 @@ use crate::engine::types::GPUResourceID;
 
 #[cfg(feature = "gpu")]
 use crate::gpu::{GPUResource, GPUResourceRegistry};
-
-use super::iteration::ChunkView;
 
 /// Core ECS storage and orchestration structure.
 pub struct ECSData {
@@ -138,8 +120,7 @@ impl ECSData {
     #[inline]
     fn pick_spawn_shard(&mut self) -> ShardID {
         let shard = self.next_spawn_shard;
-        self.next_spawn_shard =
-            (self.next_spawn_shard + 1) % (self.shards.shard_count() as u16);
+        self.next_spawn_shard = (self.next_spawn_shard + 1) % (self.shards.shard_count() as u16);
         shard
     }
 
@@ -164,7 +145,9 @@ impl ECSData {
         let id = self.archetypes.len() as ArchetypeID;
         self.signature_map.insert(key, id);
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
         let arch = Archetype::new(id, *signature, &registry)?;
         self.archetypes.push(arch);
@@ -228,7 +211,9 @@ impl ECSData {
         let (source, destination) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
 
         let factory = || registry.make_empty_component(added_component_id);
@@ -290,8 +275,7 @@ impl ECSData {
         new_signature.clear(removed_component_id);
 
         if new_signature.components.iter().all(|&bits| bits == 0) {
-            self.archetypes[source_id as usize]
-                .despawn_on(&mut self.shards, entity)?;
+            self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity)?;
             return Ok(());
         }
 
@@ -302,12 +286,12 @@ impl ECSData {
         let (source_arch, dest_arch) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
 
-        Self::ensure_shared_components(
-            &source_sig, dest_arch, removed_component_id, &registry,
-        )?;
+        Self::ensure_shared_components(&source_sig, dest_arch, removed_component_id, &registry)?;
 
         drop(registry);
 
@@ -350,25 +334,34 @@ impl ECSData {
         value: Box<dyn std::any::Any + Send>,
     ) -> ECSResult<()> {
         // 1. Resolve entity location.
-        let location = self.shards.get_location(entity)?
+        let location = self
+            .shards
+            .get_location(entity)?
             .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
 
         // 2. Verify archetype contains the component.
-        let archetype = self.archetypes
+        let archetype = self
+            .archetypes
             .get(location.archetype as usize)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
         if !archetype.has(component_id) {
-            return Err(ECSError::from(ExecutionError::MissingComponent { component_id }));
+            return Err(ECSError::from(ExecutionError::MissingComponent {
+                component_id,
+            }));
         }
 
         // 3. Acquire an exclusive write lock on the column.
         let col_lock = archetype
             .component_locked(component_id)
-            .ok_or(ECSError::from(ExecutionError::MissingComponent { component_id }))?;
+            .ok_or(ECSError::from(ExecutionError::MissingComponent {
+                component_id,
+            }))?;
 
         let mut col_guard = col_lock.write().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned { what: "component column (set)" })
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component column (set)",
+            })
         })?;
 
         // 4. Delegate the actual replace to the storage layer, which:
@@ -394,10 +387,7 @@ impl ECSData {
 
     /// Applies all queued deferred commands.
     /// `Spawn`, `Despawn`, `Add`, and `Remove` variants.
-    pub fn apply_deferred_commands(
-        &mut self,
-        commands: Vec<Command>,
-    ) -> ECSResult<Vec<Entity>> {
+    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) -> ECSResult<Vec<Entity>> {
         let mut spawned = Vec::new();
 
         for command in commands {
@@ -412,22 +402,35 @@ impl ECSData {
                 }
 
                 Command::Despawn { entity } => {
-                    let loc = self.shards.get_location(entity)
+                    let loc = self
+                        .shards
+                        .get_location(entity)
                         .map_err(ECSError::from)?
                         .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
                     let archetype = &mut self.archetypes[loc.archetype as usize];
                     archetype.despawn_on(&mut self.shards, entity)?;
                 }
 
-                Command::Add { entity, component_id, value } => {
+                Command::Add {
+                    entity,
+                    component_id,
+                    value,
+                } => {
                     self.add_component(entity, component_id, value)?;
                 }
 
-                Command::Remove { entity, component_id } => {
+                Command::Remove {
+                    entity,
+                    component_id,
+                } => {
                     self.remove_component(entity, component_id)?;
                 }
 
-                Command::Set { entity, component_id, value } => {
+                Command::Set {
+                    entity,
+                    component_id,
+                    value,
+                } => {
                     self.apply_set_command(entity, component_id, value)?;
                 }
             }
@@ -451,28 +454,13 @@ impl ECSData {
         registry: &ComponentRegistry,
     ) -> ECSResult<()> {
         for cid in source_sig.iterate_over_components() {
-            if cid == excluded { continue; }
+            if cid == excluded {
+                continue;
+            }
             let factory = || registry.make_empty_component(cid);
-            destination.ensure_component(cid, factory).map_err(ECSError::from)?;
-        }
-        Ok(())
-    }
-
-    fn collect_read_ptrs_by_id(
-        guards: &[(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)],
-        declaration_order: &[ComponentID],
-        chunk_id: crate::engine::types::ChunkID,
-        len: usize,
-        out: &mut Vec<(*const u8, usize)>,
-    ) -> Result<(), ExecutionError> {
-        for &cid in declaration_order {
-            let (_, g) = guards.iter()
-                .find(|(id, _)| *id == cid)
-                .ok_or(ExecutionError::InternalExecutionError)?;
-            let (ptr, bytes) = g
-                .chunk_bytes(chunk_id, len)
-                .ok_or(ExecutionError::InternalExecutionError)?;
-            out.push((ptr, bytes));
+            destination
+                .ensure_component(cid, factory)
+                .map_err(ECSError::from)?;
         }
         Ok(())
     }
@@ -505,26 +493,29 @@ impl ECSData {
         entity: Entity,
         component_id: ComponentID,
     ) -> ECSResult<T> {
-        let loc = self.shards.get_location(entity)?
+        let loc = self
+            .shards
+            .get_location(entity)?
             .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
 
-        let arch = self.archetypes.get(loc.archetype as usize)
+        let arch = self
+            .archetypes
+            .get(loc.archetype as usize)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        let col_lock = arch.component_locked(component_id)
-            .ok_or(ECSError::from(ExecutionError::MissingComponent { component_id }))?;
+        let col_lock = arch.component_locked(component_id).ok_or(ECSError::from(
+            ExecutionError::MissingComponent { component_id },
+        ))?;
 
         let col = col_lock.try_read().map_err(|e| match e {
-            std::sync::TryLockError::WouldBlock => ECSError::from(
-                ExecutionError::BorrowConflict {
-                    component_id,
-                    held: AccessKind::Write,
-                    requested: AccessKind::Read,
-                }
-            ),
-            std::sync::TryLockError::Poisoned(_) => ECSError::from(
-                ExecutionError::LockPoisoned { what: "component column" }
-            ),
+            std::sync::TryLockError::WouldBlock => ECSError::from(ExecutionError::BorrowConflict {
+                component_id,
+                held: AccessKind::Write,
+                requested: AccessKind::Read,
+            }),
+            std::sync::TryLockError::Poisoned(_) => ECSError::from(ExecutionError::LockPoisoned {
+                what: "component column",
+            }),
         })?;
 
         if col.element_type_id() != TypeId::of::<T>() {
@@ -532,12 +523,11 @@ impl ECSData {
         }
 
         let chunk_len = arch.chunk_valid_length(loc.chunk as usize)?;
-        let (ptr, bytes) = col.chunk_bytes(loc.chunk, chunk_len)
+        let (ptr, bytes) = col
+            .chunk_bytes(loc.chunk, chunk_len)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        let slice: &[T] = unsafe {
-            crate::engine::storage::cast_slice::<T>(ptr, bytes)
-        };
+        let slice: &[T] = unsafe { crate::engine::storage::cast_slice::<T>(ptr, bytes) };
 
         let row = loc.row as usize;
         if row >= slice.len() {
@@ -552,153 +542,24 @@ impl ECSData {
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
     ) -> Result<(), ExecutionError> {
-        let matches = self.matching_archetypes(&query.signature)?;
-        let f = Arc::new(f);
-        let abort = Arc::new(AtomicBool::new(false));
-        let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
+        super::query_executor::for_each_unchecked(&self.archetypes, query, f)
+    }
 
-        for matched_archetype in matches {
-            let archetype = &self.archetypes[matched_archetype.archetype_id as usize];
-
-            let mut lock_order: Vec<(ComponentID, bool)> =
-                Vec::with_capacity(query.reads.len() + query.writes.len());
-            for &cid in &query.reads  { lock_order.push((cid, false)); }
-            for &cid in &query.writes { lock_order.push((cid, true));  }
-            lock_order.sort_unstable_by_key(|(cid, _)| *cid);
-            lock_order.dedup_by_key(|(cid, _)| *cid);
-
-            let mut read_guards:  Vec<(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)>  = Vec::new();
-            let mut write_guards: Vec<(ComponentID, RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>)> = Vec::new();
-
-            for (cid, is_write) in &lock_order {
-                let locked = archetype.component_locked(*cid)
-                    .ok_or(ExecutionError::MissingComponent { component_id: *cid })?;
-                if *is_write {
-                    let g = locked.write().map_err(|_| ExecutionError::LockPoisoned {
-                        what: "component column (write)",
-                    })?;
-                    write_guards.push((*cid, g));
-                } else {
-                    let g = locked.read().map_err(|_| ExecutionError::LockPoisoned {
-                        what: "component column (read)",
-                    })?;
-                    read_guards.push((*cid, g));
-                }
-            }
-
-            let chunk_count = archetype
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            if chunk_count == 0 { continue; }
-
-            let mut chunk_lens = Vec::with_capacity(chunk_count);
-            for c in 0..chunk_count {
-                let len = archetype
-                    .chunk_valid_length(c)
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                chunk_lens.push(len);
-            }
-
-            let n_reads  = query.reads.len();
-            let n_writes = query.writes.len();
-
-            let mut read_ptrs:  Vec<(*const u8, usize)> = Vec::with_capacity(chunk_count * n_reads);
-            let mut write_ptrs: Vec<(*mut   u8, usize)> = Vec::with_capacity(chunk_count * n_writes);
-
-            for chunk in 0..chunk_count {
-                let len = chunk_lens[chunk];
-                let chunk_id = chunk as crate::engine::types::ChunkID;
-
-                if len == 0 {
-                    for _ in 0..n_reads  { read_ptrs .push((std::ptr::null(), 0)); }
-                    for _ in 0..n_writes { write_ptrs.push((std::ptr::null_mut(), 0)); }
-                    continue;
-                }
-
-                Self::collect_read_ptrs_by_id(&read_guards, &query.reads, chunk_id, len, &mut read_ptrs)?;
-
-                for &cid in &query.writes {
-                    let (_, g) = write_guards.iter_mut()
-                        .find(|(id, _)| *id == cid)
-                        .ok_or(ExecutionError::InternalExecutionError)?;
-                    let (ptr, bytes) = g.chunk_bytes_mut(chunk_id, len)
-                        .ok_or(ExecutionError::InternalExecutionError)?;
-                    write_ptrs.push((ptr, bytes));
-                }
-            }
-
-            let views = ChunkView {
-                chunk_count,
-                chunk_lens,
-                n_reads,
-                n_writes,
-                read_ptrs,
-                write_ptrs,
-            };
-
-            let threads = rayon::current_num_threads().max(1);
-            let grainsize = (views.chunk_count / threads).max(8);
-            let views_ref = &views;
-            let f_ref = &*f;
-            let abort_ref = &abort;
-            let err_ref = &err;
-
-            rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
-                    let abort = abort_ref.clone();
-                    let _err   = err_ref.clone();
-                    let views = views_ref;
-
-                    s.spawn(move |_| {
-                        if abort.load(Ordering::Acquire) { return; }
-
-                        let mut read_views:  SmallVec<[&[u8]; 8]>      = SmallVec::new();
-                        let mut write_views: SmallVec<[&mut [u8]; 8]>  = SmallVec::new();
-
-                        for chunk in start..end {
-                            let len = views.chunk_lens[chunk];
-                            if len == 0 { continue; }
-
-                            read_views.clear();
-                            write_views.clear();
-
-                            let rbase = chunk * views.n_reads;
-                            for i in 0..views.n_reads {
-                                let (ptr, bytes) = views.read_ptrs[rbase + i];
-                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
-                            }
-
-                            let wbase = chunk * views.n_writes;
-                            for i in 0..views.n_writes {
-                                let (ptr, bytes) = views.write_ptrs[wbase + i];
-                                unsafe { write_views.push(std::slice::from_raw_parts_mut(ptr, bytes)); }
-                            }
-
-                            // SAFETY: The caller (ECSReference::for_each_abstraction) holds
-                            // the shared phase lock and has validated borrows; the byte slices
-                            // correspond to correctly typed and aligned component storage.
-                            f_ref(&read_views, &mut write_views);
-                        }
-                    });
-
-                    start = end;
-                }
-            });
-
-            if abort.load(Ordering::Acquire) {
-                let guard = err.lock().map_err(|_| ExecutionError::LockPoisoned {
-                    what: "job error latch",
-                })?;
-                return Err(guard.clone().unwrap_or(ExecutionError::InternalExecutionError));
-            }
-
-            drop(read_guards);
-            drop(write_guards);
-        }
-
-        Ok(())
+    /// Parallel chunk iteration whose closure may return an error.
+    ///
+    /// Identical contract to [`for_each_abstraction_unchecked`] for borrow,
+    /// phase, and aliasing safety, but the user closure returns
+    /// [`ECSResult<()>`]. If any chunk's closure returns `Err`, every other
+    /// chunk in the same archetype short-circuits and the lowest-chunk-index
+    /// error is returned. The selected error is therefore deterministic in
+    /// the chunk identifier rather than wall-clock first-to-error, so
+    /// repeated runs over identical data produce identical error reports.
+    pub(crate) fn for_each_abstraction_fallible_unchecked(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) -> crate::engine::error::ECSResult<()> + Send + Sync,
+    ) -> crate::engine::error::ECSResult<()> {
+        super::query_executor::for_each_fallible_unchecked(&self.archetypes, query, f)
     }
 
     pub(crate) fn reduce_abstraction_unchecked<R>(
@@ -711,135 +572,20 @@ impl ECSData {
     where
         R: Send + 'static,
     {
-        let matches = self.matching_archetypes(&query.signature)?;
-        let init = Arc::new(init);
-        let fold_chunk = Arc::new(fold_chunk);
-        let combine = Arc::new(combine);
-        let partials: Arc<Mutex<Vec<(usize, R)>>> = Arc::new(Mutex::new(Vec::new()));
-
-        for matched in matches {
-            let archetype = &self.archetypes[matched.archetype_id as usize];
-
-            let mut sorted_reads: Vec<ComponentID> = query.reads.clone();
-            sorted_reads.sort_unstable();
-
-            let mut read_guards: Vec<(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)> =
-                Vec::with_capacity(query.reads.len());
-
-            for &cid in &sorted_reads {
-                let locked = archetype
-                    .component_locked(cid)
-                    .ok_or(ExecutionError::MissingComponent { component_id: cid })?;
-                let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
-                    what: "component column (read)",
-                })?;
-                read_guards.push((cid, guard));
-            }
-
-            let chunk_count = archetype
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            if chunk_count == 0 { continue; }
-
-            let mut chunk_lens = Vec::with_capacity(chunk_count);
-            for c in 0..chunk_count {
-                let len = archetype
-                    .chunk_valid_length(c)
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                chunk_lens.push(len);
-            }
-
-            let n_reads = query.reads.len();
-            let mut read_ptrs: Vec<(*const u8, usize)> =
-                Vec::with_capacity(chunk_count * n_reads);
-
-            for chunk in 0..chunk_count {
-                let len = chunk_lens[chunk];
-                if len == 0 {
-                    for _ in 0..n_reads { read_ptrs.push((std::ptr::null(), 0)); }
-                    continue;
-                }
-                let chunk_id = chunk as crate::engine::types::ChunkID;
-                Self::collect_read_ptrs_by_id(&read_guards, &query.reads, chunk_id, len, &mut read_ptrs)?;
-            }
-
-            let views = ChunkView {
-                chunk_count,
-                chunk_lens,
-                n_reads,
-                n_writes: 0,
-                read_ptrs,
-                write_ptrs: Vec::new(),
-            };
-
-            let threads = rayon::current_num_threads().max(1);
-            let grainsize = (views.chunk_count / threads).max(8);
-            let views_ref = &views;
-
-            rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
-                    let init = init.clone();
-                    let fold_chunk = fold_chunk.clone();
-                    let partials = partials.clone();
-                    let views = views_ref;
-
-                    s.spawn(move |_| {
-                        let mut local = init();
-                        let mut read_views: SmallVec<[&[u8]; 8]> =
-                            SmallVec::with_capacity(views.n_reads);
-
-                        for chunk in start..end {
-                            let len = views.chunk_lens[chunk];
-                            if len == 0 { continue; }
-                            read_views.clear();
-                            let base = chunk * views.n_reads;
-                            for i in 0..views.n_reads {
-                                let (ptr, bytes) = views.read_ptrs[base + i];
-                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
-                            }
-                            fold_chunk(&mut local, &read_views, len);
-                        }
-
-                        partials.lock().unwrap().push((start, local));
-                    });
-
-                    start = end;
-                }
-            });
-
-            drop(read_guards);
-        }
-
-        let mut parts = partials.lock().unwrap();
-        parts.sort_by_key(|(start, _)| *start);
-        let mut out = init();
-        for (_, p) in parts.drain(..) { combine(&mut out, p); }
-        Ok(out)
-    }
-
-    fn matching_archetypes(
-        &self,
-        query: &QuerySignature,
-    ) -> Result<Vec<ArchetypeMatch>, ExecutionError> {
-        let mut out = Vec::new();
-        for a in &self.archetypes {
-            if !query.requires_all(a.signature()) { continue; }
-            let chunks = a.chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            out.push(ArchetypeMatch { archetype_id: a.archetype_id(), chunks });
-        }
-        Ok(out)
+        super::query_executor::reduce_unchecked(&self.archetypes, query, init, fold_chunk, combine)
     }
 
     #[cfg(feature = "gpu")]
     #[inline]
-    pub(crate) fn archetypes(&self) -> &[Archetype] { &self.archetypes }
+    pub(crate) fn archetypes(&self) -> &[Archetype] {
+        &self.archetypes
+    }
 
     #[cfg(feature = "gpu")]
     #[inline]
-    pub(crate) fn archetypes_mut(&mut self) -> &mut [Archetype] { &mut self.archetypes }
+    pub(crate) fn archetypes_mut(&mut self) -> &mut [Archetype] {
+        &mut self.archetypes
+    }
 
     #[cfg(feature = "gpu")]
     /// Registers a GPU resource with the ECS world.
@@ -874,7 +620,9 @@ impl ECSData {
     /// The registry holds all world-owned GPU resources (buffers, textures,
     /// bind groups) and provides lookup by [`GPUResourceID`]. This is used
     /// by GPU systems to access resources during execution.
-    pub fn gpu_resources(&self) -> &GPUResourceRegistry { &self.gpu_resources }
+    pub fn gpu_resources(&self) -> &GPUResourceRegistry {
+        &self.gpu_resources
+    }
 
     #[cfg(feature = "gpu")]
     #[inline]
@@ -886,5 +634,7 @@ impl ECSData {
     /// # Safety
     /// Callers must ensure that no GPU systems are currently executing when
     /// mutating the registry, as this may invalidate active resource bindings.
-    pub fn gpu_resources_mut(&mut self) -> &mut GPUResourceRegistry { &mut self.gpu_resources }
+    pub fn gpu_resources_mut(&mut self) -> &mut GPUResourceRegistry {
+        &mut self.gpu_resources
+    }
 }

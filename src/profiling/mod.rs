@@ -43,5 +43,4 @@
 ///
 /// This profiler is intended for **performance analysis and optimization**
 /// of ECS scheduling, system execution, query iteration, and GPU dispatch.
-
 pub mod profiler;

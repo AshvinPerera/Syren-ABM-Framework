@@ -32,8 +32,8 @@
 //! - GPU safety is opt-in and carries no automatic enforcement — it is a hint for
 //!   systems that need to distinguish GPU-uploadable components.
 
-use std::any::{TypeId, type_name};
-use std::mem::{size_of, align_of};
+use std::any::{type_name, TypeId};
+use std::mem::{align_of, size_of};
 
 use crate::engine::types::ComponentID;
 
@@ -76,7 +76,6 @@ pub struct ComponentDesc {
 }
 
 impl ComponentDesc {
-
     /// Creates a descriptor from explicit metadata.
     #[inline]
     pub fn new(
@@ -85,9 +84,16 @@ impl ComponentDesc {
         type_id: TypeId,
         size: usize,
         align: usize,
-        gpu_usage: bool
+        gpu_usage: bool,
     ) -> Self {
-        Self { component_id, name, type_id, size, align, gpu_usage }
+        Self {
+            component_id,
+            name,
+            type_id,
+            size,
+            align,
+            gpu_usage,
+        }
     }
 
     /// Constructs a descriptor for type `T` using its `TypeId`, name, size, and alignment.

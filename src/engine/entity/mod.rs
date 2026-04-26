@@ -47,9 +47,9 @@
 //! - Never mutating entity metadata while systems hold archetype borrows
 //! - Applying structural changes only at synchronization points
 
+mod entities;
 mod entity;
 mod location;
-mod entities;
 mod shards;
 
 pub use entity::Entity;

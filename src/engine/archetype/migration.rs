@@ -44,33 +44,17 @@
 
 use std::any::Any;
 
-use crate::engine::types::{
-    ChunkID,
-    RowID,
-    ComponentID,
-    SIGNATURE_SIZE,
-};
+use crate::engine::types::{ChunkID, ComponentID, RowID, SIGNATURE_SIZE};
 
-use crate::engine::entity::{
-    Entity,
-    EntityLocation,
-    EntityShards,
-};
+use crate::engine::entity::{Entity, EntityLocation, EntityShards};
 
 use crate::engine::component::iter_bits_from_words;
 
-use crate::engine::error::{
-    MoveError,
-    ECSError,
-    ECSResult,
-    InternalViolation,
-};
+use crate::engine::error::{ECSError, ECSResult, InternalViolation, MoveError};
 
 use super::core::Archetype;
 
-
 impl Archetype {
-
     /// Moves component data shared between source and destination archetypes.
     ///
     /// ## Purpose
@@ -114,9 +98,8 @@ impl Archetype {
         &mut self,
         destination: &mut Archetype,
         source_position: (ChunkID, RowID),
-        shared_components: Vec<ComponentID>
-    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), MoveError>
-    {
+        shared_components: Vec<ComponentID>,
+    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), MoveError> {
         let (source_chunk, source_row) = source_position;
         let mut destination_position: Option<(ChunkID, RowID)> = None;
         let mut swap_information: Option<(ChunkID, RowID)> = None;
@@ -126,19 +109,23 @@ impl Archetype {
                 continue;
             }
 
-            let src_attr = self.find_component(component_id)
+            let src_attr = self
+                .find_component(component_id)
                 .ok_or(MoveError::InconsistentStorage)?;
-            let dst_attr = destination.find_component(component_id)
+            let dst_attr = destination
+                .find_component(component_id)
                 .ok_or(MoveError::InconsistentStorage)?;
 
             let mut src_guard = Self::lock_write_move(src_attr, component_id)?;
             let mut dst_guard = Self::lock_write_move(dst_attr, component_id)?;
 
-            let ((dst_chunk, dst_row), moved_from) =
-                dst_guard
-                    .as_mut()
-                    .push_from_dyn(src_guard.as_mut(), source_chunk, source_row)
-                    .map_err(|e| MoveError::PushFromFailed { component_id, source_error: e })?;
+            let ((dst_chunk, dst_row), moved_from) = dst_guard
+                .as_mut()
+                .push_from_dyn(src_guard.as_mut(), source_chunk, source_row)
+                .map_err(|e| MoveError::PushFromFailed {
+                    component_id,
+                    source_error: e,
+                })?;
 
             match destination_position {
                 Some(pos) if pos != (dst_chunk, dst_row) => {
@@ -187,8 +174,7 @@ impl Archetype {
         destination: &mut Archetype,
         destination_position: (ChunkID, RowID),
         added_components: Vec<(ComponentID, Box<dyn Any>)>,
-    ) -> Result<(), MoveError>
-    {
+    ) -> Result<(), MoveError> {
         let (dst_chunk, dst_row) = destination_position;
 
         for (component_id, value) in added_components {
@@ -196,7 +182,8 @@ impl Archetype {
                 continue;
             }
 
-            let dst_attr = destination.find_component(component_id)
+            let dst_attr = destination
+                .find_component(component_id)
                 .ok_or(MoveError::InconsistentStorage)?;
 
             let mut dst_guard = Self::lock_write_move(dst_attr, component_id)?;
@@ -205,7 +192,10 @@ impl Archetype {
                 dst_guard
                     .as_mut()
                     .push_dyn(value)
-                    .map_err(|e| MoveError::PushFailed { component_id, source_error: e })?;
+                    .map_err(|e| MoveError::PushFailed {
+                        component_id,
+                        source_error: e,
+                    })?;
 
             if (chunk, row) != (dst_chunk, dst_row) {
                 return Err(MoveError::RowMisalignment {
@@ -239,8 +229,7 @@ impl Archetype {
         source_position: (ChunkID, RowID),
         removed_components: &[ComponentID],
         source_swap_position: Option<(ChunkID, RowID)>,
-    ) -> Result<(), MoveError>
-    {
+    ) -> Result<(), MoveError> {
         let (src_chunk, src_row) = source_position;
 
         for &component_id in removed_components {
@@ -248,16 +237,19 @@ impl Archetype {
                 continue;
             }
 
-            let src_attr = self.find_component(component_id)
+            let src_attr = self
+                .find_component(component_id)
                 .ok_or(MoveError::InconsistentStorage)?;
 
             let mut src_guard = Self::lock_write_move(src_attr, component_id)?;
 
-            let moved_from =
-                src_guard
-                    .as_mut()
-                    .swap_remove_dyn(src_chunk, src_row)
-                    .map_err(|e| MoveError::SwapRemoveError { component_id, source_error: e })?;
+            let moved_from = src_guard
+                .as_mut()
+                .swap_remove_dyn(src_chunk, src_row)
+                .map_err(|e| MoveError::SwapRemoveError {
+                    component_id,
+                    source_error: e,
+                })?;
 
             if let Some(moved_from) = moved_from {
                 if let Some(expected) = source_swap_position {
@@ -298,27 +290,34 @@ impl Archetype {
         let (source_chunk, source_row) = source_position;
 
         {
-            let mut dest_meta = destination.meta.write().map_err(|_| MoveError::MetadataFailure {
+            let mut dest_meta =
+                destination
+                    .meta
+                    .write()
+                    .map_err(|_| MoveError::MetadataFailure {
+                        entity: None,
+                        source_archetype: None,
+                        destination_archetype: None,
+                    })?;
+            Self::ensure_capacity(&mut dest_meta, destination_chunk as usize + 1);
+            dest_meta.entity_positions[destination_chunk as usize][destination_row as usize] =
+                Some(entity);
+        }
+
+        shards
+            .set_location(
+                entity,
+                EntityLocation {
+                    archetype: destination.archetype_id,
+                    chunk: destination_chunk,
+                    row: destination_row,
+                },
+            )
+            .map_err(|_| MoveError::MetadataFailure {
                 entity: None,
                 source_archetype: None,
                 destination_archetype: None,
             })?;
-            Self::ensure_capacity(&mut dest_meta, destination_chunk as usize + 1);
-            dest_meta.entity_positions[destination_chunk as usize][destination_row as usize] = Some(entity);
-        }
-
-        shards.set_location(
-            entity,
-            EntityLocation {
-                archetype: destination.archetype_id,
-                chunk: destination_chunk,
-                row: destination_row,
-            },
-        ).map_err(|_| MoveError::MetadataFailure {
-            entity: None,
-            source_archetype: None,
-            destination_archetype: None,
-        })?;
 
         let mut src_meta = self.meta.write().map_err(|_| MoveError::MetadataFailure {
             entity: None,
@@ -330,27 +329,31 @@ impl Archetype {
             Some((last_chunk, last_row)) => {
                 Self::ensure_capacity(&mut src_meta, last_chunk as usize + 1);
 
-                let swapped_entity = src_meta.entity_positions[last_chunk as usize][last_row as usize]
+                let swapped_entity = src_meta.entity_positions[last_chunk as usize]
+                    [last_row as usize]
                     .ok_or(MoveError::MetadataFailure {
                         entity: None,
                         source_archetype: None,
                         destination_archetype: None,
                     })?;
 
-                src_meta.entity_positions[source_chunk as usize][source_row as usize] = Some(swapped_entity);
+                src_meta.entity_positions[source_chunk as usize][source_row as usize] =
+                    Some(swapped_entity);
 
-                shards.set_location(
-                    swapped_entity,
-                    EntityLocation {
-                        archetype: self.archetype_id,
-                        chunk: source_chunk,
-                        row: source_row,
-                    },
-                ).map_err(|_| MoveError::MetadataFailure {
-                    entity: None,
-                    source_archetype: None,
-                    destination_archetype: None,
-                })?;
+                shards
+                    .set_location(
+                        swapped_entity,
+                        EntityLocation {
+                            archetype: self.archetype_id,
+                            chunk: source_chunk,
+                            row: source_row,
+                        },
+                    )
+                    .map_err(|_| MoveError::MetadataFailure {
+                        entity: None,
+                        source_archetype: None,
+                        destination_archetype: None,
+                    })?;
 
                 src_meta.entity_positions[last_chunk as usize][last_row as usize] = None;
             }
@@ -457,8 +460,7 @@ impl Archetype {
             destination_only_words[i] = b & !a;
         }
 
-        let shared_components: Vec<ComponentID> =
-            iter_bits_from_words(&shared_words).collect();
+        let shared_components: Vec<ComponentID> = iter_bits_from_words(&shared_words).collect();
 
         let source_only_components: Vec<ComponentID> =
             iter_bits_from_words(&source_only_words).collect();
@@ -478,8 +480,11 @@ impl Archetype {
             }
         }
 
-        let (destination_position, source_swap_position) =
-            self.move_row_across_shared_components(destination, source_position, shared_components)?;
+        let (destination_position, source_swap_position) = self.move_row_across_shared_components(
+            destination,
+            source_position,
+            shared_components,
+        )?;
 
         self.add_row_in_components_at_destination(
             destination,
@@ -490,7 +495,7 @@ impl Archetype {
         self.remove_row_in_components_at_source(
             source_position,
             &source_only_components,
-            source_swap_position
+            source_swap_position,
         )?;
 
         self.update_entity_on_row_move(
@@ -499,18 +504,24 @@ impl Archetype {
             destination_position,
             source_swap_position,
             shards,
-            entity
+            entity,
         )?;
 
         // NOTE: Metadata lock is acquired only after all column locks (from the
         // phases above) have been dropped, respecting the lock ordering contract.
         {
-            let mut dmeta = destination.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut dmeta = destination
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
             dmeta.length += 1;
         }
 
         {
-            let mut smeta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut smeta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
             smeta.length = smeta.length.saturating_sub(1);
             if smeta.length == 0 {
                 smeta.entity_positions.clear();

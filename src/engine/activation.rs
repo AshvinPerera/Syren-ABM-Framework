@@ -29,7 +29,6 @@
 //! - [`Scheduler::set_activation_order`](crate::engine::scheduler::Scheduler::set_activation_order)
 //! - [`Scheduler::activation_order`](crate::engine::scheduler::Scheduler::activation_order)
 
-
 /// Controls the order in which entities are visited by a system's iteration.
 ///
 /// See the [module-level documentation](self) for a comparison of variants.

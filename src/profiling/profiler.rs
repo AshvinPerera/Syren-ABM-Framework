@@ -11,11 +11,12 @@
 //!   abm_framework::profiler::shutdown();
 
 use std::borrow::Cow;
-use std::path::Path;
 use std::fmt;
+use std::path::Path;
 
 #[cfg(feature = "profiling")]
 mod enabled {
+    use std::borrow::Cow;
     use std::cell::RefCell;
     use std::fs::File;
     use std::io::{BufWriter, Write};
@@ -23,7 +24,6 @@ mod enabled {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
-    use std::borrow::Cow;
 
     use super::*;
 
@@ -217,7 +217,12 @@ mod enabled {
                     }
                     write!(w, "}}")?;
                 }
-                TraceEvent::ThreadName { ts_us, pid, tid, name } => {
+                TraceEvent::ThreadName {
+                    ts_us,
+                    pid,
+                    tid,
+                    name,
+                } => {
                     write!(
                         w,
                         "{{\"name\":\"thread_name\",\"ph\":\"M\",\"ts\":{},\"pid\":{},\"tid\":{},\"args\":{{\"name\":",

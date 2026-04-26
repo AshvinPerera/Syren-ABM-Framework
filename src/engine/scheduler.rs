@@ -1,48 +1,22 @@
 //! ECS system scheduling and execution.
 //!
-//! This module is responsible for:
-//! * grouping systems into execution stages based on access compatibility,
-//! * running compatible systems in parallel using Rayon,
-//! * enforcing structural synchronisation points between stages,
-//! * channel-aware stage packing and cycle detection,
-//! * per-system activation order and explicit ordering constraints,
-//! * human-readable and Graphviz plan export.
-//!
-//! ## Scheduling model
-//!
-//! Systems are assigned to **stages** such that:
-//! * systems within the same stage do **not** conflict on component access,
-//! * systems within the same stage do **not** have a producer/consumer
-//!   channel relationship,
-//! * all systems in a stage may run in parallel,
-//! * stages are executed sequentially.
-//!
-//! ## Channel finalisation
-//!
-//! After packing, each `Stage` records which channels are "finalised" by that
-//! stage — meaning the stage contains the last producer in the schedule and a
-//! `Boundary` follows before any consumer. At each `Boundary` stage, the
-//! scheduler calls `ECSManager::finalise_boundaries` with that set of channels
-//! so boundary resources (e.g., `MessageBufferSet`) can merge thread-local
-//! buffers and build acceleration indices.
-//!
-//! ## Cycle detection
-//!
-//! After packing, a Kahn-style topological sort is run over the combined
-//! (component-conflict + channel-ordering) partial order. If a cycle is
-//! detected, `rebuild` stores the error and `run` returns it immediately.
+//! The scheduler compiles declared system access into an execution plan. The
+//! plan is built from a dependency graph so producer/consumer channels and
+//! explicit ordering constraints determine execution order, while component
+//! conflicts are serialized deterministically without forcing a command
+//! boundary.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use rayon::prelude::*;
 
 use crate::engine::activation::ActivationOrder;
+use crate::engine::component::or_signature_in_place;
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::manager::ECSReference;
 use crate::engine::systems::{AccessSets, System, SystemBackend};
-use crate::engine::component::or_signature_in_place;
 use crate::engine::types::{ChannelID, SystemID};
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 use crate::profiling::profiler;
 
 #[cfg(feature = "gpu")]
@@ -50,7 +24,6 @@ use crate::engine::types::GPUResourceID;
 
 #[cfg(feature = "gpu")]
 use crate::gpu;
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StageType {
@@ -60,28 +33,27 @@ enum StageType {
 }
 
 impl Default for StageType {
-    fn default() -> Self { StageType::Cpu }
+    fn default() -> Self {
+        StageType::Cpu
+    }
 }
 
 /// A logical execution stage used by [`Scheduler`] during planning.
 ///
-/// Stores *indices* into the scheduler's system list. Boundary stages carry
-/// the list of channels whose last producer lives in the preceding CPU/GPU
-/// stage; the scheduler finalises those channels at this boundary.
+/// Stores indices into the scheduler's system list. Boundary stages carry
+/// channels that should be finalised at that synchronization point.
 #[derive(Clone, Debug, Default)]
 pub struct Stage {
     stage_type: StageType,
     /// Indices of systems that execute in this stage.
     pub(crate) system_indices: Vec<usize>,
-    /// Aggregate access of all systems in this stage (for conflict detection).
+    /// Aggregate access of all systems in this stage.
     aggregate_access: AccessSets,
 
     #[cfg(feature = "gpu")]
     gpu_write_resources: Vec<GPUResourceID>,
 
-    /// Channels whose last producer is in the CPU/GPU stage immediately
-    /// preceding this boundary. Populated during `rebuild`; empty for
-    /// non-boundary stages and boundary stages with no finalised channels.
+    /// Channels finalised at this boundary.
     pub(crate) finalised_channels: Vec<ChannelID>,
 }
 
@@ -119,45 +91,35 @@ impl Stage {
         }
     }
 
-    /// Returns true if `access` does NOT conflict with anything already in this stage.
-    ///
-    /// Checks both component conflicts and channel ordering constraints.
+    /// Returns true if `access` does not conflict with this CPU stage.
     #[inline]
     pub fn can_accept(&self, access: &AccessSets) -> bool {
         debug_assert_eq!(self.stage_type, StageType::Cpu);
-
-        // Component conflicts (existing rule).
-        if access.conflicts_with(&self.aggregate_access) {
-            return false;
-        }
-        // Channel ordering: if the incoming system produces a channel already
-        // consumed in this stage — or consumes a channel already produced —
-        // they must be in different stages.
-        if access.produces.intersects(&self.aggregate_access.consumes) {
-            return false;
-        }
-        if access.consumes.intersects(&self.aggregate_access.produces) {
-            return false;
-        }
-        true
+        !access.conflicts_with(&self.aggregate_access)
     }
 
-    /// Adds a system index to this stage and merges its access (CPU only).
+    /// Adds a system index to this CPU stage and merges its access.
     #[inline]
     pub fn push_cpu(&mut self, index: usize, access: &AccessSets) {
         debug_assert_eq!(self.stage_type, StageType::Cpu);
         self.system_indices.push(index);
-        or_signature_in_place(&mut self.aggregate_access.read,  &access.read);
+        self.merge_access(access);
+    }
+
+    /// Adds a system index to this GPU stage.
+    #[inline]
+    pub fn push_gpu(&mut self, index: usize, access: &AccessSets) {
+        debug_assert_eq!(self.stage_type, StageType::Gpu);
+        self.system_indices.push(index);
+        self.merge_access(access);
+    }
+
+    #[inline]
+    fn merge_access(&mut self, access: &AccessSets) {
+        or_signature_in_place(&mut self.aggregate_access.read, &access.read);
         or_signature_in_place(&mut self.aggregate_access.write, &access.write);
         self.aggregate_access.produces.or_in_place(&access.produces);
         self.aggregate_access.consumes.or_in_place(&access.consumes);
-    }
-
-    /// Adds a system index to this stage (GPU only; executed sequentially).
-    #[inline]
-    pub fn push_gpu(&mut self, index: usize) {
-        debug_assert_eq!(self.stage_type, StageType::Gpu);
-        self.system_indices.push(index);
     }
 
     /// Returns true if this stage is a boundary marker.
@@ -166,18 +128,13 @@ impl Stage {
         self.stage_type == StageType::Boundary
     }
 
-    /// Returns the member system indices (positions into the scheduler's
-    /// owning `systems: Vec<Box<dyn System>>`).
-    ///
-    /// Exposed as a read-only slice so external callers inspecting a
-    /// compiled plan cannot mutate the scheduler's internal state.
+    /// Returns member system indices.
     #[inline]
     pub fn system_indices(&self) -> &[usize] {
         &self.system_indices
     }
 
-    /// Returns the channels finalised at this boundary, or an empty slice
-    /// for non-boundary stages.
+    /// Returns channels finalised at this boundary.
     #[inline]
     pub fn finalised_channels(&self) -> &[ChannelID] {
         &self.finalised_channels
@@ -185,14 +142,29 @@ impl Stage {
 }
 
 /// An explicit stage-ordering constraint between two systems.
-///
-/// `dependent` must be placed in a strictly later stage than `dependency`.
-/// Used for cases not expressible via access sets (e.g., "always run the
-/// logger last").
 #[derive(Clone, Copy, Debug)]
 struct OrderingEdge {
     dependency: SystemID,
-    dependent:  SystemID,
+    dependent: SystemID,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EdgeKind {
+    Ordered,
+    Boundary,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DependencyEdge {
+    to: usize,
+    kind: EdgeKind,
+}
+
+struct DependencyGraph {
+    sorted_indices: Vec<usize>,
+    edges: Vec<Vec<DependencyEdge>>,
+    in_degree: Vec<usize>,
+    boundary_predecessors: Vec<Vec<usize>>,
 }
 
 /// Stores systems, compiles them into conflict-free execution stages, and
@@ -204,22 +176,21 @@ pub struct Scheduler {
     /// Whether `plan` needs rebuilding.
     dirty: bool,
     /// Compile error set by `rebuild` if a cycle is detected.
-    /// Cleared at the start of each rebuild and recomputed.
     cycle_error: Option<ECSError>,
-    /// Registration-time error set by `add_boxed` when a system's
-    /// `AccessSets::validate()` fails. **Persists across rebuilds** — only
-    /// cleared by `clear()`. Surfaced by `run()` alongside `cycle_error`.
+    /// Registration-time validation error surfaced by `run`.
     validation_error: Option<ECSError>,
-    /// Per-system activation orders (keyed by SystemID).
+    /// Per-system activation orders.
     activation_orders: Vec<(SystemID, ActivationOrder)>,
     /// Global RNG seed for shuffle activation orders.
     seed: u64,
-    /// Explicit ordering edges (dependency must precede dependent).
+    /// Explicit ordering edges.
     ordering_edges: Vec<OrderingEdge>,
 }
 
 impl Default for Scheduler {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Scheduler {
@@ -240,20 +211,17 @@ impl Scheduler {
 
     /// Returns the number of registered systems.
     #[inline]
-    pub fn len(&self) -> usize { self.systems.len() }
+    pub fn len(&self) -> usize {
+        self.systems.len()
+    }
 
     /// Returns `true` if no systems are registered.
     #[inline]
-    pub fn is_empty(&self) -> bool { self.systems.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.systems.is_empty()
+    }
 
     /// Removes all systems and stages.
-    /// Removes all systems and stages.
-    ///
-    /// Resets all registration-time state: registered systems, compiled
-    /// stages, explicit ordering edges, activation-order overrides, and
-    /// both the validation and cycle errors. Does **not** reset the
-    /// global RNG seed set by [`Scheduler::seed`]; call `.seed(0)`
-    /// explicitly if a seed reset is required.
     #[inline]
     pub fn clear(&mut self) {
         self.systems.clear();
@@ -266,21 +234,19 @@ impl Scheduler {
     }
 
     /// Registers a boxed system.
-    ///
-    /// The system's declared [`AccessSets`] is validated at registration
-    /// time. If validation fails (e.g., the system declares the same
-    /// channel in both `produces` and `consumes`, or the same component in
-    /// both `read` and `write`), the error is stored in `validation_error`
-    /// and will be returned by the next call to [`Scheduler::run`]. This
-    /// matches the existing deferred-error pattern for scheduler cycles.
-    ///
-    /// Only the first validation error is retained — subsequent bad
-    /// systems are still enqueued (so that `clear()` + re-registration
-    /// works predictably) but the recorded error is not overwritten.
     #[inline]
     pub fn add_boxed(&mut self, system: Box<dyn System>) {
         if self.validation_error.is_none() {
-            if let Err(e) = system.access().validate() {
+            let system_id = system.id();
+            if self
+                .systems
+                .iter()
+                .any(|existing| existing.id() == system_id)
+            {
+                self.validation_error = Some(ECSError::from(ExecutionError::DuplicateSystemId {
+                    system_id,
+                }));
+            } else if let Err(e) = system.access().validate() {
                 self.validation_error = Some(e);
             }
         }
@@ -294,13 +260,11 @@ impl Scheduler {
         self.add_boxed(Box::new(system));
     }
 
-    /// Sets the activation (iteration) order for a specific system.
-    ///
-    /// The default is [`ActivationOrder::Sequential`]. The new order takes
-    /// effect on the next `run` call (no rebuild needed — activation orders
-    /// are applied at iteration time, not during stage packing).
+    /// Sets the activation order for a specific system.
     pub fn set_activation_order(&mut self, system_id: SystemID, order: ActivationOrder) {
-        if let Some(entry) = self.activation_orders.iter_mut()
+        if let Some(entry) = self
+            .activation_orders
+            .iter_mut()
             .find(|(id, _)| *id == system_id)
         {
             entry.1 = order;
@@ -309,39 +273,30 @@ impl Scheduler {
         }
     }
 
-    /// Returns the activation order for a system, or [`ActivationOrder::Sequential`]
-    /// if none has been explicitly set.
+    /// Returns the activation order for a system.
     pub fn activation_order(&self, system_id: SystemID) -> ActivationOrder {
-        self.activation_orders.iter()
+        self.activation_orders
+            .iter()
             .find(|(id, _)| *id == system_id)
             .map(|(_, o)| *o)
             .unwrap_or_default()
     }
 
     /// Sets the global RNG seed used by shuffle activation orders.
-    ///
-    /// A seed of 0 (the default) still produces deterministic shuffles; use
-    /// different seeds to get different reproducible orderings across runs.
     pub fn seed(&mut self, global_seed: u64) {
         self.seed = global_seed;
     }
 
-    /// Adds an explicit ordering constraint: `dependent` must run in a strictly
-    /// later stage than `dependency`.
-    ///
-    /// Use for cases not expressible via `AccessSets` (e.g., "always run the
-    /// audit logger last"). The constraint is incorporated into `rebuild`.
+    /// Adds an explicit ordering constraint.
     pub fn add_ordering(&mut self, dependent: SystemID, dependency: SystemID) {
-        self.ordering_edges.push(OrderingEdge { dependency, dependent });
+        self.ordering_edges.push(OrderingEdge {
+            dependency,
+            dependent,
+        });
         self.dirty = true;
     }
 
     /// Ensures the execution plan is up to date.
-    ///
-    /// If the plan is already current (`!dirty`), returns immediately.
-    /// Otherwise, packs systems into stages, computes finalised channels for
-    /// each boundary, and runs Kahn-style cycle detection. If a cycle is
-    /// found, the error is stored and returned by the next `run` call.
     pub fn rebuild(&mut self) {
         if !self.dirty {
             return;
@@ -350,369 +305,488 @@ impl Scheduler {
         self.cycle_error = None;
         self.plan.clear();
 
-        // Sort by SystemID for deterministic ordering.
+        if self.validation_error.is_some() {
+            self.dirty = false;
+            return;
+        }
+
         let mut indices: Vec<usize> = (0..self.systems.len()).collect();
         indices.sort_by_key(|&i| self.systems[i].id());
 
-        let mut in_gpu_run = false;
+        if let Err(e) = self.validate_unique_system_ids(&indices) {
+            self.validation_error = Some(e);
+            self.dirty = false;
+            return;
+        }
 
-        for index in &indices {
-            let index = *index;
-            let backend = self.systems[index].backend();
-            let access = self.systems[index].access().clone();
-
-            match backend {
-                SystemBackend::CPU => {
-                    if in_gpu_run {
-                        self.close_gpu_run();
-                        in_gpu_run = false;
-                    }
-
-                    // Try to slot into the most recent non-boundary CPU stage.
-                    let mut placed = false;
-                    for stage in self.plan.iter_mut().rev() {
-                        if stage.stage_type == StageType::Boundary { break; }
-                        if stage.stage_type != StageType::Cpu      { continue; }
-                        if stage.can_accept(&access) {
-                            stage.push_cpu(index, &access);
-                            placed = true;
-                            break;
-                        }
-                    }
-
-                    if !placed {
-                        let mut stage = Stage::cpu();
-                        stage.push_cpu(index, &access);
-                        self.plan.push(stage);
-                    }
-                }
-
-                SystemBackend::GPU => {
-                    if !in_gpu_run {
-                        self.plan.push(Stage::boundary());
-                        self.plan.push(Stage::gpu());
-                        in_gpu_run = true;
-                    }
-                    let last = self.plan.last_mut()
-                        .expect("plan must have a GPU stage");
-                    debug_assert_eq!(last.stage_type, StageType::Gpu);
-                    last.push_gpu(index);
+        match self.build_dependency_graph(indices) {
+            Ok(graph) => {
+                if let Err(e) = self.pack_graph(graph) {
+                    self.cycle_error = Some(e);
                 }
             }
-        }
-
-        if in_gpu_run {
-            self.close_gpu_run();
-        }
-
-        // Apply explicit ordering edges: if `dependent` was placed before
-        // `dependency`, open a new CPU stage after any stage containing
-        // `dependency` and re-slot `dependent` there. Applied to a fixed
-        // point so chained ordering constraints all settle correctly.
-        self.apply_explicit_ordering(&indices);
-
-        // Ensure the plan ends on a Boundary. Channels produced only in the
-        // final CPU/GPU stage would otherwise never be finalised for the
-        // tick (compute_finalised_channels looks for a *following* boundary
-        // to annotate, and finds none for a trailing producer stage).
-        //
-        // A trailing boundary is also harmless for GPU-terminated plans
-        // because `gpu_write_resources` on the inserted boundary is empty,
-        // making `gpu::sync_pending_to_cpu` a no-op.
-        if !matches!(self.plan.last(), Some(s) if s.is_boundary()) {
-            self.plan.push(Stage::boundary());
-        }
-
-        // Compute `finalised_channels` for each stage.
-        self.compute_finalised_channels();
-
-        // Run Kahn cycle detection over the raw AccessSets-derived graph.
-        // This MUST run after explicit ordering but its result is independent
-        // of stage packing.
-        if let Err(e) = self.detect_cycles(&indices) {
-            self.cycle_error = Some(e);
+            Err(e) => {
+                self.validation_error = Some(e);
+            }
         }
 
         self.dirty = false;
     }
 
-    /// For each CPU/GPU stage, compute which channels are "finalised" by that
-    /// stage: channels produced there whose no subsequent stage also produces them.
-    /// Those channels are placed on the immediately following Boundary stage.
-    fn compute_finalised_channels(&mut self) {
-        let n = self.plan.len();
+    /// Rebuilds the execution plan and returns any validation or graph error.
+    pub fn try_rebuild(&mut self) -> ECSResult<()> {
+        self.rebuild();
+        if let Some(ref e) = self.validation_error {
+            return Err(e.clone());
+        }
+        if let Some(ref e) = self.cycle_error {
+            return Err(e.clone());
+        }
+        Ok(())
+    }
 
-        for i in 0..n {
-            if self.plan[i].is_boundary() {
+    fn validate_unique_system_ids(&self, indices: &[usize]) -> ECSResult<()> {
+        let mut last: Option<SystemID> = None;
+        for &idx in indices {
+            let id = self.systems[idx].id();
+            if last == Some(id) {
+                return Err(ECSError::from(ExecutionError::DuplicateSystemId {
+                    system_id: id,
+                }));
+            }
+            last = Some(id);
+        }
+        Ok(())
+    }
+
+    fn build_dependency_graph(&self, sorted_indices: Vec<usize>) -> ECSResult<DependencyGraph> {
+        let n = sorted_indices.len();
+        let mut edges = vec![Vec::new(); n];
+        let mut in_degree = vec![0usize; n];
+        let mut boundary_predecessors = vec![Vec::new(); n];
+        let mut component_conflicts = Vec::new();
+
+        let id_to_pos: HashMap<SystemID, usize> = sorted_indices
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| (self.systems[idx].id(), pos))
+            .collect();
+        let access: Vec<&AccessSets> = sorted_indices
+            .iter()
+            .map(|&idx| self.systems[idx].access())
+            .collect();
+
+        for a in 0..n {
+            for b in (a + 1)..n {
+                if access[a].produces.intersects(&access[b].consumes) {
+                    Self::add_edge(
+                        &mut edges,
+                        &mut in_degree,
+                        &mut boundary_predecessors,
+                        a,
+                        b,
+                        EdgeKind::Boundary,
+                    );
+                }
+                if access[b].produces.intersects(&access[a].consumes) {
+                    Self::add_edge(
+                        &mut edges,
+                        &mut in_degree,
+                        &mut boundary_predecessors,
+                        b,
+                        a,
+                        EdgeKind::Boundary,
+                    );
+                }
+                if access[a].component_conflict(access[b]) {
+                    component_conflicts.push((a, b));
+                }
+            }
+        }
+
+        for edge in &self.ordering_edges {
+            if edge.dependency == edge.dependent {
+                return Err(ECSError::from(ExecutionError::SelfSystemOrdering {
+                    system_id: edge.dependency,
+                }));
+            }
+
+            let dependency = id_to_pos.get(&edge.dependency).copied().ok_or_else(|| {
+                ECSError::from(ExecutionError::UnknownSystemId {
+                    system_id: edge.dependency,
+                })
+            })?;
+            let dependent = id_to_pos.get(&edge.dependent).copied().ok_or_else(|| {
+                ECSError::from(ExecutionError::UnknownSystemId {
+                    system_id: edge.dependent,
+                })
+            })?;
+
+            Self::add_edge(
+                &mut edges,
+                &mut in_degree,
+                &mut boundary_predecessors,
+                dependency,
+                dependent,
+                EdgeKind::Boundary,
+            );
+        }
+
+        for (a, b) in component_conflicts {
+            if Self::has_path(&edges, a, b) || Self::has_path(&edges, b, a) {
+                continue;
+            }
+            Self::add_edge(
+                &mut edges,
+                &mut in_degree,
+                &mut boundary_predecessors,
+                a,
+                b,
+                EdgeKind::Ordered,
+            );
+        }
+
+        Ok(DependencyGraph {
+            sorted_indices,
+            edges,
+            in_degree,
+            boundary_predecessors,
+        })
+    }
+
+    fn add_edge(
+        edges: &mut [Vec<DependencyEdge>],
+        in_degree: &mut [usize],
+        boundary_predecessors: &mut [Vec<usize>],
+        from: usize,
+        to: usize,
+        kind: EdgeKind,
+    ) {
+        if from == to {
+            return;
+        }
+
+        if let Some(existing) = edges[from].iter_mut().find(|edge| edge.to == to) {
+            if existing.kind == EdgeKind::Ordered && kind == EdgeKind::Boundary {
+                existing.kind = EdgeKind::Boundary;
+                if !boundary_predecessors[to].contains(&from) {
+                    boundary_predecessors[to].push(from);
+                }
+            }
+            return;
+        }
+
+        edges[from].push(DependencyEdge { to, kind });
+        in_degree[to] += 1;
+        if kind == EdgeKind::Boundary {
+            boundary_predecessors[to].push(from);
+        }
+    }
+
+    fn has_path(edges: &[Vec<DependencyEdge>], from: usize, to: usize) -> bool {
+        if from == to {
+            return true;
+        }
+
+        let mut stack = vec![from];
+        let mut visited = vec![false; edges.len()];
+        while let Some(current) = stack.pop() {
+            if visited[current] {
+                continue;
+            }
+            visited[current] = true;
+
+            for edge in &edges[current] {
+                if edge.to == to {
+                    return true;
+                }
+                if !visited[edge.to] {
+                    stack.push(edge.to);
+                }
+            }
+        }
+        false
+    }
+
+    fn pack_graph(&mut self, graph: DependencyGraph) -> ECSResult<()> {
+        let n = graph.sorted_indices.len();
+        let mut in_degree = graph.in_degree.clone();
+        let mut scheduled = vec![false; n];
+        let mut scheduled_stage: Vec<Option<usize>> = vec![None; n];
+        let mut scheduled_count = 0usize;
+        let mut last_boundary: Option<usize> = None;
+
+        while scheduled_count < n {
+            let ready: Vec<usize> = (0..n)
+                .filter(|&pos| !scheduled[pos] && in_degree[pos] == 0)
+                .collect();
+
+            if ready.is_empty() {
+                return Err(ECSError::from(ExecutionError::SchedulerCycle));
+            }
+
+            let eligible: Vec<usize> = ready
+                .iter()
+                .copied()
+                .filter(|&pos| {
+                    Self::boundary_predecessors_satisfied(
+                        pos,
+                        &graph.boundary_predecessors,
+                        &scheduled_stage,
+                        last_boundary,
+                    )
+                })
+                .collect();
+
+            if eligible.is_empty() {
+                if matches!(self.plan.last(), Some(stage) if stage.is_boundary()) {
+                    return Err(ECSError::from(ExecutionError::SchedulerInvariantViolation));
+                }
+                self.plan.push(Stage::boundary());
+                last_boundary = Some(self.plan.len() - 1);
                 continue;
             }
 
-            // Collect channels produced in stage i.
-            let produced: Vec<ChannelID> = self.plan[i]
-                .aggregate_access
-                .produces
-                .iter()
-                .collect();
+            let selected = self.select_ready_stage(&eligible, &graph.sorted_indices);
+            if selected.is_empty() {
+                return Err(ECSError::from(ExecutionError::SchedulerInvariantViolation));
+            }
 
-            for ch in produced {
-                // A channel is finalised in stage i if no stage j > i also produces it.
-                let is_last_producer = !self.plan[i+1..].iter()
-                    .filter(|s| !s.is_boundary())
-                    .any(|s| s.aggregate_access.produces.contains(ch));
-
-                if is_last_producer {
-                    // Find the next boundary stage after i and annotate it.
-                    if let Some(boundary) = self.plan[i+1..].iter_mut()
-                        .find(|s| s.is_boundary())
-                    {
-                        if !boundary.finalised_channels.contains(&ch) {
-                            boundary.finalised_channels.push(ch);
-                        }
+            let backend = self.systems[graph.sorted_indices[selected[0]]].backend();
+            match backend {
+                SystemBackend::CPU => {
+                    let mut stage = Stage::cpu();
+                    for &pos in &selected {
+                        let idx = graph.sorted_indices[pos];
+                        stage.push_cpu(idx, self.systems[idx].access());
                     }
+                    self.plan.push(stage);
+                    let stage_idx = self.plan.len() - 1;
+                    Self::mark_selected_scheduled(
+                        &selected,
+                        stage_idx,
+                        &graph,
+                        &mut in_degree,
+                        &mut scheduled,
+                        &mut scheduled_stage,
+                        &mut scheduled_count,
+                    );
+                }
+                SystemBackend::GPU => {
+                    if !matches!(self.plan.last(), Some(stage) if stage.is_boundary()) {
+                        self.plan.push(Stage::boundary());
+                    }
+
+                    let mut stage = Stage::gpu();
+                    for &pos in &selected {
+                        let idx = graph.sorted_indices[pos];
+                        stage.push_gpu(idx, self.systems[idx].access());
+                    }
+                    self.plan.push(stage);
+                    let stage_idx = self.plan.len() - 1;
+                    Self::mark_selected_scheduled(
+                        &selected,
+                        stage_idx,
+                        &graph,
+                        &mut in_degree,
+                        &mut scheduled,
+                        &mut scheduled_stage,
+                        &mut scheduled_count,
+                    );
+
+                    let boundary = self.boundary_after_gpu_stage(stage_idx);
+                    self.plan.push(boundary);
+                    last_boundary = Some(self.plan.len() - 1);
                 }
             }
+        }
+
+        if !matches!(self.plan.last(), Some(stage) if stage.is_boundary()) {
+            self.plan.push(Stage::boundary());
+        }
+
+        self.compute_finalised_channels();
+        Ok(())
+    }
+
+    fn boundary_predecessors_satisfied(
+        pos: usize,
+        boundary_predecessors: &[Vec<usize>],
+        scheduled_stage: &[Option<usize>],
+        last_boundary: Option<usize>,
+    ) -> bool {
+        let mut max_predecessor_stage: Option<usize> = None;
+        for &pred in &boundary_predecessors[pos] {
+            let Some(stage_idx) = scheduled_stage[pred] else {
+                return false;
+            };
+            max_predecessor_stage =
+                Some(max_predecessor_stage.map_or(stage_idx, |current| current.max(stage_idx)));
+        }
+
+        match max_predecessor_stage {
+            None => true,
+            Some(max_stage) => last_boundary.map_or(false, |boundary| boundary > max_stage),
         }
     }
 
-    /// Kahn-style topological sort over the inherent ordering graph to detect cycles.
-    ///
-    /// **Important**: edges are derived from the *input* `AccessSets` and
-    /// explicit ordering edges — NOT from the already-packed `plan`. Packing
-    /// produces a linear stage order by construction, so rediscovering cycles
-    /// from it is impossible. The genuine cycle shape we need to detect —
-    /// system A produces channel X & consumes channel Y, system B produces
-    /// channel Y & consumes channel X — is visible in the raw access sets and
-    /// invisible in the stage assignment (the stage packer silently separates
-    /// A and B into different stages regardless of ordering direction).
-    ///
-    /// Edges added:
-    /// - For each ordered pair `(a, b)`: if `a.produces ∩ b.consumes ≠ ∅`,
-    ///   add edge `a → b`. If `b.produces ∩ a.consumes ≠ ∅`, add edge
-    ///   `b → a`. When both hold, the graph has a 2-cycle between a and b
-    ///   and Kahn's algorithm will report it.
-    /// - For each explicit ordering edge `dependency → dependent`, add
-    ///   `dep → dependent`.
-    ///
-    /// Component conflicts are intentionally NOT modelled here: they have no
-    /// inherent direction, so they cannot contribute to a real ordering
-    /// cycle, and the stage packer's conflict check already prevents
-    /// component-aliasing pairs from being co-scheduled.
-    ///
-    /// A cycle exists iff the topological sort cannot process all nodes.
-    fn detect_cycles(&self, indices: &[usize]) -> ECSResult<()> {
-        let n = self.systems.len();
-        if n == 0 { return Ok(()); }
-
-        // Node space: the "list position" under `indices`. This keeps the
-        // identity stable across calls even if `self.systems` is indexed
-        // differently elsewhere.
-        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let mut in_degree: Vec<usize> = vec![0; n];
-
-        // Convenience: list-position ↔ SystemID and list-position → AccessSets.
-        let id_to_pos: std::collections::HashMap<SystemID, usize> = indices
-            .iter()
-            .enumerate()
-            .map(|(pos, &si)| (self.systems[si].id(), pos))
-            .collect();
-
-        // Cache access sets by list position to avoid repeated virtual calls.
-        let access: Vec<&AccessSets> = indices
-            .iter()
-            .map(|&si| self.systems[si].access())
-            .collect();
-
-        // Channel-direction edges. Iterate ordered pairs (a < b) once and add
-        // the two possible directed edges independently.
-        for a in 0..n {
-            for b in (a + 1)..n {
-                // a → b if a produces a channel that b consumes.
-                if access[a].produces.intersects(&access[b].consumes) {
-                    edges[a].push(b);
-                    in_degree[b] += 1;
-                }
-                // b → a if b produces a channel that a consumes.
-                if access[b].produces.intersects(&access[a].consumes) {
-                    edges[b].push(a);
-                    in_degree[a] += 1;
-                }
-            }
-        }
-
-        // Explicit ordering edges: `dependency` must precede `dependent`.
-        for edge in &self.ordering_edges {
-            if let (Some(&dep_pos), Some(&ant_pos)) = (
-                id_to_pos.get(&edge.dependency),
-                id_to_pos.get(&edge.dependent),
-            ) {
-                if !edges[dep_pos].contains(&ant_pos) {
-                    edges[dep_pos].push(ant_pos);
-                    in_degree[ant_pos] += 1;
-                }
-            }
-        }
-
-        // Kahn BFS.
-        let mut queue: VecDeque<usize> = (0..n)
-            .filter(|&i| in_degree[i] == 0)
-            .collect();
-        let mut visited = 0usize;
-
-        while let Some(node) = queue.pop_front() {
-            visited += 1;
-            for &next in &edges[node] {
-                in_degree[next] -= 1;
-                if in_degree[next] == 0 {
-                    queue.push_back(next);
-                }
-            }
-        }
-
-        if visited < n {
-            Err(ECSError::from(ExecutionError::SchedulerCycle))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Apply explicit ordering edges post-packing, iterating to a fixed point.
-    ///
-    /// Each edge `(dependency, dependent)` asserts that `dependent` must run
-    /// in a strictly later stage than `dependency` — interpreted here as
-    /// "separated by at least one `Boundary` stage", so that deferred
-    /// commands emitted by `dependency` are visible to `dependent`.
-    ///
-    /// ## Fix-point iteration
-    ///
-    /// If edges chain (`A → B` and `B → C`) and are processed in an order
-    /// that doesn't match dependency order, the first pass may settle one
-    /// edge but invalidate another. We therefore repeat until a pass makes
-    /// no changes, bounded by `ordering_edges.len() + 1` iterations. If the
-    /// bound is reached the edges form a cycle; we mark the plan as cyclic
-    /// and let `detect_cycles` surface the error.
-    ///
-    /// ## Boundary insertion
-    ///
-    /// When relocating `dependent` after `dependency`'s stage, we guarantee
-    /// a `Boundary` stage sits between them (inserting one if missing). This
-    /// makes `add_ordering`'s semantics unambiguous: state changes from
-    /// `dependency` — including deferred commands — are fully applied before
-    /// `dependent` runs.
-    fn apply_explicit_ordering(&mut self, indices: &[usize]) {
-        let max_iters = self.ordering_edges.len().saturating_add(1);
-        let edges_snapshot = self.ordering_edges.clone();
-
-        for _iter in 0..max_iters {
-            let mut changed = false;
-
-            for edge in &edges_snapshot {
-                let dep_stage = self.find_stage_of(edge.dependency, indices);
-                let ant_stage = self.find_stage_of(edge.dependent,  indices);
-
-                let (Some(dep_stage_idx), Some(ant_stage_idx)) = (dep_stage, ant_stage) else {
-                    continue; // unknown system IDs — silently skip
-                };
-
-                // The constraint is already satisfied if `dependent` is in
-                // a stage strictly after `dependency` AND a boundary lies
-                // between them.
-                if ant_stage_idx > dep_stage_idx {
-                    let has_boundary_between = self.plan
-                        [dep_stage_idx + 1 .. ant_stage_idx]
-                        .iter()
-                        .any(|s| s.is_boundary());
-                    if has_boundary_between {
+    fn select_ready_stage(&self, ready: &[usize], sorted_indices: &[usize]) -> Vec<usize> {
+        let first_idx = sorted_indices[ready[0]];
+        match self.systems[first_idx].backend() {
+            SystemBackend::CPU => {
+                let mut selected = Vec::new();
+                let mut stage = Stage::cpu();
+                for &pos in ready {
+                    let idx = sorted_indices[pos];
+                    if self.systems[idx].backend() != SystemBackend::CPU {
                         continue;
                     }
+                    let access = self.systems[idx].access();
+                    if stage.can_accept(access) {
+                        stage.push_cpu(idx, access);
+                        selected.push(pos);
+                    }
                 }
-
-                // Need to relocate `dependent`.
-                let Some(si) = indices.iter()
-                    .find(|&&si| self.systems[si].id() == edge.dependent)
-                    .copied()
-                else { continue; };
-
-                let access = self.systems[si].access().clone();
-                self.plan[ant_stage_idx].system_indices.retain(|&x| x != si);
-                self.recompute_aggregate(ant_stage_idx);
-
-                // Target position: immediately after `dep_stage_idx`. If the
-                // next slot is already a boundary, land after it; otherwise
-                // insert a fresh boundary and land after that. This
-                // guarantees the required "≥ 1 boundary between" invariant.
-                let mut target = dep_stage_idx + 1;
-                if target < self.plan.len() && self.plan[target].is_boundary() {
-                    target += 1;
-                } else {
-                    self.plan.insert(target, Stage::boundary());
-                    target += 1;
-                }
-
-                if target < self.plan.len()
-                    && self.plan[target].stage_type == StageType::Cpu
-                    && self.plan[target].can_accept(&access)
-                {
-                    self.plan[target].push_cpu(si, &access);
-                } else {
-                    let mut new_stage = Stage::cpu();
-                    new_stage.push_cpu(si, &access);
-                    self.plan.insert(target, new_stage);
-                }
-
-                changed = true;
+                selected
             }
+            SystemBackend::GPU => ready
+                .iter()
+                .copied()
+                .filter(|&pos| self.systems[sorted_indices[pos]].backend() == SystemBackend::GPU)
+                .collect(),
+        }
+    }
 
-            if !changed {
-                return;
+    fn mark_selected_scheduled(
+        selected: &[usize],
+        stage_idx: usize,
+        graph: &DependencyGraph,
+        in_degree: &mut [usize],
+        scheduled: &mut [bool],
+        scheduled_stage: &mut [Option<usize>],
+        scheduled_count: &mut usize,
+    ) {
+        for &pos in selected {
+            scheduled[pos] = true;
+            scheduled_stage[pos] = Some(stage_idx);
+            *scheduled_count += 1;
+
+            for edge in &graph.edges[pos] {
+                in_degree[edge.to] -= 1;
             }
         }
-
-        // Fix-point not reached within the iteration bound — the edges must
-        // contain a cycle. Record it; detect_cycles will also flag this
-        // structurally, but set the error defensively in case the cycle is
-        // confined to explicit edges.
-        self.cycle_error = Some(ECSError::from(ExecutionError::SchedulerCycle));
     }
 
-    fn find_stage_of(&self, system_id: SystemID, indices: &[usize]) -> Option<usize> {
-        let si = *indices.iter().find(|&&si| self.systems[si].id() == system_id)?;
-        self.plan.iter().position(|s| s.system_indices.contains(&si))
-    }
-
-    fn recompute_aggregate(&mut self, stage_idx: usize) {
-        let sys_indices = self.plan[stage_idx].system_indices.clone();
-        let mut agg = AccessSets::default();
-        for si in sys_indices {
-            let access = self.systems[si].access();
-            or_signature_in_place(&mut agg.read,  &access.read);
-            or_signature_in_place(&mut agg.write, &access.write);
-            agg.produces.or_in_place(&access.produces);
-            agg.consumes.or_in_place(&access.consumes);
+    fn compute_finalised_channels(&mut self) {
+        for stage in &mut self.plan {
+            stage.finalised_channels.clear();
         }
-        self.plan[stage_idx].aggregate_access = agg;
+
+        let produced_channels: BTreeSet<ChannelID> = self
+            .systems
+            .iter()
+            .flat_map(|system| system.access().produces.iter())
+            .collect();
+
+        for channel in produced_channels {
+            let mut last_producer_stage: Option<usize> = None;
+            let mut first_consumer_stage: Option<usize> = None;
+
+            for (stage_idx, stage) in self.plan.iter().enumerate() {
+                if stage.is_boundary() {
+                    continue;
+                }
+
+                if self.stage_produces(stage, channel) {
+                    last_producer_stage = Some(stage_idx);
+                }
+                if first_consumer_stage.is_none() && self.stage_consumes(stage, channel) {
+                    first_consumer_stage = Some(stage_idx);
+                }
+            }
+
+            let Some(producer_stage) = last_producer_stage else {
+                continue;
+            };
+            let boundary_idx = match first_consumer_stage {
+                Some(consumer_stage) => {
+                    let Some(boundary_idx) = self.next_boundary_after(producer_stage) else {
+                        continue;
+                    };
+                    if boundary_idx >= consumer_stage {
+                        continue;
+                    }
+                    boundary_idx
+                }
+                None => {
+                    let Some(boundary_idx) = self.trailing_boundary() else {
+                        continue;
+                    };
+                    boundary_idx
+                }
+            };
+
+            let channels = &mut self.plan[boundary_idx].finalised_channels;
+            if !channels.contains(&channel) {
+                channels.push(channel);
+            }
+        }
     }
 
-    fn close_gpu_run(&mut self) {
-        #[cfg(feature = "gpu")]
-        let gpu_writes = self.collect_gpu_write_resources();
+    fn stage_produces(&self, stage: &Stage, channel: ChannelID) -> bool {
+        stage
+            .system_indices
+            .iter()
+            .any(|&idx| self.systems[idx].access().produces.contains(channel))
+    }
 
-        #[allow(unused_mut)]
-        let mut boundary = Stage::boundary();
-        #[cfg(feature = "gpu")]
-        { boundary.gpu_write_resources = gpu_writes; }
-        self.plan.push(boundary);
+    fn stage_consumes(&self, stage: &Stage, channel: ChannelID) -> bool {
+        stage
+            .system_indices
+            .iter()
+            .any(|&idx| self.systems[idx].access().consumes.contains(channel))
+    }
+
+    fn next_boundary_after(&self, stage_idx: usize) -> Option<usize> {
+        self.plan
+            .iter()
+            .enumerate()
+            .skip(stage_idx + 1)
+            .find_map(|(idx, stage)| stage.is_boundary().then_some(idx))
+    }
+
+    fn trailing_boundary(&self) -> Option<usize> {
+        self.plan
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, stage)| stage.is_boundary().then_some(idx))
     }
 
     #[cfg(feature = "gpu")]
-    fn collect_gpu_write_resources(&self) -> Vec<GPUResourceID> {
-        let gpu_stage = self.plan.iter().rev()
-            .find(|s| s.stage_type == StageType::Gpu);
-        let Some(stage) = gpu_stage else { return Vec::new(); };
+    fn boundary_after_gpu_stage(&self, stage_idx: usize) -> Stage {
+        let mut boundary = Stage::boundary();
+        boundary.gpu_write_resources = self.collect_gpu_write_resources(stage_idx);
+        boundary
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    fn boundary_after_gpu_stage(&self, _stage_idx: usize) -> Stage {
+        Stage::boundary()
+    }
+
+    #[cfg(feature = "gpu")]
+    fn collect_gpu_write_resources(&self, stage_idx: usize) -> Vec<GPUResourceID> {
+        let Some(stage) = self.plan.get(stage_idx) else {
+            return Vec::new();
+        };
         let mut resources = Vec::new();
         for &idx in &stage.system_indices {
             if let Some(gpu_cap) = self.systems[idx].gpu() {
                 for &rid in gpu_cap.writes_resources() {
-                    if !resources.contains(&rid) { resources.push(rid); }
+                    if !resources.contains(&rid) {
+                        resources.push(rid);
+                    }
                 }
             }
         }
@@ -720,23 +794,12 @@ impl Scheduler {
     }
 
     /// Runs the schedule once.
-    ///
-    /// 1. Rebuilds the plan if dirty.
-    /// 2. Returns any cycle error stored during rebuild.
-    /// 3. Executes each stage sequentially; systems within a CPU stage run in
-    ///    parallel via Rayon.
-    /// 4. At each Boundary stage: clears borrows, syncs GPU (if enabled),
-    ///    applies deferred commands, and finalises boundary channels.
     #[allow(clippy::duplicated_code)]
     pub fn run(&mut self, ecs: ECSReference<'_>) -> ECSResult<()> {
         let _g = profiler::span("Scheduler::run");
 
         self.rebuild();
 
-        // Surface any deferred build error. Validation errors (malformed
-        // system access sets recorded at `add_boxed` time) take precedence
-        // over cycle errors: if a system is structurally invalid, running
-        // cycle analysis over it is meaningless.
         if let Some(ref e) = self.validation_error {
             return Err(e.clone());
         }
@@ -772,25 +835,27 @@ impl Scheduler {
                 }
 
                 StageType::Cpu => {
-                    let _s = profiler::span("Stage::Cpu")
-                        .arg("systems", profiler::Arg::U64(stage.system_indices.len() as u64));
+                    let _s = profiler::span("Stage::Cpu").arg(
+                        "systems",
+                        profiler::Arg::U64(stage.system_indices.len() as u64),
+                    );
 
-                    stage.system_indices
-                        .par_iter()
-                        .try_for_each(|&i| {
-                            let sys = &self.systems[i];
-                            profiler::next_arg("system_id", profiler::Arg::U64(sys.id() as u64));
-                            profiler::next_arg("backend", profiler::Arg::Str(BACKEND_CPU.to_string()));
-                            let _sg = profiler::span_fmt(format_args!("System::{}", sys.name()));
-                            sys.run(ecs)
-                        })?;
+                    stage.system_indices.par_iter().try_for_each(|&i| {
+                        let sys = &self.systems[i];
+                        profiler::next_arg("system_id", profiler::Arg::U64(sys.id() as u64));
+                        profiler::next_arg("backend", profiler::Arg::Str(BACKEND_CPU.to_string()));
+                        let _sg = profiler::span_fmt(format_args!("System::{}", sys.name()));
+                        sys.run(ecs)
+                    })?;
 
                     ecs.clear_borrows();
                 }
 
                 StageType::Gpu => {
-                    let _s = profiler::span("Stage::Gpu")
-                        .arg("systems", profiler::Arg::U64(stage.system_indices.len() as u64));
+                    let _s = profiler::span("Stage::Gpu").arg(
+                        "systems",
+                        profiler::Arg::U64(stage.system_indices.len() as u64),
+                    );
 
                     #[cfg(not(feature = "gpu"))]
                     {
@@ -803,7 +868,10 @@ impl Scheduler {
                         for &idx in &stage.system_indices {
                             let system = &self.systems[idx];
                             profiler::next_arg("system_id", profiler::Arg::U64(system.id() as u64));
-                            profiler::next_arg("backend", profiler::Arg::Str(BACKEND_GPU.to_string()));
+                            profiler::next_arg(
+                                "backend",
+                                profiler::Arg::Str(BACKEND_GPU.to_string()),
+                            );
                             let _sg = profiler::span_fmt(format_args!("System::{}", system.name()));
 
                             let gpu_cap = system.gpu().ok_or_else(|| {
@@ -826,16 +894,17 @@ impl Scheduler {
     }
 
     /// Formats the compiled execution plan as a human-readable text table.
-    ///
-    /// Called by [`PlanDisplay`](crate::engine::plan_display::PlanDisplay).
     pub fn fmt_plan(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, stage) in self.plan.iter().enumerate() {
             match stage.stage_type {
                 StageType::Boundary => {
                     write!(f, "Stage {i} [Boundary]")?;
                     if !stage.finalised_channels.is_empty() {
-                        let chs: Vec<String> = stage.finalised_channels
-                            .iter().map(|c| format!("ch:{c}")).collect();
+                        let chs: Vec<String> = stage
+                            .finalised_channels
+                            .iter()
+                            .map(|c| format!("ch:{c}"))
+                            .collect();
                         write!(f, "    finalises: [{}]", chs.join(", "))?;
                     }
                     writeln!(f)?;
@@ -847,13 +916,13 @@ impl Scheduler {
                         let access = sys.access();
                         write!(f, "  system {:4}  {:?}", sys.id(), sys.name())?;
                         if !access.produces.is_empty() {
-                            let ps: Vec<String> = access.produces.iter()
-                                .map(|c| format!("ch:{c}")).collect();
+                            let ps: Vec<String> =
+                                access.produces.iter().map(|c| format!("ch:{c}")).collect();
                             write!(f, "  produces: [{}]", ps.join(", "))?;
                         }
                         if !access.consumes.is_empty() {
-                            let cs: Vec<String> = access.consumes.iter()
-                                .map(|c| format!("ch:{c}")).collect();
+                            let cs: Vec<String> =
+                                access.consumes.iter().map(|c| format!("ch:{c}")).collect();
                             write!(f, "  consumes: [{}]", cs.join(", "))?;
                         }
                         writeln!(f)?;
@@ -862,8 +931,12 @@ impl Scheduler {
                 StageType::Gpu => {
                     writeln!(f, "Stage {i} [GPU]")?;
                     for &si in &stage.system_indices {
-                        writeln!(f, "  system {:4}  {:?}", self.systems[si].id(),
-                                 self.systems[si].name())?;
+                        writeln!(
+                            f,
+                            "  system {:4}  {:?}",
+                            self.systems[si].id(),
+                            self.systems[si].name()
+                        )?;
                     }
                 }
             }
@@ -872,8 +945,6 @@ impl Scheduler {
     }
 
     /// Formats the compiled execution plan as a Graphviz DOT graph.
-    ///
-    /// Called by [`DotExport`](crate::engine::dot_export::DotExport).
     pub fn fmt_dot(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "digraph execution_plan {{")?;
         writeln!(f, "  rankdir=TB;")?;
@@ -889,29 +960,37 @@ impl Scheduler {
                     let label = if stage.finalised_channels.is_empty() {
                         format!("Boundary {i}")
                     } else {
-                        let chs: Vec<String> = stage.finalised_channels
-                            .iter().map(|c| format!("ch:{c}")).collect();
+                        let chs: Vec<String> = stage
+                            .finalised_channels
+                            .iter()
+                            .map(|c| format!("ch:{c}"))
+                            .collect();
                         format!("Boundary {i}\\nfinalises: {}", chs.join(", "))
                     };
-                    writeln!(f,
-                             "  {node_name} [shape=diamond, label=\"{label}\"];")?;
+                    writeln!(f, "  {node_name} [shape=diamond, label=\"{label}\"];")?;
                 }
                 StageType::Cpu | StageType::Gpu => {
-                    let kind = if stage.stage_type == StageType::Cpu { "CPU" } else { "GPU" };
+                    let kind = if stage.stage_type == StageType::Cpu {
+                        "CPU"
+                    } else {
+                        "GPU"
+                    };
                     writeln!(f, "  subgraph cluster_{i} {{")?;
                     writeln!(f, "    label=\"Stage {i} [{kind}]\";")?;
                     writeln!(f, "    style=filled; fillcolor=lightgrey;")?;
                     for &si in &stage.system_indices {
                         let sys = &self.systems[si];
-                        writeln!(f,
-                                 "    {}_{} [label=\"id:{} {}\", shape=box];",
-                                 node_name, si, sys.id(), sys.name()
+                        writeln!(
+                            f,
+                            "    {}_{} [label=\"id:{} {}\", shape=box];",
+                            node_name,
+                            si,
+                            sys.id(),
+                            sys.name()
                         )?;
                     }
                     writeln!(f, "  }}")?;
-                    // Invisible anchor node for edge routing.
-                    writeln!(f,
-                             "  {node_name} [shape=point, style=invis];")?;
+                    writeln!(f, "  {node_name} [shape=point, style=invis];")?;
                 }
             }
 
@@ -925,10 +1004,37 @@ impl Scheduler {
     }
 
     /// Returns a reference to the compiled execution plan stages.
-    ///
-    /// The plan may be stale if systems have been added since the last
-    /// `rebuild` or `run` call.
     pub fn plan(&self) -> &[Stage] {
         &self.plan
+    }
+
+    /// Iterates registered systems in insertion order.
+    pub fn systems_iter(&self) -> impl Iterator<Item = &dyn System> {
+        self.systems.iter().map(|s| s.as_ref())
+    }
+
+    /// Returns the union of all produced channels declared by registered systems.
+    pub fn aggregate_produces(&self) -> crate::engine::systems::ChannelSet {
+        let mut out = crate::engine::systems::ChannelSet::new();
+        for system in &self.systems {
+            out.or_in_place(&system.access().produces);
+        }
+        out
+    }
+
+    /// Returns the union of all consumed channels declared by registered systems.
+    pub fn aggregate_consumes(&self) -> crate::engine::systems::ChannelSet {
+        let mut out = crate::engine::systems::ChannelSet::new();
+        for system in &self.systems {
+            out.or_in_place(&system.access().consumes);
+        }
+        out
+    }
+
+    /// Returns true if any registered system uses the GPU backend.
+    pub fn has_gpu_systems(&self) -> bool {
+        self.systems
+            .iter()
+            .any(|system| system.backend() == SystemBackend::GPU)
     }
 }

@@ -13,7 +13,7 @@ fn gpu_tick_scaling(c: &mut Criterion) {
 
     for &(label, n) in &[
         ("gpu_tick_100k", 100_000usize),
-        ("gpu_tick_1M",   1_000_000usize),
+        ("gpu_tick_1M", 1_000_000usize),
     ] {
         let registry = registry.clone();
         group.bench_function(label, |b| {

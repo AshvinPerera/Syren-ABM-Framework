@@ -50,10 +50,8 @@
 //! through the engine's spawn/query interfaces.
 
 use crate::engine::types::{
-    EntityID, ShardID, IndexID, VersionID,
-    SHARD_BITS, INDEX_BITS, INDEX_MASK, SHARD_MASK,
+    EntityID, IndexID, ShardID, VersionID, INDEX_BITS, INDEX_MASK, SHARD_BITS, SHARD_MASK,
 };
-
 
 /// Opaque, versioned identifier for an ECS entity.
 ///
@@ -105,31 +103,44 @@ impl Entity {
 
     /// Returns the `(shard, index, version)` parts of this entity.
     #[inline]
-    pub fn parts(self) -> (ShardID, IndexID, VersionID) { split_entity(self) }
+    pub fn parts(self) -> (ShardID, IndexID, VersionID) {
+        split_entity(self)
+    }
 
     /// Deprecated: use [`parts()`](Entity::parts) instead.
-    #[deprecated(since = "0.2.0", note = "Renamed to `parts()` to avoid confusion with ECS components")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "Renamed to `parts()` to avoid confusion with ECS components"
+    )]
     #[inline]
-    pub fn components(self) -> (ShardID, IndexID, VersionID) { self.parts() }
+    pub fn components(self) -> (ShardID, IndexID, VersionID) {
+        self.parts()
+    }
 
     /// Returns the shard identifier encoded in this entity.
     #[inline]
-    pub fn shard(self) -> ShardID { ((self.0 >> INDEX_BITS) & SHARD_MASK) as ShardID }
+    pub fn shard(self) -> ShardID {
+        ((self.0 >> INDEX_BITS) & SHARD_MASK) as ShardID
+    }
 
     /// Returns the index component of this entity.
     #[inline]
-    pub fn index(self) -> IndexID { (self.0 & INDEX_MASK) as IndexID }
+    pub fn index(self) -> IndexID {
+        (self.0 & INDEX_MASK) as IndexID
+    }
 
     /// Returns the version component of this entity.
     #[inline]
-    pub fn version(self) -> VersionID { (self.0 >> (INDEX_BITS + SHARD_BITS)) as VersionID }
+    pub fn version(self) -> VersionID {
+        (self.0 >> (INDEX_BITS + SHARD_BITS)) as VersionID
+    }
 }
 
 #[inline]
 pub(super) const fn make_id(shard: ShardID, index: IndexID, version: VersionID) -> EntityID {
-    ((version as EntityID) << (SHARD_BITS + INDEX_BITS)) |
-        ((shard as EntityID) << INDEX_BITS) |
-        (index as EntityID)
+    ((version as EntityID) << (SHARD_BITS + INDEX_BITS))
+        | ((shard as EntityID) << INDEX_BITS)
+        | (index as EntityID)
 }
 
 #[inline]

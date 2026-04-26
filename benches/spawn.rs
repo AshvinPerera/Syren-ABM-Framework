@@ -11,7 +11,7 @@ fn spawn_benchmark(c: &mut Criterion) {
 
     for &(label, n) in &[
         ("spawn_100k", AGENTS_SMALL),
-        ("spawn_1M",   AGENTS_MED),
+        ("spawn_1M", AGENTS_MED),
         // ("spawn_10M",  AGENTS_LARGE),
     ] {
         let registry = registry.clone();

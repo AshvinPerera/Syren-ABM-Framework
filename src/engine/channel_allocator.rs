@@ -24,7 +24,6 @@
 
 use crate::engine::types::ChannelID;
 
-
 /// Monotonic, infallible allocator for [`ChannelID`]s.
 ///
 /// One instance exists per `Model`, shared between messaging and environment
@@ -50,7 +49,8 @@ impl ChannelAllocator {
     /// programming error (no realistic simulation needs that many channels).
     pub fn alloc(&mut self) -> ChannelID {
         let id = self.next;
-        self.next = self.next
+        self.next = self
+            .next
             .checked_add(1)
             .expect("ChannelID overflow: more than u32::MAX channels allocated");
         id

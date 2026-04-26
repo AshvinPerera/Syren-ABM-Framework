@@ -22,11 +22,11 @@
 use std::any::Any;
 use std::collections::HashMap;
 
-use crate::engine::types::ComponentID;
 use crate::engine::component::Signature;
+use crate::engine::types::ComponentID;
 
 use super::error::{AgentError, AgentResult};
-use super::hooks::{SpawnHook, DespawnHook};
+use super::hooks::{DespawnHook, SpawnHook};
 
 /// Factory closure that produces a heap-allocated default component value.
 ///
@@ -152,8 +152,10 @@ impl AgentTemplateBuilder {
             return Err(AgentError::DuplicateComponent(id));
         }
         self.signature.set(id);
-        self.defaults
-            .insert(id, Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>));
+        self.defaults.insert(
+            id,
+            Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>),
+        );
         Ok(self)
     }
 

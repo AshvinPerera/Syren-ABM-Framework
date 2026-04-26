@@ -68,9 +68,9 @@ use std::sync::Arc;
 
 use wgpu::util::DeviceExt;
 
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::types::ChannelID;
-use crate::gpu::{GPUResource, GPUBindingDesc, GPUContext};
+use crate::gpu::{GPUBindingDesc, GPUContext, GPUResource};
 
 use super::store::Environment;
 
@@ -114,9 +114,9 @@ unsafe impl EnvPod for i8 {}
 /// A type-erased closure that reads one environment key and appends its raw
 /// bytes to a `Vec<u8>`.
 struct Packer {
-    key:        String,
+    key: String,
     channel_id: ChannelID,
-    byte_size:  usize,
+    byte_size: usize,
     pack: Box<dyn Fn(&Environment, &mut Vec<u8>) -> Result<(), String> + Send + Sync>,
 }
 
@@ -255,11 +255,13 @@ impl GPUResource for EnvUniformBuffer {
     /// (e.g. type mismatch — should not happen if the buffer was built correctly).
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()> {
         self.repack()?;
-        let buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:    Some("EnvUniformBuffer"),
-            contents: &self.cpu_buf,
-            usage:    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("EnvUniformBuffer"),
+                contents: &self.cpu_buf,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         self.gpu_buf = Some(buf);
         // Clear dirty tracking for all channels owned by this buffer so that
         // any marks created before GPU initialisation don't trigger a
@@ -321,7 +323,7 @@ impl GPUResource for EnvUniformBuffer {
             })
         })?;
         out.push(wgpu::BindGroupEntry {
-            binding:  base,
+            binding: base,
             resource: buf.as_entire_binding(),
         });
         Ok(())
@@ -365,7 +367,7 @@ impl EnvUniformBuffer {
 /// [`include`](Self::include)d. The WGSL `struct` on the shader side must
 /// match this order and layout exactly.
 pub struct EnvUniformBufferBuilder {
-    env:     Arc<Environment>,
+    env: Arc<Environment>,
     packers: Vec<Packer>,
 }
 
@@ -386,9 +388,7 @@ impl EnvUniformBufferBuilder {
     pub fn include<T: EnvPod>(mut self, key: impl Into<String>) -> Self {
         let key = key.into();
         let channel_id = self.env.channel_of(&key).unwrap_or_else(|| {
-            panic!(
-                "EnvUniformBuffer: key '{key}' is not registered in the environment"
-            )
+            panic!("EnvUniformBuffer: key '{key}' is not registered in the environment")
         });
         self.packers.push(Packer::new::<T>(key, channel_id));
         self
@@ -432,10 +432,10 @@ impl EnvUniformBufferBuilder {
     pub fn build(self) -> EnvUniformBuffer {
         let byte_size: usize = self.packers.iter().map(|p| p.byte_size).sum();
         EnvUniformBuffer {
-            env:       self.env,
-            packers:   self.packers,
-            cpu_buf:   Vec::with_capacity(byte_size),
-            gpu_buf:   None,
+            env: self.env,
+            packers: self.packers,
+            cpu_buf: Vec::with_capacity(byte_size),
+            gpu_buf: None,
             cpu_dirty: false,
         }
     }
@@ -468,8 +468,8 @@ mod tests {
     fn byte_size_matches_expected() {
         let env = make_env();
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
-            .include::<f32>("rate")  // 4 bytes
-            .include::<u32>("size")  // 4 bytes
+            .include::<f32>("rate") // 4 bytes
+            .include::<u32>("size") // 4 bytes
             .build();
         assert_eq!(buf.byte_size(), 8);
     }

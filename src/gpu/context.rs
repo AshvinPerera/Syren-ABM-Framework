@@ -45,8 +45,7 @@
 
 use wgpu::Instance;
 
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
-
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 
 /// Owned GPU execution context.
 ///
@@ -69,13 +68,12 @@ use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 pub struct GPUContext {
     /// The GPU device used for GPU path execution
     pub device: wgpu::Device,
-    
+
     /// The command queue for the GPU
     pub queue: wgpu::Queue,
 }
 
 impl GPUContext {
-
     /// Initializes a new GPU execution context.
     ///
     /// ## Behaviour
@@ -104,36 +102,28 @@ impl GPUContext {
     pub fn new() -> ECSResult<Self> {
         let instance = Instance::default();
 
-        let adapter = pollster::block_on(
-            instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                }
-            )
-        )
-        .map_err(|e| 
-            ECSError::from(
-                ExecutionError::GpuInitFailed {
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .map_err(|e| {
+            ECSError::from(ExecutionError::GpuInitFailed {
                 message: format!("{e:?}").into(),
-                }
-            )
-        )?;
+            })
+        })?;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("abm_framework_device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits {
-                    max_storage_buffers_per_shader_stage: 10,
-                    ..wgpu::Limits::default()
-                },
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("abm_framework_device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                max_storage_buffers_per_shader_stage: 10,
+                ..wgpu::Limits::default()
             },
-        ))
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
         .map_err(|e| {
             ECSError::from(ExecutionError::GpuInitFailed {
                 message: format!("{e:?}").into(),

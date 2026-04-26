@@ -67,22 +67,22 @@
 //! * Thread-safe: each key has its own `RwLock`.
 //! * Dirty tracking powers GPU upload without full buffer re-scan.
 
-pub mod error;
-pub mod store;
-pub mod builder;
-pub mod handle;
-pub mod system;
 pub mod boundary;
+pub mod builder;
+pub mod error;
+pub mod handle;
+pub mod store;
+pub mod system;
 
 #[cfg(feature = "gpu")]
 pub mod uniform;
 
-pub use error::{EnvironmentError, EnvironmentResult};
-pub use store::Environment;
-pub use builder::EnvironmentBuilder;
-pub use handle::EnvKey;
-pub use system::EnvironmentSystem;
 pub use boundary::EnvironmentBoundary;
+pub use builder::EnvironmentBuilder;
+pub use error::{EnvironmentError, EnvironmentResult};
+pub use handle::EnvKey;
+pub use store::Environment;
+pub use system::EnvironmentSystem;
 
 #[cfg(feature = "gpu")]
-pub use uniform::{EnvUniformBuffer, EnvPod};
+pub use uniform::{EnvPod, EnvUniformBuffer};

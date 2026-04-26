@@ -28,10 +28,9 @@
 
 use std::any::Any;
 
+use crate::engine::component::Bundle;
 use crate::engine::entity::Entity;
 use crate::engine::types::ComponentID;
-use crate::engine::component::Bundle;
-
 
 /// Represents a deferred ecs mutation command.
 ///
@@ -55,7 +54,7 @@ pub enum Command {
     /// Spawns a new entity into a specific archetype.
     Spawn {
         /// Data bundle for the new entity.
-        bundle: Bundle
+        bundle: Bundle,
     },
 
     /// Despawns an existing entity.
@@ -66,7 +65,7 @@ pub enum Command {
     /// - Performs swap-remove on component storage as needed
     Despawn {
         /// Entity to be removed from the world.
-        entity: Entity
+        entity: Entity,
     },
 
     /// Adds a component to an existing entity.
@@ -82,7 +81,7 @@ pub enum Command {
         /// Component value to insert.
         ///
         /// Must match the registered component type for `component_id`.
-        value: Box<dyn Any + Send>
+        value: Box<dyn Any + Send>,
     },
 
     /// Removes a component from an existing entity.
@@ -94,7 +93,7 @@ pub enum Command {
         /// Target entity losing the component.
         entity: Entity,
         /// Identifier of the component type to remove.
-        component_id: ComponentID
+        component_id: ComponentID,
     },
 
     /// Overwrites a component value on a specific entity **in place**.

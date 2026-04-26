@@ -12,6 +12,9 @@
 //! | [`BorrowConflict`] | Conflicting read/write access between parallel systems or within a single query |
 //! | [`InvalidQueryAccess`] | Contradictory access declarations (e.g. read + write on the same component) |
 //! | [`MissingComponent`] | Query tried to fetch a component absent from the matched archetype |
+//! | [`DuplicateSystemId`] | Scheduler was given multiple systems with the same ID |
+//! | [`UnknownSystemId`] | Scheduler ordering referenced an unregistered system ID |
+//! | [`SelfSystemOrdering`] | Scheduler ordering made a system depend on itself |
 //! | [`SchedulerInvariantViolation`] | Scheduler broke its own declared access guarantees |
 //! | [`SchedulerCycle`] | Channel or explicit-ordering edges form a dependency cycle |
 //! | [`LockPoisoned`] | A thread panicked while holding a synchronisation primitive |
@@ -22,6 +25,9 @@
 //! [`BorrowConflict`]: ExecutionError::BorrowConflict
 //! [`InvalidQueryAccess`]: ExecutionError::InvalidQueryAccess
 //! [`MissingComponent`]: ExecutionError::MissingComponent
+//! [`DuplicateSystemId`]: ExecutionError::DuplicateSystemId
+//! [`UnknownSystemId`]: ExecutionError::UnknownSystemId
+//! [`SelfSystemOrdering`]: ExecutionError::SelfSystemOrdering
 //! [`SchedulerInvariantViolation`]: ExecutionError::SchedulerInvariantViolation
 //! [`SchedulerCycle`]: ExecutionError::SchedulerCycle
 //! [`LockPoisoned`]: ExecutionError::LockPoisoned
@@ -82,7 +88,6 @@ pub enum BoundaryAccessFailure {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
-
     /// Attempted to mutate ECS structure while iteration was active.
     ///
     /// This includes spawning, despawning, adding/removing components,
@@ -138,11 +143,49 @@ pub enum ExecutionError {
         /// The `BoundaryID` that was passed to `ECSReference::boundary`.
         id: crate::engine::types::BoundaryID,
     },
-    
+
+    /// Two boundary resources both declared ownership of the same
+    /// [`ChannelID`](crate::engine::types::ChannelID).
+    ///
+    /// Channel IDs must be unique across all boundary resources so the
+    /// scheduler can route `finalise` calls deterministically. This error is
+    /// raised by
+    /// [`ECSManager::register_boundary`](crate::engine::manager::ECSManager::register_boundary)
+    /// when the resource being registered claims a channel that is already
+    /// owned by an earlier-registered resource.
+    DuplicateChannelRegistration {
+        /// The channel ID that appeared in two resources.
+        channel_id: crate::engine::types::ChannelID,
+        /// The `BoundaryID` of the resource that already owned this channel.
+        existing_boundary: crate::engine::types::BoundaryID,
+    },
+
     /// A query attempted to access a component not present in a matched archetype.
     MissingComponent {
         /// The missing component identifier.
         component_id: ComponentID,
+    },
+
+    /// The scheduler was given more than one system with the same ID.
+    ///
+    /// System IDs are used as stable ordering keys in the execution graph, so
+    /// duplicates would make deterministic planning ambiguous.
+    DuplicateSystemId {
+        /// The duplicated system identifier.
+        system_id: crate::engine::types::SystemID,
+    },
+
+    /// An explicit scheduler ordering referenced a system ID that has not
+    /// been registered with the scheduler.
+    UnknownSystemId {
+        /// The missing system identifier.
+        system_id: crate::engine::types::SystemID,
+    },
+
+    /// An explicit scheduler ordering made a system depend on itself.
+    SelfSystemOrdering {
+        /// The self-dependent system identifier.
+        system_id: crate::engine::types::SystemID,
     },
 
     /// Execution was aborted because the scheduler violated its declared access guarantees.
@@ -241,9 +284,26 @@ impl fmt::Display for ExecutionError {
                     ),
                 }
             }
-            
+
+            ExecutionError::DuplicateChannelRegistration { channel_id, existing_boundary } => {
+                write!(
+                    f,
+                    "boundary registration failed: channel {} is already owned by BoundaryID {}",
+                    channel_id, existing_boundary
+                )
+            }
+
             ExecutionError::MissingComponent { component_id } =>
                 write!(f, "query attempted to access missing component {}", component_id),
+
+            ExecutionError::DuplicateSystemId { system_id } =>
+                write!(f, "scheduler registration failed: duplicate system id {}", system_id),
+
+            ExecutionError::UnknownSystemId { system_id } =>
+                write!(f, "scheduler ordering references unknown system id {}", system_id),
+
+            ExecutionError::SelfSystemOrdering { system_id } =>
+                write!(f, "scheduler ordering cannot make system {} depend on itself", system_id),
 
             ExecutionError::SchedulerInvariantViolation =>
                 f.write_str("scheduler violated declared access invariants"),
