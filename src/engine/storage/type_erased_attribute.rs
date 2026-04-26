@@ -13,12 +13,12 @@
 /// Attributes implementing this trait must internally store elements in fixed-size
 /// chunks (`CHUNK_CAP` rows per chunk), and must maintain the following invariants:
 ///
-/// - `length()` returns the total number of initialized elements.
+/// - `length()` returns the total number of initialised elements.
 /// - `chunk_count()` returns the number of allocated chunks.
-/// - `last_chunk_length()` returns the number of initialized elements in the final
+/// - `last_chunk_length()` returns the number of initialised elements in the final
 ///   chunk and must satisfy:
 ///   `0 < last_chunk_length <= CHUNK_CAP`, unless `length() == 0`.
-/// - All indices below `length()` correspond to initialized, valid elements.
+/// - All indices below `length()` correspond to initialised, valid elements.
 /// - Types exposed through `chunk_slice_ref`, `chunk_slice_mut`, and `push_dyn` must
 ///   correspond to the attribute's concrete element type.
 ///
@@ -56,14 +56,12 @@
 /// - components or attributes must be managed in a type-erased container,
 /// - serializers/deserializers need read/write access to raw storage,
 /// - low-level systems operate on contiguous chunks of memory for performance.
-
-use std::any::{Any, TypeId, type_name};
+use std::any::{type_name, Any, TypeId};
 use std::mem::size_of;
 
-use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
-use crate::engine::error::{TypeMismatchError, AttributeError};
+use crate::engine::error::{AttributeError, TypeMismatchError};
 use crate::engine::storage::attribute::Attribute;
-
+use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
 
 /// Type-erased interface for a component column, enabling archetype storage
 /// to hold heterogeneous component types without monomorphisation at the
@@ -72,10 +70,10 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// Returns the number of allocated chunks in this attribute.
     fn chunk_count(&self) -> usize;
 
-    /// Returns the total number of initialized elements stored.
+    /// Returns the total number of initialised elements stored.
     fn length(&self) -> usize;
 
-    /// Returns the number of initialized elements in the final chunk.
+    /// Returns the number of initialised elements in the final chunk.
     fn last_chunk_length(&self) -> usize;
 
     /// Returns an immutable type-erased reference for downcasting.
@@ -91,29 +89,17 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     fn element_type_name(&self) -> &'static str;
 
     /// Returns a raw byte pointer and size for a chunk slice.
-    fn chunk_bytes(
-        &self,
-        chunk_id: ChunkID,
-        length: usize,
-    ) -> Option<(*const u8, usize)>;
+    fn chunk_bytes(&self, chunk_id: ChunkID, length: usize) -> Option<(*const u8, usize)>;
 
     /// Returns a mutable raw byte pointer and size for a chunk slice.
-    fn chunk_bytes_mut(
-        &mut self,
-        chunk_id: ChunkID,
-        length: usize,
-    ) -> Option<(*mut u8, usize)>;
+    fn chunk_bytes_mut(&mut self, chunk_id: ChunkID, length: usize) -> Option<(*mut u8, usize)>;
 
     /// Returns a typed immutable slice into a chunk if the requested type matches.
     ///
     /// Note: These methods have `where Self: Sized` bounds, making them
     /// uncallable through trait objects. For trait-object usage, use the
     /// `_dyn` variants (`chunk_bytes`, `chunk_bytes_mut`).
-    fn chunk_slice<T: 'static>(
-        &self,
-        chunk_id: ChunkID,
-        length: usize,
-    ) -> Option<&[T]>
+    fn chunk_slice<T: 'static>(&self, chunk_id: ChunkID, length: usize) -> Option<&[T]>
     where
         Self: Sized;
 
@@ -122,11 +108,7 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// Note: These methods have `where Self: Sized` bounds, making them
     /// uncallable through trait objects. For trait-object usage, use the
     /// `_dyn` variants (`chunk_bytes`, `chunk_bytes_mut`).
-    fn chunk_slice_mut<T: 'static>(
-        &mut self,
-        chunk_id: ChunkID,
-        length: usize,
-    ) -> Option<&mut [T]>
+    fn chunk_slice_mut<T: 'static>(&mut self, chunk_id: ChunkID, length: usize) -> Option<&mut [T]>
     where
         Self: Sized;
 
@@ -134,46 +116,80 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     fn swap_remove_dyn(
         &mut self,
         chunk: ChunkID,
-        row: RowID
+        row: RowID,
     ) -> Result<Option<(ChunkID, RowID)>, AttributeError>;
 
     /// Inserts a dynamically-typed value into the attribute.
-    fn push_dyn(
-        &mut self,
-        value: Box<dyn Any>
-    ) -> Result<(ChunkID, RowID), AttributeError>;
+    fn push_dyn(&mut self, value: Box<dyn Any>) -> Result<(ChunkID, RowID), AttributeError>;
 
     /// Transfers an element from another attribute into this one.
     fn push_from_dyn(
         &mut self,
         source: &mut dyn TypeErasedAttribute,
         source_chunk: ChunkID,
-        source_row: RowID
+        source_row: RowID,
     ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError>;
+
+    /// Replaces the value at `(chunk, row)` **in place**, dropping the old
+    /// value correctly and consuming the provided boxed replacement.
+    ///
+    /// Semantics:
+    /// - No archetype transition, no growth, no swap-remove.
+    /// - The caller must guarantee `(chunk, row)` refers to an initialised
+    ///   slot (i.e., a live entity row).
+    /// - The dynamic type of `value` must match the column's stored type;
+    ///   mismatches return [`AttributeError::TypeMismatch`] and leave the
+    ///   slot untouched.
+    ///
+    /// Used by [`Command::Set`](crate::engine::commands::Command::Set) to
+    /// overwrite a single component without archetype migration. Correctly
+    /// drops the old value, so components do not need to be `Copy`.
+    ///
+    /// # Errors
+    /// - [`AttributeError::TypeMismatch`] — `value`'s type does not match `T`.
+    /// - [`AttributeError::Position`] — `(chunk, row)` is not an initialised
+    ///   slot in this attribute.
+    fn replace_slot_dyn(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+        value: Box<dyn Any>,
+    ) -> Result<(), AttributeError>;
 }
 
 impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
-    fn chunk_count(&self) -> usize { self.chunks.len() }
-    fn length(&self) -> usize { self.length }
-    fn last_chunk_length(&self) -> usize { self.last_chunk_length }
+    fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+    fn length(&self) -> usize {
+        self.length
+    }
+    fn last_chunk_length(&self) -> usize {
+        self.last_chunk_length
+    }
 
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 
-    fn element_type_id(&self) -> TypeId { TypeId::of::<T>() }
-    fn element_type_name(&self) -> &'static str { type_name::<T>() }
+    fn element_type_id(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
+    fn element_type_name(&self) -> &'static str {
+        type_name::<T>()
+    }
 
-    fn chunk_bytes(
-        &self,
-        chunk_id: ChunkID,
-        valid_length: usize,
-    ) -> Option<(*const u8, usize)> {
+    fn chunk_bytes(&self, chunk_id: ChunkID, valid_length: usize) -> Option<(*const u8, usize)> {
         let chunk = self.chunks.get(chunk_id as usize)?;
         let len = if chunk_id as usize + 1 == self.chunks.len() {
             self.last_chunk_length
         } else {
             CHUNK_CAP
-        }.min(valid_length);
+        }
+        .min(valid_length);
 
         let ptr = chunk.as_ptr() as *const u8;
         let bytes = len * size_of::<T>();
@@ -192,7 +208,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         } else {
             CHUNK_CAP
         }
-            .min(valid_length);
+        .min(valid_length);
 
         let chunk = self.chunks.get_mut(chunk_index)?;
 
@@ -215,11 +231,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     /// - `Some(&[U])` if `U == T` and `chunk_id` is a valid chunk index.
     /// - `None` if the type does not match or the chunk index is out of bounds.
 
-    fn chunk_slice<U: 'static>(
-        &self,
-        chunk_id: ChunkID,
-        valid_length: usize,
-    ) -> Option<&[U]> {
+    fn chunk_slice<U: 'static>(&self, chunk_id: ChunkID, valid_length: usize) -> Option<&[U]> {
         if TypeId::of::<U>() != TypeId::of::<T>() {
             return None;
         }
@@ -229,17 +241,13 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
             self.last_chunk_length
         } else {
             CHUNK_CAP
-        }.min(valid_length);
+        }
+        .min(valid_length);
 
         // SAFETY: The type check above guarantees `U == T`, so the pointer cast is
-        // layout-compatible. `len` is bounded by the chunk's initialized prefix.
+        // layout-compatible. `len` is bounded by the chunk's initialised prefix.
         // The slice borrows from `self`, so it cannot outlive the attribute.
-        Some(unsafe {
-            std::slice::from_raw_parts(
-                chunk.as_ptr() as *const U,
-                len,
-            )
-        })
+        Some(unsafe { std::slice::from_raw_parts(chunk.as_ptr() as *const U, len) })
     }
 
     /// Returns a typed mutable slice of the elements stored in the specified
@@ -266,19 +274,18 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         }
 
         let is_last = chunk_id as usize + 1 == self.chunks.len();
-        let len = if is_last { self.last_chunk_length } else { CHUNK_CAP }
-            .min(valid_length);
+        let len = if is_last {
+            self.last_chunk_length
+        } else {
+            CHUNK_CAP
+        }
+        .min(valid_length);
 
         let chunk = self.chunks.get_mut(chunk_id as usize)?;
         // SAFETY: The type check above guarantees `U == T`, so the pointer cast is
-        // layout-compatible. `len` is bounded by the chunk's initialized prefix.
+        // layout-compatible. `len` is bounded by the chunk's initialised prefix.
         // We hold `&mut self`, so no aliasing mutable references can exist.
-        Some(unsafe {
-            std::slice::from_raw_parts_mut(
-                chunk.as_mut_ptr() as *mut U,
-                len,
-            )
-        })
+        Some(unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut U, len) })
     }
 
     /// Removes an element at the given position using swap-remove through a
@@ -309,10 +316,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     /// # Errors
     /// - [`AttributeError::TypeMismatch`] if the dynamic value has the wrong type.
 
-    fn push_dyn(
-        &mut self,
-        value: Box<dyn Any>
-    ) -> Result<(ChunkID, RowID), AttributeError> {
+    fn push_dyn(&mut self, value: Box<dyn Any>) -> Result<(ChunkID, RowID), AttributeError> {
         let actual = value.as_ref().type_id();
         if let Ok(v) = value.downcast::<T>() {
             let (chunk, row) = self.push(*v)?;
@@ -346,7 +350,6 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         source_chunk: ChunkID,
         source_row: RowID,
     ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError> {
-
         // Capture immutable info FIRST before taking the mutable borrow
         let actual_type = source.element_type_id();
         let actual_name = source.element_type_name();
@@ -354,19 +357,86 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         let source_attribute = match source.as_any_mut().downcast_mut::<Attribute<T>>() {
             Some(attr) => attr,
             None => {
-                return Err(
-                    AttributeError::TypeMismatch(
-                        TypeMismatchError {
-                            expected: TypeId::of::<T>(),
-                            actual: actual_type,
-                            expected_name: type_name::<T>(),
-                            actual_name,
-                        }
-                    )
-                );
+                return Err(AttributeError::TypeMismatch(TypeMismatchError {
+                    expected: TypeId::of::<T>(),
+                    actual: actual_type,
+                    expected_name: type_name::<T>(),
+                    actual_name,
+                }));
             }
         };
 
         self.push_from(source_attribute, source_chunk, source_row)
+    }
+
+    /// Replaces the value at `(chunk, row)` in place.
+    ///
+    /// Drops the old value using the concrete `T`'s drop glue before writing
+    /// the new one, so this is correct for any `T: 'static + Send + Sync`
+    /// regardless of whether `T: Copy`.
+    ///
+    /// Type mismatch is reported without mutating the slot.
+    fn replace_slot_dyn(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+        value: Box<dyn Any>,
+    ) -> Result<(), AttributeError> {
+        // Type-check first; on mismatch the slot is untouched.
+        let actual_type = value.as_ref().type_id();
+        if actual_type != TypeId::of::<T>() {
+            return Err(AttributeError::TypeMismatch(TypeMismatchError {
+                expected: TypeId::of::<T>(),
+                actual: actual_type,
+                expected_name: type_name::<T>(),
+                actual_name: "",
+            }));
+        }
+
+        // Bounds check — the caller promises the slot is live, but verify.
+        if !self.valid_position(chunk, row) {
+            return Err(AttributeError::Position(
+                crate::engine::error::PositionOutOfBoundsError {
+                    chunk,
+                    row,
+                    chunks: self.chunks.len(),
+                    capacity: CHUNK_CAP,
+                    last_chunk_length: self.last_chunk_length,
+                },
+            ));
+        }
+
+        // Downcast the box so we own a `Box<T>` whose deallocation runs
+        // through the correct allocator without invoking the `Any` vtable.
+        let typed_box = match value.downcast::<T>() {
+            Ok(b) => b,
+            Err(_) => {
+                // Unreachable given the TypeId check above; defensive path.
+                return Err(AttributeError::TypeMismatch(TypeMismatchError {
+                    expected: TypeId::of::<T>(),
+                    actual: actual_type,
+                    expected_name: type_name::<T>(),
+                    actual_name: "",
+                }));
+            }
+        };
+        let new_value: T = *typed_box;
+
+        // SAFETY:
+        // - `valid_position` confirmed `(chunk, row)` refers to an
+        //   initialised slot, so `assume_init_drop` will correctly drop
+        //   the previously-stored `T` using its real drop glue.
+        // - After dropping, we write the new `T` into the now-uninit slot
+        //   via `MaybeUninit::write`, which does not drop the destination
+        //   a second time (the slot is uninit at that point).
+        // - No aliasing: we hold `&mut self`, so nothing else can see
+        //   the slot during this swap.
+        unsafe {
+            let slot = self.get_slot_unchecked(chunk as usize, row as usize);
+            slot.assume_init_drop();
+            slot.write(new_value);
+        }
+
+        Ok(())
     }
 }

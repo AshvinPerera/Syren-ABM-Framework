@@ -21,12 +21,12 @@
 //! `apply_deferred_commands` boundary — it is not an immediate in-place
 //! mutation.
 
-use crate::engine::entity::Entity;
-use crate::engine::types::ComponentID;
-use crate::engine::manager::ECSReference;
 use crate::engine::commands::Command;
+use crate::engine::entity::Entity;
+use crate::engine::manager::ECSReference;
+use crate::engine::types::ComponentID;
 
-use super::error::{AgentError};
+use super::error::AgentError;
 
 /// A typed wrapper around [`Entity`] for single-agent component access.
 ///
@@ -66,7 +66,10 @@ impl AgentHandle {
     /// `component_ids` should be the [`ComponentID`]s declared in the agent
     /// template's [`Signature`](crate::engine::component::Signature).
     pub fn new(entity: Entity, component_ids: Vec<ComponentID>) -> Self {
-        Self { entity, component_ids }
+        Self {
+            entity,
+            component_ids,
+        }
     }
 
     /// Returns the underlying [`Entity`] handle.

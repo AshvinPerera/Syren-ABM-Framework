@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use crate::engine::entity::Entity;
 use crate::engine::manager::ECSReference;
 
-use super::template::AgentTemplate;
 use super::error::{AgentError, AgentResult};
+use super::template::AgentTemplate;
 
 /// World-scoped store of named [`AgentTemplate`]s.
 ///
@@ -135,7 +135,8 @@ impl AgentRegistry {
     ///
     /// Flushed by [`AgentRegistry::flush_spawn_hooks`].
     pub fn enqueue_spawn_hook(&mut self, template_name: impl Into<String>, entity: Entity) {
-        self.pending_spawn_hooks.push((template_name.into(), entity));
+        self.pending_spawn_hooks
+            .push((template_name.into(), entity));
     }
 
     /// Invokes all pending `on_spawn` hooks and clears the queue.

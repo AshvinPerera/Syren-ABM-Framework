@@ -66,7 +66,10 @@ impl fmt::Display for AttributeInvariantViolation {
                 write!(f, "total length does not match sum of chunk lengths")
             }
             AttributeInvariantViolation::EmptyChunkVec => {
-                write!(f, "chunk vector is empty when at least one chunk is required")
+                write!(
+                    f,
+                    "chunk vector is empty when at least one chunk is required"
+                )
             }
             AttributeInvariantViolation::SwapRemoveOnEmpty => {
                 write!(f, "swap-remove attempted on empty attribute")
@@ -118,7 +121,6 @@ impl fmt::Display for AttributeInvariantViolation {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeError {
-
     /// A `(ChunkID, RowID)` addressed storage outside valid bounds.
     Position(PositionOutOfBoundsError),
 
@@ -139,7 +141,9 @@ impl fmt::Display for AttributeError {
         match self {
             AttributeError::Position(e) => write!(f, "{e}"),
             AttributeError::TypeMismatch(e) => write!(f, "{e}"),
-            AttributeError::IndexOverflow(which) => write!(f, "index overflow constructing {}", which),
+            AttributeError::IndexOverflow(which) => {
+                write!(f, "index overflow constructing {}", which)
+            }
             AttributeError::InternalInvariant(violation) => {
                 write!(f, "internal storage invariant violated: {}", violation)
             }
@@ -150,9 +154,13 @@ impl fmt::Display for AttributeError {
 impl std::error::Error for AttributeError {}
 
 impl From<PositionOutOfBoundsError> for AttributeError {
-    fn from(e: PositionOutOfBoundsError) -> Self { AttributeError::Position(e) }
+    fn from(e: PositionOutOfBoundsError) -> Self {
+        AttributeError::Position(e)
+    }
 }
 
 impl From<TypeMismatchError> for AttributeError {
-    fn from(e: TypeMismatchError) -> Self { AttributeError::TypeMismatch(e) }
+    fn from(e: TypeMismatchError) -> Self {
+        AttributeError::TypeMismatch(e)
+    }
 }

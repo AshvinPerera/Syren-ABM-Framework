@@ -1,14 +1,7 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::{
-    Signature,
-    Scheduler,
-    FnSystem,
-    AccessSets,
-    Read,
-    Write,
-};
+use abm_framework::{AccessSets, FnSystem, Read, Scheduler, Signature, Write};
 
 mod common;
 use common::*;
@@ -26,13 +19,18 @@ fn tick_benchmark(c: &mut Criterion) {
                 populate(&ecs, AGENTS_MED, _pos_id, wealth_id, prod_id).unwrap();
 
                 let q_prod_to_wealth = query_builder(&registry)
-                    .read::<Productivity>().unwrap()
-                    .write::<Wealth>().unwrap()
-                    .build().unwrap();
+                    .read::<Productivity>()
+                    .unwrap()
+                    .write::<Wealth>()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 let q_decay_wealth = query_builder(&registry)
-                    .write::<Wealth>().unwrap()
-                    .build().unwrap();
+                    .write::<Wealth>()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 let mut scheduler = Scheduler::new();
 
@@ -48,6 +46,8 @@ fn tick_benchmark(c: &mut Criterion) {
                         s.set(wealth_id);
                         s
                     },
+                    produces: Default::default(),
+                    consumes: Default::default(),
                 };
 
                 scheduler.add_system(FnSystem::new(
@@ -71,20 +71,16 @@ fn tick_benchmark(c: &mut Criterion) {
                         s.set(wealth_id);
                         s
                     },
+                    produces: Default::default(),
+                    consumes: Default::default(),
                 };
 
-                scheduler.add_system(FnSystem::new(
-                    2,
-                    "decay",
-                    access_decay,
-                    move |world| {
-                        world.for_each::<(Write<Wealth>,)>(
-                            q_decay_wealth.clone(),
-                            &|w| w.0.value *= 0.9999,
-                        )?;
-                        Ok(())
-                    },
-                ));
+                scheduler.add_system(FnSystem::new(2, "decay", access_decay, move |world| {
+                    world.for_each::<(Write<Wealth>,)>(q_decay_wealth.clone(), &|w| {
+                        w.0.value *= 0.9999
+                    })?;
+                    Ok(())
+                }));
 
                 (ecs, scheduler)
             },

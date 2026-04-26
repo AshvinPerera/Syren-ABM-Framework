@@ -34,8 +34,8 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::types::GPUResourceID;
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 
 use crate::gpu::GPUContext;
 
@@ -50,7 +50,11 @@ impl GPUBindingDesc {
     /// Compact key for pipeline-cache hashing.
     #[inline]
     pub fn key(self) -> u8 {
-        if self.read_only { 1 } else { 2 }
+        if self.read_only {
+            1
+        } else {
+            2
+        }
     }
 }
 
@@ -62,7 +66,11 @@ impl GPUBindingDesc {
 /// - `download` is called when CPU needs GPU-written data (explicitly marked pending).
 pub trait GPUResource: Send + Sync {
     /// Human-readable name for diagnostics.
-    fn name(&self) -> &'static str;
+    ///
+    /// Returning a borrow from `&self` is permitted, so implementations that
+    /// need dynamic names can store an owned `String` and return `&self.name`
+    /// without leaking memory.
+    fn name(&self) -> &str;
 
     /// Called once when the GPU runtime is initialized for this world.
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()>;

@@ -38,10 +38,10 @@ use std::any::TypeId;
 use std::mem::size_of;
 use std::sync::{OnceLock, RwLock};
 
-use crate::engine::types::{ComponentID};
 use crate::engine::error::{ECSResult, RegistryError};
+use crate::engine::types::ComponentID;
 
-use super::registry::{ComponentRegistry};
+use super::registry::ComponentRegistry;
 
 // ---------------------------------------------------------------------------
 // Global convenience API (delegates to a shared global registry)
@@ -77,12 +77,13 @@ fn global_registry() -> &'static RwLock<ComponentRegistry> {
 
 pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> {
     let registry = global_registry();
-    let mut registry = registry
-        .write()
-        .map_err(|_| RegistryError::PoisonedLock)?;
+    let mut registry = registry.write().map_err(|_| RegistryError::PoisonedLock)?;
 
     if size_of::<T>() == 0 {
-        return Err(RegistryError::ZeroSizedComponent { type_id: TypeId::of::<T>() }.into());
+        return Err(RegistryError::ZeroSizedComponent {
+            type_id: TypeId::of::<T>(),
+        }
+        .into());
     }
 
     Ok(registry.register::<T>()?)
@@ -163,9 +164,7 @@ pub unsafe trait GPUPod: Copy + Send + Sync + 'static {}
 #[cfg(feature = "gpu")]
 pub fn register_gpu_component<T: GPUPod + 'static + Send + Sync>() -> ECSResult<ComponentID> {
     let registry = global_registry();
-    let mut registry = registry
-        .write()
-        .map_err(|_| RegistryError::PoisonedLock)?;
+    let mut registry = registry.write().map_err(|_| RegistryError::PoisonedLock)?;
 
     Ok(registry.register_gpu::<T>()?)
 }
@@ -181,13 +180,10 @@ pub fn register_gpu_component<T: GPUPod + 'static + Send + Sync>() -> ECSResult<
 
 pub fn freeze_components() -> ECSResult<()> {
     let registry = global_registry();
-    let mut registry = registry
-        .write()
-        .map_err(|_| RegistryError::PoisonedLock)?;
+    let mut registry = registry.write().map_err(|_| RegistryError::PoisonedLock)?;
     registry.freeze();
     Ok(())
 }
-
 
 /// Returns the registered `ComponentID` for type `T`.
 ///
@@ -197,8 +193,6 @@ pub fn freeze_components() -> ECSResult<()> {
 
 pub fn component_id_of<T: 'static>() -> ECSResult<ComponentID> {
     let registry = global_registry();
-    let registry = registry
-        .read()
-        .map_err(|_| RegistryError::PoisonedLock)?;
+    let registry = registry.read().map_err(|_| RegistryError::PoisonedLock)?;
     Ok(registry.require_id_of::<T>()?)
 }

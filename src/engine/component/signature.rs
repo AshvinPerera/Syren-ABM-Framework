@@ -78,7 +78,11 @@ impl Signature {
     pub fn set(&mut self, component_id: ComponentID) {
         let index = (component_id as usize) / 64;
         let bits = (component_id as usize) % 64;
-        assert!(index < SIGNATURE_SIZE, "component_id {} exceeds COMPONENT_CAP", component_id);
+        assert!(
+            index < SIGNATURE_SIZE,
+            "component_id {} exceeds COMPONENT_CAP",
+            component_id
+        );
         self.components[index] |= 1u64 << bits;
     }
 
@@ -90,7 +94,11 @@ impl Signature {
     pub fn clear(&mut self, component_id: ComponentID) {
         let index = (component_id as usize) / 64;
         let bits = (component_id as usize) % 64;
-        assert!(index < SIGNATURE_SIZE, "component_id {} exceeds COMPONENT_CAP", component_id);
+        assert!(
+            index < SIGNATURE_SIZE,
+            "component_id {} exceeds COMPONENT_CAP",
+            component_id
+        );
         self.components[index] &= !(1u64 << bits);
     }
 
@@ -102,7 +110,11 @@ impl Signature {
     pub fn has(&self, component_id: ComponentID) -> bool {
         let index = (component_id as usize) / 64;
         let bits = (component_id as usize) % 64;
-        assert!(index < SIGNATURE_SIZE, "component_id {} exceeds COMPONENT_CAP", component_id);
+        assert!(
+            index < SIGNATURE_SIZE,
+            "component_id {} exceeds COMPONENT_CAP",
+            component_id
+        );
         (self.components[index] >> bits) & 1 == 1
     }
 
@@ -110,7 +122,9 @@ impl Signature {
     #[inline]
     pub fn contains_all(&self, signature: &Signature) -> bool {
         for (component_a, component_b) in self.components.iter().zip(signature.components.iter()) {
-            if (component_a & component_b) != *component_b { return false; }
+            if (component_a & component_b) != *component_b {
+                return false;
+            }
         }
         true
     }
@@ -135,21 +149,18 @@ impl Signature {
 pub fn iter_bits_from_words<'a>(
     words: &'a [u64; SIGNATURE_SIZE],
 ) -> impl Iterator<Item = ComponentID> + 'a {
-    words
-        .iter()
-        .enumerate()
-        .flat_map(|(word_index, &word)| {
-            let base = word_index * 64;
-            let mut bits = word;
-            std::iter::from_fn(move || {
-                if bits == 0 {
-                    return None;
-                }
-                let tz = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                Some((base + tz) as ComponentID)
-            })
+    words.iter().enumerate().flat_map(|(word_index, &word)| {
+        let base = word_index * 64;
+        let mut bits = word;
+        std::iter::from_fn(move || {
+            if bits == 0 {
+                return None;
+            }
+            let tz = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            Some((base + tz) as ComponentID)
         })
+    })
 }
 
 /// Bitwise-ORs every word of `src` into the corresponding word of `dst`.

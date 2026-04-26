@@ -3,8 +3,8 @@
 #![cfg(feature = "gpu")]
 
 use abm_framework::{
-    System, SystemBackend, AccessSets, GpuSystem, ComponentRegistry,
-    ECSReference, ECSResult, GPUResourceID,
+    AccessSets, ComponentRegistry, ECSReference, ECSResult, GPUResourceID, GpuSystem, System,
+    SystemBackend,
 };
 
 use crate::sugarscape::components::*;
@@ -24,13 +24,23 @@ impl MetabolismGpuSystem {
 }
 
 impl System for MetabolismGpuSystem {
-    fn id(&self) -> u16 { 15 }
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+    fn id(&self) -> u16 {
+        15
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
-    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
-    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
+        Ok(())
+    }
+    fn gpu(&self) -> Option<&dyn GpuSystem> {
+        Some(self)
+    }
 }
 
 impl GpuSystem for MetabolismGpuSystem {
@@ -52,8 +62,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 "#
     }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
 }
 
 pub struct DeathGpuSystem {
@@ -70,13 +84,23 @@ impl DeathGpuSystem {
 }
 
 impl System for DeathGpuSystem {
-    fn id(&self) -> u16 { 16 }
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+    fn id(&self) -> u16 {
+        16
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
-    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
-    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
+        Ok(())
+    }
+    fn gpu(&self) -> Option<&dyn GpuSystem> {
+        Some(self)
+    }
 }
 
 impl GpuSystem for DeathGpuSystem {
@@ -97,18 +121,26 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 "#
     }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
 }
 
 pub struct AgentIntentGpuSystem {
     access: AccessSets,
     resources: [GPUResourceID; 2],
-    writes:    [GPUResourceID; 1],
+    writes: [GPUResourceID; 1],
 }
 
 impl AgentIntentGpuSystem {
-    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID, registry: &ComponentRegistry) -> Self {
+    pub fn new(
+        sugar_grid: GPUResourceID,
+        intent: GPUResourceID,
+        registry: &ComponentRegistry,
+    ) -> Self {
         let mut a = AccessSets::default();
         a.read.set(registry.id_of::<Vision>().unwrap());
         a.read.set(registry.id_of::<Position>().unwrap());
@@ -122,31 +154,55 @@ impl AgentIntentGpuSystem {
 }
 
 impl System for AgentIntentGpuSystem {
-    fn id(&self) -> u16 { 10 }
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+    fn id(&self) -> u16 {
+        10
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
-    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
-    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
+        Ok(())
+    }
+    fn gpu(&self) -> Option<&dyn GpuSystem> {
+        Some(self)
+    }
 }
 
 impl GpuSystem for AgentIntentGpuSystem {
-    fn shader(&self) -> &'static str { include_str!("shaders/agent_intent.wgsl") }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
-    fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
-    fn writes_resources(&self) -> &[GPUResourceID] { &self.writes }
+    fn shader(&self) -> &'static str {
+        include_str!("shaders/agent_intent.wgsl")
+    }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
+    fn uses_resources(&self) -> &[GPUResourceID] {
+        &self.resources
+    }
+    fn writes_resources(&self) -> &[GPUResourceID] {
+        &self.writes
+    }
 }
 
 pub struct ResolveHarvestGpuSystem {
     access: AccessSets,
     resources: [GPUResourceID; 2],
-    writes:    [GPUResourceID; 1],
+    writes: [GPUResourceID; 1],
 }
 
 impl ResolveHarvestGpuSystem {
-    pub fn new(sugar_grid: GPUResourceID, intent: GPUResourceID, registry: &ComponentRegistry) -> Self {
+    pub fn new(
+        sugar_grid: GPUResourceID,
+        intent: GPUResourceID,
+        registry: &ComponentRegistry,
+    ) -> Self {
         let mut a = AccessSets::default();
         a.read.set(registry.id_of::<Alive>().unwrap());
         a.write.set(registry.id_of::<Position>().unwrap());
@@ -160,21 +216,41 @@ impl ResolveHarvestGpuSystem {
 }
 
 impl System for ResolveHarvestGpuSystem {
-    fn id(&self) -> u16 { 13 }
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+    fn id(&self) -> u16 {
+        13
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
-    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
-    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
+        Ok(())
+    }
+    fn gpu(&self) -> Option<&dyn GpuSystem> {
+        Some(self)
+    }
 }
 
 impl GpuSystem for ResolveHarvestGpuSystem {
-    fn shader(&self) -> &'static str { include_str!("shaders/resolve_harvest.wgsl") }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
-    fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
-    fn writes_resources(&self) -> &[GPUResourceID] { &self.writes }
+    fn shader(&self) -> &'static str {
+        include_str!("shaders/resolve_harvest.wgsl")
+    }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
+    fn uses_resources(&self) -> &[GPUResourceID] {
+        &self.resources
+    }
+    fn writes_resources(&self) -> &[GPUResourceID] {
+        &self.writes
+    }
 }
 
 pub struct SugarRegrowthGpuSystem {
@@ -184,24 +260,47 @@ pub struct SugarRegrowthGpuSystem {
 
 impl SugarRegrowthGpuSystem {
     pub fn new(sugar_grid: GPUResourceID) -> Self {
-        Self { access: AccessSets::default(), resources: [sugar_grid] }
+        Self {
+            access: AccessSets::default(),
+            resources: [sugar_grid],
+        }
     }
 }
 
 impl System for SugarRegrowthGpuSystem {
-    fn id(&self) -> u16 { 12 }
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
-    fn access(&self) -> &AccessSets { &self.access }
-    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
-    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+    fn id(&self) -> u16 {
+        12
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
+        Ok(())
+    }
+    fn gpu(&self) -> Option<&dyn GpuSystem> {
+        Some(self)
+    }
 }
 
 impl GpuSystem for SugarRegrowthGpuSystem {
-    fn shader(&self) -> &'static str { include_str!("shaders/sugar_regrowth.wgsl") }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
-    fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
-    fn writes_resources(&self) -> &[GPUResourceID] { &self.resources }
+    fn shader(&self) -> &'static str {
+        include_str!("shaders/sugar_regrowth.wgsl")
+    }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
+    fn uses_resources(&self) -> &[GPUResourceID] {
+        &self.resources
+    }
+    fn writes_resources(&self) -> &[GPUResourceID] {
+        &self.resources
+    }
 }
 
 pub struct ClearOccupancyGpuSystem {
@@ -211,22 +310,45 @@ pub struct ClearOccupancyGpuSystem {
 
 impl ClearOccupancyGpuSystem {
     pub fn new(sugar_grid: GPUResourceID) -> Self {
-        Self { access: AccessSets::default(), resources: [sugar_grid] }
+        Self {
+            access: AccessSets::default(),
+            resources: [sugar_grid],
+        }
     }
 }
 
 impl System for ClearOccupancyGpuSystem {
-    fn id(&self) -> u16 { 10 }
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
-    fn access(&self) -> &AccessSets { &self.access }
-    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> { Ok(()) }
-    fn gpu(&self) -> Option<&dyn GpuSystem> { Some(self) }
+    fn id(&self) -> u16 {
+        9
+    }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
+    fn run(&self, _: ECSReference<'_>) -> ECSResult<()> {
+        Ok(())
+    }
+    fn gpu(&self) -> Option<&dyn GpuSystem> {
+        Some(self)
+    }
 }
 
 impl GpuSystem for ClearOccupancyGpuSystem {
-    fn shader(&self) -> &'static str { include_str!("shaders/clear_occupancy.wgsl") }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
-    fn uses_resources(&self) -> &[GPUResourceID] { &self.resources }
-    fn writes_resources(&self) -> &[GPUResourceID] { &self.resources }
+    fn shader(&self) -> &'static str {
+        include_str!("shaders/clear_occupancy.wgsl")
+    }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
+    fn uses_resources(&self) -> &[GPUResourceID] {
+        &self.resources
+    }
+    fn writes_resources(&self) -> &[GPUResourceID] {
+        &self.resources
+    }
 }

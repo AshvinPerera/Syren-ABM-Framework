@@ -38,16 +38,15 @@
 //!   panicking thread.
 
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
-use crate::engine::types::{ShardID, SHARD_BITS};
 use crate::engine::error::{ShardBoundsError, SpawnError};
+use crate::engine::types::{ShardID, SHARD_BITS};
 
+use super::entities::Entities;
 use super::entity::Entity;
 use super::location::EntityLocation;
-use super::entities::Entities;
-
 
 /// Synchronization unit for entity storage.
 ///
@@ -119,7 +118,7 @@ impl Shard {
 /// - Public methods are thread-safe.
 
 pub struct EntityShards {
-    shards: Vec<Shard>
+    shards: Vec<Shard>,
 }
 
 impl fmt::Debug for EntityShards {
@@ -132,7 +131,10 @@ impl fmt::Debug for EntityShards {
 
 impl EntityShards {
     /// Returns the total number of entity shards.
-    #[inline] pub fn shard_count(&self) -> usize { self.shards.len() }
+    #[inline]
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
 
     /// Lock a shard's entity pool.
     #[inline]
@@ -199,7 +201,11 @@ impl EntityShards {
     /// ## Invariants
     /// The returned entity is alive and has a valid location.
 
-    pub fn spawn_on(&self, shard_id: ShardID, location: EntityLocation) -> Result<Entity, SpawnError> {
+    pub fn spawn_on(
+        &self,
+        shard_id: ShardID,
+        location: EntityLocation,
+    ) -> Result<Entity, SpawnError> {
         let shard_count = self.shard_count();
         if (shard_id as usize) >= shard_count {
             return Err(SpawnError::ShardBounds(ShardBoundsError {
@@ -219,16 +225,18 @@ impl EntityShards {
         shard.live_entity_count.fetch_add(1, Ordering::Relaxed);
 
         if before_free > 0 {
-            shard.approximate_free_store_length.fetch_sub(1, Ordering::Relaxed);
+            shard
+                .approximate_free_store_length
+                .fetch_sub(1, Ordering::Relaxed);
         } else {
             let after_free = entities.free_store.len();
-            shard.approximate_free_store_length
+            shard
+                .approximate_free_store_length
                 .fetch_add(after_free as u32, Ordering::Relaxed);
         }
 
         Ok(entity)
     }
-
 
     /// Returns `true` if the entity is alive.
     ///
@@ -324,7 +332,9 @@ impl EntityShards {
             .map_err(|_| SpawnError::ShardLockPoisoned)?;
 
         if entities.despawn(entity) {
-            shard.approximate_free_store_length.fetch_add(1, Ordering::Relaxed);
+            shard
+                .approximate_free_store_length
+                .fetch_add(1, Ordering::Relaxed);
             shard.live_entity_count.fetch_sub(1, Ordering::Relaxed);
             Ok(true)
         } else {

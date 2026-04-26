@@ -33,32 +33,19 @@
 //! `despawn_on` leave the entity handle intact so that the archetype state
 //! remains recoverable.
 
-use crate::engine::types::{
-    ComponentID,
-    ShardID,
-    ChunkID,
-    RowID,
-};
+use crate::engine::types::{ChunkID, ComponentID, RowID, ShardID};
 
 use crate::engine::component::DynamicBundle;
 
-use crate::engine::entity::{
-    Entity,
-    EntityLocation,
-    EntityShards,
-};
+use crate::engine::entity::{Entity, EntityLocation, EntityShards};
 
-use crate::engine::error::{SpawnError, ECSError, ECSResult, InternalViolation, StaleEntityError};
+use crate::engine::error::{ECSError, ECSResult, InternalViolation, SpawnError, StaleEntityError};
 
-use crate::engine::storage::{
-    LockedAttribute
-};
+use crate::engine::storage::LockedAttribute;
 
 use super::core::Archetype;
 
-
 impl Archetype {
-
     /// Spawns a new entity into this archetype using the provided component bundle.
     ///
     /// ## Purpose
@@ -128,7 +115,11 @@ impl Archetype {
                             let _ = g.as_mut().swap_remove_dyn(rp.0, rp.1);
                         }
                     }
-                    return Err(SpawnError::MisalignedStorage { expected: rp, got: position }.into());
+                    return Err(SpawnError::MisalignedStorage {
+                        expected: rp,
+                        got: position,
+                    }
+                    .into());
                 }
             } else {
                 reference_position = Some(position);
@@ -143,7 +134,10 @@ impl Archetype {
 
         // Metadata lock acquired only after all column locks are released.
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut meta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
 
@@ -152,7 +146,11 @@ impl Archetype {
             }
         }
 
-        let location = EntityLocation { archetype: self.archetype_id, chunk, row };
+        let location = EntityLocation {
+            archetype: self.archetype_id,
+            chunk,
+            row,
+        };
 
         // Allocate entity handle
         let entity = shards.spawn_on(shard_id, location).map_err(|e| {
@@ -167,7 +165,10 @@ impl Archetype {
 
         // Write entity into metadata
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut meta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
             meta.entity_positions[chunk as usize][row as usize] = Some(entity);
             meta.length += 1;
         }
@@ -246,24 +247,32 @@ impl Archetype {
 
         // Update metadata (acquired after all column locks).
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut meta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
             Self::ensure_capacity(&mut meta, entity_chunk as usize + 1);
 
             if let Some((moved_chunk, moved_row)) = moved_from {
                 Self::ensure_capacity(&mut meta, moved_chunk as usize + 1);
                 let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize]
-                    .ok_or(ECSError::from(InternalViolation::DespawnMovedSlotMissingEntity))?;
+                    .ok_or(ECSError::from(
+                        InternalViolation::DespawnMovedSlotMissingEntity,
+                    ))?;
 
-                meta.entity_positions[entity_chunk as usize][entity_row as usize] = Some(moved_entity);
+                meta.entity_positions[entity_chunk as usize][entity_row as usize] =
+                    Some(moved_entity);
 
-                shards.set_location(
-                    moved_entity,
-                    EntityLocation {
-                        archetype: self.archetype_id,
-                        chunk: entity_chunk,
-                        row: entity_row,
-                    },
-                ).map_err(ECSError::from)?;
+                shards
+                    .set_location(
+                        moved_entity,
+                        EntityLocation {
+                            archetype: self.archetype_id,
+                            chunk: entity_chunk,
+                            row: entity_row,
+                        },
+                    )
+                    .map_err(ECSError::from)?;
 
                 meta.entity_positions[moved_chunk as usize][moved_row as usize] = None;
             } else {

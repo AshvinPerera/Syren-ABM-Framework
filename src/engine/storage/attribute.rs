@@ -86,17 +86,10 @@
 /// - `chunks` - The chunked backing storage.
 /// - `last_chunk_length` - The number of initialized elements in the final chunk.
 /// - `length` - Total number of initialized elements across all chunks.
+use std::{array, convert::TryInto, fmt, mem::MaybeUninit, ptr};
 
-use std::{
-    fmt,
-    ptr,
-    array,
-    mem::MaybeUninit,
-    convert::TryInto
-};
-
+use crate::engine::error::{AttributeError, PositionOutOfBoundsError};
 use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
-use crate::engine::error::{PositionOutOfBoundsError, AttributeError};
 
 /// Typed, chunked storage for a single component column in an archetype.
 ///
@@ -105,7 +98,7 @@ use crate::engine::error::{PositionOutOfBoundsError, AttributeError};
 pub struct Attribute<T> {
     pub(crate) chunks: Vec<Box<[MaybeUninit<T>; CHUNK_CAP]>>,
     pub(crate) last_chunk_length: usize, // number of initialized elements in the last chunk
-    pub(crate) length: usize
+    pub(crate) length: usize,
 }
 
 impl<T: 'static + Send + Sync> fmt::Debug for Attribute<T> {
@@ -138,7 +131,8 @@ impl<T> Attribute<T> {
     #[inline]
     fn ensure_last_chunk(&mut self) {
         if self.chunks.is_empty() || self.last_chunk_length == CHUNK_CAP {
-            self.chunks.push(Box::new(array::from_fn(|_| MaybeUninit::<T>::uninit())));
+            self.chunks
+                .push(Box::new(array::from_fn(|_| MaybeUninit::<T>::uninit())));
             self.last_chunk_length = 0;
         }
     }
@@ -149,10 +143,12 @@ impl<T> Attribute<T> {
     /// For the last chunk, only rows `< last_chunk_length` are initialized.
 
     #[inline]
-    fn valid_position(&self, chunk: ChunkID, row: RowID) -> bool {
+    pub(crate) fn valid_position(&self, chunk: ChunkID, row: RowID) -> bool {
         let chunk = chunk as usize;
         let row = row as usize;
-        if chunk >= self.chunk_count() { return false; }
+        if chunk >= self.chunk_count() {
+            return false;
+        }
         if chunk + 1 == self.chunk_count() {
             row < self.last_chunk_length
         } else {
@@ -172,7 +168,11 @@ impl<T> Attribute<T> {
     /// Debug asserts fire in debug mode, but no runtime checks exist in release.
 
     #[inline]
-    unsafe fn get_slot_unchecked(&mut self, chunk: usize, row: usize) -> &mut MaybeUninit<T> {
+    pub(crate) unsafe fn get_slot_unchecked(
+        &mut self,
+        chunk: usize,
+        row: usize,
+    ) -> &mut MaybeUninit<T> {
         debug_assert!(chunk < self.chunk_count());
         debug_assert!(row < CHUNK_CAP);
         &mut self.chunks[chunk][row]
@@ -202,7 +202,7 @@ impl<T> Attribute<T> {
             self.last_chunk_length = 0;
         } else {
             let new_last_chunk = (self.length - 1) / CHUNK_CAP;
-            let new_last_row   = (self.length - 1) % CHUNK_CAP;
+            let new_last_row = (self.length - 1) % CHUNK_CAP;
 
             while self.chunks.len() - 1 > new_last_chunk {
                 self.chunks.pop();
@@ -216,7 +216,9 @@ impl<T> Attribute<T> {
     /// or `None` if the position is invalid.
 
     pub fn get(&self, chunk: ChunkID, row: RowID) -> Option<&T> {
-        if !self.valid_position(chunk, row) { return None; }
+        if !self.valid_position(chunk, row) {
+            return None;
+        }
         // SAFETY: `valid_position` guarantees that `(chunk, row)` refers to an
         // initialized slot within bounds. The element was written by a prior `push`
         // or `push_from`, so `assume_init_ref` is sound.
@@ -227,7 +229,9 @@ impl<T> Attribute<T> {
     /// or `None` if the position is invalid.
 
     pub fn get_mut(&mut self, chunk: ChunkID, row: RowID) -> Option<&mut T> {
-        if !self.valid_position(chunk, row) { return None; }
+        if !self.valid_position(chunk, row) {
+            return None;
+        }
         // SAFETY: `valid_position` guarantees that `(chunk, row)` refers to an
         // initialized slot within bounds. No other mutable reference can exist because
         // we hold `&mut self`.
@@ -274,17 +278,16 @@ impl<T> Attribute<T> {
     /// Returns [`AttributeError::IndexOverflow`] if the computed chunk or row
     /// index cannot be represented in their respective ID types.
 
-    pub fn push(
-        &mut self,
-        value: T
-    ) -> Result<(ChunkID, RowID), AttributeError> {
+    pub fn push(&mut self, value: T) -> Result<(ChunkID, RowID), AttributeError> {
         self.ensure_last_chunk();
         let chunk_index = self.chunks.len() - 1;
         let row_index = self.last_chunk_length;
 
-        let chunk_id: ChunkID = chunk_index.try_into()
+        let chunk_id: ChunkID = chunk_index
+            .try_into()
             .map_err(|_| AttributeError::IndexOverflow("ChunkID"))?;
-        let row_id: RowID = row_index.try_into()
+        let row_id: RowID = row_index
+            .try_into()
             .map_err(|_| AttributeError::IndexOverflow("RowID"))?;
 
         // SAFETY: `ensure_last_chunk` guarantees that `chunks[chunk_index]` exists
@@ -331,37 +334,29 @@ impl<T> Attribute<T> {
     pub fn swap_remove(
         &mut self,
         chunk: ChunkID,
-        row: RowID
+        row: RowID,
     ) -> Result<Option<(ChunkID, RowID)>, AttributeError> {
         let chunk_count = self.chunks.len();
 
         if chunk as usize >= self.chunks.len() {
-            return Err(
-                AttributeError::Position(
-                    PositionOutOfBoundsError {
-                        chunk,
-                        row,
-                        chunks: chunk_count,
-                        capacity: CHUNK_CAP,
-                        last_chunk_length: self.last_chunk_length,
-                    }
-                )
-            );
+            return Err(AttributeError::Position(PositionOutOfBoundsError {
+                chunk,
+                row,
+                chunks: chunk_count,
+                capacity: CHUNK_CAP,
+                last_chunk_length: self.last_chunk_length,
+            }));
         }
 
         let index = chunk as usize * CHUNK_CAP + row as usize;
         if index >= self.length {
-            return Err(
-                AttributeError::Position(
-                    PositionOutOfBoundsError {
-                        chunk,
-                        row,
-                        chunks: chunk_count,
-                        capacity: CHUNK_CAP,
-                        last_chunk_length: self.last_chunk_length,
-                    }
-                )
-            );
+            return Err(AttributeError::Position(PositionOutOfBoundsError {
+                chunk,
+                row,
+                chunks: chunk_count,
+                capacity: CHUNK_CAP,
+                last_chunk_length: self.last_chunk_length,
+            }));
         }
 
         let last_index = self.length - 1;
@@ -388,10 +383,7 @@ impl<T> Attribute<T> {
             // is then overwritten with uninit to reflect that it no longer holds a
             // valid value.
             unsafe {
-                let last_value = ptr::read(
-                    self.get_slot_unchecked(last_chunk, last_row)
-                        .as_ptr()
-                );
+                let last_value = ptr::read(self.get_slot_unchecked(last_chunk, last_row).as_ptr());
 
                 self.get_slot_unchecked(chunk as usize, row as usize)
                     .assume_init_drop();
@@ -399,7 +391,7 @@ impl<T> Attribute<T> {
                 ptr::write(
                     self.get_slot_unchecked(chunk as usize, row as usize)
                         .as_mut_ptr(),
-                    last_value
+                    last_value,
                 );
 
                 *self.get_slot_unchecked(last_chunk, last_row) = MaybeUninit::uninit();
@@ -409,8 +401,12 @@ impl<T> Attribute<T> {
         let mut moved_from: Option<(ChunkID, RowID)> = None;
         if !is_last {
             moved_from = Some((
-                last_chunk as ChunkID,
-                last_row as RowID
+                last_chunk
+                    .try_into()
+                    .map_err(|_| AttributeError::IndexOverflow("chunk"))?,
+                last_row
+                    .try_into()
+                    .map_err(|_| AttributeError::IndexOverflow("row"))?,
             ));
         }
 
@@ -457,21 +453,17 @@ impl<T> Attribute<T> {
         &mut self,
         source: &mut Attribute<T>,
         source_chunk: ChunkID,
-        source_row: RowID
+        source_row: RowID,
     ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError> {
         let source_chunk_count = source.chunks.len();
         if !source.valid_position(source_chunk, source_row) {
-            return Err(
-                AttributeError::Position(
-                    PositionOutOfBoundsError {
-                        chunk: source_chunk,
-                        row: source_row,
-                        chunks: source_chunk_count,
-                        capacity: CHUNK_CAP,
-                        last_chunk_length: source.last_chunk_length,
-                    }
-                )
-            );
+            return Err(AttributeError::Position(PositionOutOfBoundsError {
+                chunk: source_chunk,
+                row: source_row,
+                chunks: source_chunk_count,
+                capacity: CHUNK_CAP,
+                last_chunk_length: source.last_chunk_length,
+            }));
         }
 
         // SAFETY: `valid_position` confirmed the source slot is initialized.
@@ -482,9 +474,10 @@ impl<T> Attribute<T> {
             let value = ptr::read(
                 source
                     .get_slot_unchecked(source_chunk as usize, source_row as usize)
-                    .as_ptr()
+                    .as_ptr(),
             );
-            *source.get_slot_unchecked(source_chunk as usize, source_row as usize) = MaybeUninit::uninit();
+            *source.get_slot_unchecked(source_chunk as usize, source_row as usize) =
+                MaybeUninit::uninit();
             value
         };
 
@@ -512,15 +505,14 @@ impl<T> Attribute<T> {
                     // different from the hole. `ptr::read` moves ownership out;
                     // `ptr::write` places it into the hole, filling it.
                     unsafe {
-                        let last_value = ptr::read(
-                            source.get_slot_unchecked(last_chunk, last_row)
-                                .as_ptr()
-                        );
+                        let last_value =
+                            ptr::read(source.get_slot_unchecked(last_chunk, last_row).as_ptr());
                         *source.get_slot_unchecked(last_chunk, last_row) = MaybeUninit::uninit();
                         ptr::write(
-                            source.get_slot_unchecked(source_chunk as usize, source_row as usize)
+                            source
+                                .get_slot_unchecked(source_chunk as usize, source_row as usize)
                                 .as_mut_ptr(),
-                            last_value
+                            last_value,
                         );
                     }
                 }
@@ -549,18 +541,18 @@ impl<T> Attribute<T> {
             // marked uninit above) with the last value via `ptr::write`, completing
             // the swap-remove.
             let last_value = unsafe {
-                let value = ptr::read(
-                    source
-                        .get_slot_unchecked(last_chunk, last_row)
-                        .as_ptr()
-                );
+                let value = ptr::read(source.get_slot_unchecked(last_chunk, last_row).as_ptr());
                 *source.get_slot_unchecked(last_chunk, last_row) = MaybeUninit::uninit();
                 value
             };
 
             moved_from_source = Some((
-                last_chunk.try_into().map_err(|_| AttributeError::IndexOverflow("chunk"))?,
-                last_row.try_into().map_err(|_| AttributeError::IndexOverflow("row"))?
+                last_chunk
+                    .try_into()
+                    .map_err(|_| AttributeError::IndexOverflow("chunk"))?,
+                last_row
+                    .try_into()
+                    .map_err(|_| AttributeError::IndexOverflow("row"))?,
             ));
 
             // SAFETY: The source slot at `(source_chunk, source_row)` was marked
@@ -572,7 +564,7 @@ impl<T> Attribute<T> {
                     source
                         .get_slot_unchecked(source_chunk as usize, source_row as usize)
                         .as_mut_ptr(),
-                    last_value
+                    last_value,
                 );
             }
         }
@@ -601,7 +593,9 @@ impl<T> Attribute<T> {
     /// This is used internally by [`clear`] and during destruction.
 
     fn drop_all_initialized_elements(&mut self) {
-        if self.length == 0 { return; }
+        if self.length == 0 {
+            return;
+        }
 
         let mut remaining = self.length;
         let chunk_count = self.chunks.len();
@@ -620,7 +614,9 @@ impl<T> Attribute<T> {
                 // Full chunks have `CHUNK_CAP` initialized elements; the last chunk
                 // has `last_chunk_len` initialized elements. `remaining` tracks how
                 // many elements are left to drop across all chunks.
-                unsafe { chunk[i].assume_init_drop(); }
+                unsafe {
+                    chunk[i].assume_init_drop();
+                }
             }
 
             if remaining <= init_in_chunk {
@@ -641,19 +637,24 @@ impl<T> Attribute<T> {
     /// Equivalent to resetting the attribute to its initial state.
 
     pub fn clear(&mut self) {
-        if self.length == 0 { return; }
+        if self.length == 0 {
+            return;
+        }
 
         self.drop_all_initialized_elements();
         self.chunks.clear();
         self.length = 0;
         self.last_chunk_length = 0;
     }
-
 }
 
 impl<T> Default for Attribute<T> {
     fn default() -> Self {
-        Self { chunks: Vec::new(), last_chunk_length: 0, length: 0 }
+        Self {
+            chunks: Vec::new(),
+            last_chunk_length: 0,
+            length: 0,
+        }
     }
 }
 

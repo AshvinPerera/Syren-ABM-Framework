@@ -15,8 +15,8 @@
 //! | [`RegistryError::ZeroSizedComponent`] | A zero-sized type is passed to registration |
 //! | [`RegistryError::PoisonedLock`] | An internal registry or factory table [`Mutex`](std::sync::Mutex) was poisoned |
 
-use std::fmt;
 use std::any::TypeId;
+use std::fmt;
 
 use crate::engine::types::ComponentID;
 
@@ -31,32 +31,31 @@ use crate::engine::types::ComponentID;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
-
     /// Registry has been frozen; registrations are not allowed.
     Frozen,
 
     /// Component capacity exceeded (no more IDs available).
     CapacityExceeded {
         /// Capacity
-        cap: usize
+        cap: usize,
     },
 
     /// A type was requested but never registered.
     NotRegistered {
         /// Type ID
-        type_id: TypeId
+        type_id: TypeId,
     },
 
     /// A factory for a registered component ID is missing.
     MissingFactory {
         /// Component ID of missing factory
-        component_id: ComponentID
+        component_id: ComponentID,
     },
 
     /// Zero sized component registered
     ZeroSizedComponent {
         /// type id of the zero sized component
-        type_id: TypeId
+        type_id: TypeId,
     },
 
     /// Registry or factory table lock was poisoned.
@@ -67,10 +66,20 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RegistryError::Frozen => f.write_str("component registry is frozen"),
-            RegistryError::CapacityExceeded { cap } => write!(f, "component registry capacity exceeded (cap {cap})"),
-            RegistryError::NotRegistered { type_id } => write!(f, "component type is not registered: {:?}", type_id),
-            RegistryError::MissingFactory { component_id } => write!(f, "missing component factory for component id {}", component_id),
-            RegistryError::ZeroSizedComponent { type_id } => write!(f, "zero-sized component is not allowed: {:?}", type_id),
+            RegistryError::CapacityExceeded { cap } => {
+                write!(f, "component registry capacity exceeded (cap {cap})")
+            }
+            RegistryError::NotRegistered { type_id } => {
+                write!(f, "component type is not registered: {:?}", type_id)
+            }
+            RegistryError::MissingFactory { component_id } => write!(
+                f,
+                "missing component factory for component id {}",
+                component_id
+            ),
+            RegistryError::ZeroSizedComponent { type_id } => {
+                write!(f, "zero-sized component is not allowed: {:?}", type_id)
+            }
             RegistryError::PoisonedLock => f.write_str("component registry lock poisoned"),
         }
     }

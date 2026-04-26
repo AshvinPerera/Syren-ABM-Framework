@@ -44,6 +44,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         return;
     }
 
+    // Defensive: if the host ever dispatches more threads than the intent
+    // buffers can hold, bail out cleanly rather than relying on driver-
+    // dependent OOB-store clamping (which has been observed to kill the
+    // device on some D3D12 drivers).
+    if (i >= arrayLength(&agent_target) || i >= arrayLength(&agent_score)) {
+        return;
+    }
+
     let w = i32(grid.w);
     let h = i32(grid.h);
 

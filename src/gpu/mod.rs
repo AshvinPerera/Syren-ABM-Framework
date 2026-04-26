@@ -98,20 +98,13 @@
 #![cfg(feature = "gpu")]
 
 mod context;
+mod dispatch;
 mod mirror;
 mod pipeline;
-mod dispatch;
 mod resource;
 
 pub use context::GPUContext;
 
-pub use dispatch::{
-    execute_gpu_system,
-    sync_pending_to_cpu
-};
+pub use dispatch::{execute_gpu_system, sync_pending_to_cpu};
 
-pub use resource::{
-    GPUResource,
-    GPUBindingDesc,
-    GPUResourceRegistry
-};
+pub use resource::{GPUBindingDesc, GPUResource, GPUResourceRegistry};

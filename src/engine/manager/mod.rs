@@ -44,14 +44,15 @@
 //! Each unsafe block documents the invariants it relies on.
 //! Violating these invariants results in undefined behaviour.
 
-mod phase;
-mod iteration;
-mod query_param;
 mod data;
 mod ecs_manager;
 mod ecs_reference;
+mod iteration;
+mod phase;
+mod query_executor;
+mod query_param;
 
-pub use query_param::{Read, Write};
+pub use data::ECSData;
 pub use ecs_manager::ECSManager;
 pub use ecs_reference::ECSReference;
-pub use data::ECSData;
+pub use query_param::{Read, Write};

@@ -11,19 +11,25 @@
 //!
 //! Public API exposure is controlled by `lib.rs`.
 
-pub mod types;
-pub mod error;
-pub mod component;
-pub mod storage;
-pub mod entity;
+pub mod activation;
 pub mod archetype;
-pub mod query;
-pub mod commands;
-pub mod systems;
-pub mod scheduler;
-pub mod manager;
 pub mod borrow;
+pub mod boundary;
+pub mod channel_allocator;
+pub mod commands;
+pub mod component;
+pub mod dot_export;
+pub mod entity;
+pub mod error;
+pub mod manager;
+pub mod plan_display;
+pub mod query;
 pub mod reduce;
+pub mod scheduler;
+pub mod storage;
+pub mod systems;
+pub mod types;
+pub mod workers;
 
 #[cfg(feature = "gpu")]
 pub mod dirty;
