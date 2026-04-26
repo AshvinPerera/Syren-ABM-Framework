@@ -34,8 +34,8 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::types::GPUResourceID;
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 
 use crate::gpu::GPUContext;
 
@@ -50,7 +50,11 @@ impl GPUBindingDesc {
     /// Compact key for pipeline-cache hashing.
     #[inline]
     pub fn key(self) -> u8 {
-        if self.read_only { 1 } else { 2 }
+        if self.read_only {
+            1
+        } else {
+            2
+        }
     }
 }
 
@@ -76,6 +80,16 @@ pub trait GPUResource: Send + Sync {
 
     /// Called when GPU-side data must be read back for CPU usage.
     fn download(&mut self, ctx: &GPUContext) -> ECSResult<()>;
+
+    /// Whether the generic GPU synchronization step should automatically call
+    /// [`GPUResource::download`] when this resource is marked pending.
+    ///
+    /// Most resources use the default. Some framework-owned resources, such as
+    /// GPU message buffers, need boundary-specific synchronization so they can
+    /// avoid unnecessary GPU-to-CPU transfers for GPU-only consumers.
+    fn automatic_download(&self) -> bool {
+        true
+    }
 
     /// Returns the binding contract for this resource.
     ///
@@ -140,9 +154,13 @@ impl GPUResourceRegistry {
     }
 
     /// Registers a new world-owned GPU resource and returns its ID.
-    pub fn register<R: GPUResource + 'static>(&mut self, r: R) -> GPUResourceID {
+    pub fn register<R: GPUResource + 'static>(&mut self, r: R) -> ECSResult<GPUResourceID> {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+        self.next_id = self.next_id.checked_add(1).ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: "GPU resource id space exhausted".into(),
+            })
+        })?;
 
         self.entries.push(GPUResourceEntry {
             resource: Box::new(r),
@@ -151,23 +169,31 @@ impl GPUResourceRegistry {
             pending_download: false,
         });
 
-        id
+        Ok(id)
     }
 
     /// Marks a resource as modified on the CPU.
     #[inline]
-    pub fn mark_cpu_dirty(&mut self, id: GPUResourceID) {
-        if let Some(e) = self.entries.get_mut(id as usize) {
-            e.cpu_dirty = true;
-        }
+    pub fn mark_cpu_dirty(&mut self, id: GPUResourceID) -> ECSResult<()> {
+        let e = self.entries.get_mut(id as usize).ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: format!("missing gpu resource id {id}").into(),
+            })
+        })?;
+        e.cpu_dirty = true;
+        Ok(())
     }
 
     /// Marks a resource as requiring GPU to CPU synchronization.
     #[inline]
-    pub fn mark_pending_download(&mut self, id: GPUResourceID) {
-        if let Some(e) = self.entries.get_mut(id as usize) {
-            e.pending_download = true;
-        }
+    pub fn mark_pending_download(&mut self, id: GPUResourceID) -> ECSResult<()> {
+        let e = self.entries.get_mut(id as usize).ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: format!("missing gpu resource id {id}").into(),
+            })
+        })?;
+        e.pending_download = true;
+        Ok(())
     }
 
     /// Ensures GPU buffers exist for every registered resource.
@@ -196,7 +222,9 @@ impl GPUResourceRegistry {
     pub fn download_pending(&mut self, context: &GPUContext) -> ECSResult<()> {
         for e in &mut self.entries {
             if e.pending_download {
-                e.resource.download(context)?;
+                if e.resource.automatic_download() {
+                    e.resource.download(context)?;
+                }
                 e.pending_download = false;
             }
         }
@@ -212,7 +240,9 @@ impl GPUResourceRegistry {
         for &id in ids {
             if let Some(e) = self.entries.get_mut(id as usize) {
                 if e.pending_download {
-                    e.resource.download(context)?;
+                    if e.resource.automatic_download() {
+                        e.resource.download(context)?;
+                    }
                     e.pending_download = false;
                 }
             }

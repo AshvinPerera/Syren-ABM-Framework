@@ -27,16 +27,33 @@ pub enum EnvironmentError {
         /// The name of the type that was requested.
         actual: &'static str,
     },
+
+    /// An environment lock was poisoned by a panic while held.
+    LockPoisoned {
+        /// Description of the poisoned lock.
+        what: &'static str,
+    },
+
+    /// An environment key was declared with an empty name.
+    EmptyKey,
 }
 
 impl std::fmt::Display for EnvironmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EnvironmentError::KeyNotFound(k) => write!(f, "key not found: {k}"),
-            EnvironmentError::TypeMismatch { key, expected, actual } => write!(
+            EnvironmentError::TypeMismatch {
+                key,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "type mismatch for key '{key}': expected {expected}, got {actual}"
             ),
+            EnvironmentError::LockPoisoned { what } => {
+                write!(f, "environment lock poisoned: {what}")
+            }
+            EnvironmentError::EmptyKey => f.write_str("environment key must not be empty"),
         }
     }
 }

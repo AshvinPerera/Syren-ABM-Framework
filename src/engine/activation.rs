@@ -29,7 +29,6 @@
 //! - [`Scheduler::set_activation_order`](crate::engine::scheduler::Scheduler::set_activation_order)
 //! - [`Scheduler::activation_order`](crate::engine::scheduler::Scheduler::activation_order)
 
-
 /// Controls the order in which entities are visited by a system's iteration.
 ///
 /// See the [module-level documentation](self) for a comparison of variants.
@@ -55,4 +54,43 @@ pub enum ActivationOrder {
     /// pass per chunk per system invocation. Appropriate when within-chunk
     /// ordering would introduce systematic bias.
     ShuffleFull,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActivationContext {
+    pub(crate) order: ActivationOrder,
+    pub(crate) seed: u64,
+    pub(crate) system_id: crate::engine::types::SystemID,
+}
+
+impl Default for ActivationContext {
+    fn default() -> Self {
+        Self {
+            order: ActivationOrder::Sequential,
+            seed: 0,
+            system_id: 0,
+        }
+    }
+}
+
+thread_local! {
+    static CURRENT_ACTIVATION: std::cell::Cell<ActivationContext> =
+        std::cell::Cell::new(ActivationContext {
+            order: ActivationOrder::Sequential,
+            seed: 0,
+            system_id: 0,
+        });
+}
+
+pub(crate) fn current_activation_context() -> ActivationContext {
+    CURRENT_ACTIVATION.with(std::cell::Cell::get)
+}
+
+pub(crate) fn with_activation_context<R>(context: ActivationContext, f: impl FnOnce() -> R) -> R {
+    CURRENT_ACTIVATION.with(|cell| {
+        let previous = cell.replace(context);
+        let result = f();
+        cell.set(previous);
+        result
+    })
 }

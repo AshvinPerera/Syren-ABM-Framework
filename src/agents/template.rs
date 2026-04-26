@@ -22,11 +22,14 @@
 use std::any::Any;
 use std::collections::HashMap;
 
-use crate::engine::types::ComponentID;
 use crate::engine::component::Signature;
+use crate::engine::error::ECSResult;
+use crate::engine::manager::ECSReference;
+use crate::engine::types::ComponentID;
+use crate::Entity;
 
 use super::error::{AgentError, AgentResult};
-use super::hooks::{SpawnHook, DespawnHook};
+use super::hooks::{DespawnHook, SpawnHook};
 
 /// Factory closure that produces a heap-allocated default component value.
 ///
@@ -79,6 +82,18 @@ impl AgentTemplate {
     /// `Command::Spawn`.
     pub fn spawner(&self) -> super::spawner::AgentSpawner<'_> {
         super::spawner::AgentSpawner::new(self)
+    }
+
+    /// Enqueues a tagged despawn for an entity that belongs to this template.
+    ///
+    /// The entity is removed when deferred commands are drained. If this
+    /// template has an `on_despawn` hook, the model invokes it after the drain
+    /// reports that the tagged despawn was applied.
+    pub fn despawn(&self, ecs: ECSReference<'_>, entity: Entity) -> ECSResult<()> {
+        ecs.defer(crate::engine::commands::Command::DespawnTagged {
+            entity,
+            tag: self.name.clone(),
+        })
     }
 
     /// Returns the template's human-readable name.
@@ -152,8 +167,10 @@ impl AgentTemplateBuilder {
             return Err(AgentError::DuplicateComponent(id));
         }
         self.signature.set(id);
-        self.defaults
-            .insert(id, Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>));
+        self.defaults.insert(
+            id,
+            Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>),
+        );
         Ok(self)
     }
 

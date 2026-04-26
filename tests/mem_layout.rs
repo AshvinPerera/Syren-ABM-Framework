@@ -2,9 +2,8 @@ use std::mem::{align_of, size_of};
 use std::sync::{Arc, RwLock};
 
 use abm_framework::{
-    Archetype, ArchetypeID, Attribute, Bundle, ChunkID, CHUNK_CAP,
-    ComponentRegistry, EntityShards, Signature, TypeErasedAttribute,
-    cast_slice,
+    advanced::{cast_slice, Archetype, Attribute, EntityShards, TypeErasedAttribute},
+    ArchetypeID, Bundle, ChunkID, ComponentRegistry, Signature, CHUNK_CAP,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,7 +53,13 @@ fn attribute_chunk_is_contiguous_and_aligned() {
 
     // Fill first chunk completely
     for i in 0..CHUNK_CAP {
-        let (c, r) = attr_push(&mut attr, Position { x: i as f32, y: 0.0 });
+        let (c, r) = attr_push(
+            &mut attr,
+            Position {
+                x: i as f32,
+                y: 0.0,
+            },
+        );
         assert_eq!(c, 0);
         assert_eq!(r as usize, i);
     }
@@ -137,8 +142,20 @@ fn archetype_borrow_exposes_soa_columns_with_independent_addresses() {
     // Spawn enough to ensure chunk 0 has some data
     for i in 0..1024usize {
         let mut b = Bundle::new();
-        b.insert(pos_id, Position { x: i as f32, y: 1.0 });
-        b.insert(vel_id, Velocity { dx: 0.5, dy: i as f32 });
+        b.insert(
+            pos_id,
+            Position {
+                x: i as f32,
+                y: 1.0,
+            },
+        );
+        b.insert(
+            vel_id,
+            Velocity {
+                dx: 0.5,
+                dy: i as f32,
+            },
+        );
         let _ = arch.spawn_on(&shards, 0, b).unwrap();
     }
 
@@ -229,7 +246,13 @@ fn archetype_chunk_pointer_is_stable_across_borrows() {
 
     for i in 0..(CHUNK_CAP / 2) {
         let mut b = Bundle::new();
-        b.insert(pos_id, Position { x: i as f32, y: 0.0 });
+        b.insert(
+            pos_id,
+            Position {
+                x: i as f32,
+                y: 0.0,
+            },
+        );
         let _ = arch.spawn_on(&shards, 0, b).unwrap();
     }
 

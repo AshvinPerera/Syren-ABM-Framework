@@ -28,10 +28,85 @@
 
 use std::any::Any;
 
+use crate::engine::component::Bundle;
 use crate::engine::entity::Entity;
 use crate::engine::types::ComponentID;
-use crate::engine::component::Bundle;
 
+/// Entity created by a deferred spawn command, plus optional producer tag.
+///
+/// Untagged spawns are ordinary ECS entity creation. Tagged spawns are used by
+/// higher-level model code that needs post-spawn lifecycle hooks once the
+/// concrete [`Entity`] handle is known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpawnEvent {
+    /// Newly-created entity.
+    pub entity: Entity,
+    /// Optional logical producer tag.
+    pub tag: Option<String>,
+}
+
+impl SpawnEvent {
+    /// Creates an untagged spawn event.
+    #[inline]
+    pub fn untagged(entity: Entity) -> Self {
+        Self { entity, tag: None }
+    }
+
+    /// Creates a tagged spawn event.
+    #[inline]
+    pub fn tagged(entity: Entity, tag: String) -> Self {
+        Self {
+            entity,
+            tag: Some(tag),
+        }
+    }
+}
+
+/// Entity removed by a deferred despawn command, plus optional producer tag.
+///
+/// Tagged despawns allow model-owned lifecycle registries to run cleanup hooks
+/// after the ECS has accepted and applied the structural removal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DespawnEvent {
+    /// Removed entity.
+    pub entity: Entity,
+    /// Optional logical producer tag.
+    pub tag: Option<String>,
+}
+
+impl DespawnEvent {
+    /// Creates an untagged despawn event.
+    #[inline]
+    pub fn untagged(entity: Entity) -> Self {
+        Self { entity, tag: None }
+    }
+
+    /// Creates a tagged despawn event.
+    #[inline]
+    pub fn tagged(entity: Entity, tag: String) -> Self {
+        Self {
+            entity,
+            tag: Some(tag),
+        }
+    }
+}
+
+/// Lifecycle events produced by one deferred command drain.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandEvents {
+    /// Entities created during the drain.
+    pub spawned: Vec<SpawnEvent>,
+    /// Entities removed during the drain.
+    pub despawned: Vec<DespawnEvent>,
+}
+
+impl CommandEvents {
+    /// Returns true if no lifecycle events were produced.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.spawned.is_empty() && self.despawned.is_empty()
+    }
+}
 
 /// Represents a deferred ecs mutation command.
 ///
@@ -55,7 +130,19 @@ pub enum Command {
     /// Spawns a new entity into a specific archetype.
     Spawn {
         /// Data bundle for the new entity.
-        bundle: Bundle
+        bundle: Bundle,
+    },
+
+    /// Spawns a new entity and records a logical producer tag.
+    ///
+    /// The tag is returned in [`SpawnEvent`] after the command is applied. The
+    /// core ECS does not interpret it; model-level code may use it to
+    /// dispatch lifecycle hooks.
+    SpawnTagged {
+        /// Data bundle for the new entity.
+        bundle: Bundle,
+        /// Producer tag associated with this spawn.
+        tag: String,
     },
 
     /// Despawns an existing entity.
@@ -66,7 +153,19 @@ pub enum Command {
     /// - Performs swap-remove on component storage as needed
     Despawn {
         /// Entity to be removed from the world.
-        entity: Entity
+        entity: Entity,
+    },
+
+    /// Despawns an existing entity and records a logical producer tag.
+    ///
+    /// The tag is returned in [`DespawnEvent`] after the command is applied.
+    /// The core ECS does not interpret it; model-level code may use it to
+    /// dispatch lifecycle hooks.
+    DespawnTagged {
+        /// Entity to be removed from the world.
+        entity: Entity,
+        /// Producer tag associated with this despawn.
+        tag: String,
     },
 
     /// Adds a component to an existing entity.
@@ -82,7 +181,7 @@ pub enum Command {
         /// Component value to insert.
         ///
         /// Must match the registered component type for `component_id`.
-        value: Box<dyn Any + Send>
+        value: Box<dyn Any + Send>,
     },
 
     /// Removes a component from an existing entity.
@@ -94,7 +193,7 @@ pub enum Command {
         /// Target entity losing the component.
         entity: Entity,
         /// Identifier of the component type to remove.
-        component_id: ComponentID
+        component_id: ComponentID,
     },
 
     /// Overwrites a component value on a specific entity **in place**.
@@ -108,7 +207,7 @@ pub enum Command {
     ///   not contain the component.
     /// - The concrete type of `value` is checked against the component registry
     ///   at apply time; a mismatch returns an error.
-    /// - Applied during `apply_deferred_commands` under the exclusive phase lock.
+    /// - Applied during `apply_deferred_commands` while the world is held exclusively.
     ///
     /// ## Visibility
     /// A `Set` emitted in stage N is only visible to systems in stage N+1 or

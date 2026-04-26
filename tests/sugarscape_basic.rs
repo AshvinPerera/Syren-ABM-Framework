@@ -19,8 +19,8 @@ use sugarscape::components::*;
 use sugarscape::cpu::*;
 
 use abm_framework::{
-    Bundle, ComponentRegistry, ECSData, ECSManager,
-    EntityShards, Scheduler, Command, Count, Sum, ECSResult,
+    advanced::{ECSData, EntityShards},
+    Bundle, Command, ComponentRegistry, Count, ECSManager, ECSResult, Scheduler, Sum,
 };
 
 use abm_framework::{span, Arg};
@@ -32,16 +32,12 @@ use abm_framework::{init, shutdown, thread_name};
 use abm_framework::gpu;
 
 #[cfg(feature = "gpu")]
-use sugarscape::gpu_resources::{SugarGrid, AgentIntentBuffers};
+use sugarscape::gpu_resources::{AgentIntentBuffers, SugarGrid};
 
 #[cfg(feature = "gpu")]
 use sugarscape::gpu::{
-    MetabolismGpuSystem,
-    DeathGpuSystem,
-    AgentIntentGpuSystem,
-    ResolveHarvestGpuSystem,
-    SugarRegrowthGpuSystem,
-    ClearOccupancyGpuSystem
+    AgentIntentGpuSystem, ClearOccupancyGpuSystem, DeathGpuSystem, MetabolismGpuSystem,
+    ResolveHarvestGpuSystem, SugarRegrowthGpuSystem,
 };
 
 /// Build a frozen component registry with all sugarscape components.
@@ -124,7 +120,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
     #[cfg(not(feature = "gpu"))]
     let grid = {
         let _g = span("setup::cpu_grid");
-        std::sync::Arc::new(std::sync::Mutex::new(Grid::new(w, h)))
+        Arc::new(std::sync::Mutex::new(Grid::new(w, h)))
     };
 
     #[cfg(feature = "gpu")]
@@ -138,9 +134,8 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
             }
         }
 
-        let sugar_grid_id = world.register_gpu_resource(
-            SugarGrid::new(w as u32, h as u32, capacity)
-        )?;
+        let sugar_grid_id =
+            world.register_gpu_resource(SugarGrid::new(w as u32, h as u32, capacity))?;
         // IMPORTANT: AgentIntentBuffers must be sized to the maximum agent
         // population, not a smaller arbitrary constant. Compute shaders are
         // dispatched with `entity_len` equal to the live agent count, and
@@ -149,9 +144,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
         // those writes go out-of-bounds, the GPU queue is killed
         // asynchronously, and the next `Device::poll` panics with
         // "Parent device is lost".
-        let intent_id = world.register_gpu_resource(
-            AgentIntentBuffers::new(N_AGENTS as usize)
-        )?;
+        let intent_id = world.register_gpu_resource(AgentIntentBuffers::new(N_AGENTS as usize))?;
 
         (sugar_grid_id, intent_id)
     };
@@ -217,8 +210,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
 
     // ─── SIMULATION LOOP ──────────────────────────────────────────────────────
     for step in 0..20 {
-        let _tick = span("tick")
-            .arg("step", Arg::U64(step as u64));
+        let _tick = span("tick").arg("step", Arg::U64(step as u64));
 
         {
             let _run = span("ecs::run");
@@ -238,7 +230,11 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
             world.reduce_read2::<Sugar, Alive, Sum>(
                 q.clone(),
                 Sum::default,
-                |acc, s, alive| if alive.0 == 1 { acc.0 += s.0 as f64 },
+                |acc, s, alive| {
+                    if alive.0 == 1 {
+                        acc.0 += s.0 as f64
+                    }
+                },
                 |a, b| a.0 += b.0,
             )?
         };
@@ -248,7 +244,11 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
             world.reduce_read2::<Sugar, Alive, Count>(
                 q,
                 Count::default,
-                |acc, _, alive| if alive.0 == 1 { acc.0 += 1 },
+                |acc, _, alive| {
+                    if alive.0 == 1 {
+                        acc.0 += 1
+                    }
+                },
                 |a, b| a.0 += b.0,
             )?
         };

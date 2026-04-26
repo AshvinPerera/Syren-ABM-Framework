@@ -40,11 +40,11 @@
 //! every stage boundary. Only components that were actually borrowed during
 //! the stage are touched during clear.
 
-mod tracker;
 mod guard;
+mod tracker;
 
 #[cfg(test)]
 mod tests;
 
-pub use tracker::BorrowTracker;
 pub use guard::BorrowGuard;
+pub use tracker::BorrowTracker;

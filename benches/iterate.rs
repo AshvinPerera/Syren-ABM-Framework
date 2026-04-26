@@ -19,8 +19,10 @@ fn iterate_benchmark(c: &mut Criterion) {
                 populate(&ecs, AGENTS_MED, pos_id, wealth_id, prod_id).unwrap();
 
                 let q = query_builder(&registry)
-                    .write::<Wealth>().unwrap()
-                    .build().unwrap();
+                    .write::<Wealth>()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 (ecs, q)
             },
@@ -45,13 +47,16 @@ fn iterate_benchmark(c: &mut Criterion) {
                 populate(&ecs, AGENTS_MED, pos_id, wealth_id, prod_id).unwrap();
 
                 let q = query_builder(&registry)
-                    .read::<Productivity>().unwrap()
-                    .build().unwrap();
+                    .read::<Productivity>()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 (ecs, q)
             },
             |(ecs, q)| {
-                let total = ecs.world_ref()
+                let total = ecs
+                    .world_ref()
                     .reduce_read::<Productivity, f32>(
                         q,
                         || 0.0f32,
@@ -75,9 +80,12 @@ fn iterate_benchmark(c: &mut Criterion) {
                 populate(&ecs, AGENTS_MED, pos_id, wealth_id, prod_id).unwrap();
 
                 let q = query_builder(&registry)
-                    .read::<Productivity>().unwrap()
-                    .write::<Wealth>().unwrap()
-                    .build().unwrap();
+                    .read::<Productivity>()
+                    .unwrap()
+                    .write::<Wealth>()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 (ecs, q)
             },

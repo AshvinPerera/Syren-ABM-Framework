@@ -3,15 +3,8 @@
 use std::sync::{Arc, RwLock};
 
 use abm_framework::{
-    Bundle,
-    ComponentRegistry,
-    ECSManager,
-    EntityShards,
-    Command,
-    ECSResult,
-    ECSError,
-    QueryBuilder,
-    ComponentID,
+    advanced::EntityShards, Bundle, Command, ComponentID, ComponentRegistry, ECSError, ECSManager,
+    ECSResult, QueryBuilder,
 };
 
 pub const AGENTS_SMALL: usize = 100_000;
@@ -38,7 +31,12 @@ pub struct Productivity {
 /// Productivity registered.  Returns the registry handle together with the
 /// three component IDs so callers never need to lock the registry just to
 /// look up an ID.
-pub fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, ComponentID, ComponentID, ComponentID) {
+pub fn make_registry() -> (
+    Arc<RwLock<ComponentRegistry>>,
+    ComponentID,
+    ComponentID,
+    ComponentID,
+) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let (pos_id, wealth_id, prod_id) = {
         let mut reg = registry.write().unwrap();

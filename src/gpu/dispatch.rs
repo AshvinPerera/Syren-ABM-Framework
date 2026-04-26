@@ -28,8 +28,10 @@
 //!
 //! ## Design philosophy
 //!
-//! * **Single global GPU runtime**
+//! * **Global device runtime, world-local data**
 //!   - GPU initialization and pipeline caches are shared globally.
+//!   - Component mirrors, pending downloads, and params buffers are owned by
+//!     each ECS world.
 //! * **Archetype-granular dispatch**
 //!   - Each archetype is dispatched independently for predictable memory layout.
 //! * **Explicit data movement**
@@ -50,7 +52,7 @@ use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::engine::archetype::Archetype;
-use crate::engine::component::{or_signature_in_place, ComponentRegistry, Signature};
+use crate::engine::component::{or_signature_in_place, Signature};
 use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::manager::ECSReference;
 use crate::engine::systems::{GpuSystem, System};
@@ -61,42 +63,52 @@ use crate::gpu::pipeline::PipelineCache;
 use crate::gpu::GPUContext;
 use crate::gpu::GPUResourceRegistry;
 
-struct Runtime {
+#[cfg(feature = "messaging_gpu")]
+use crate::gpu::pipeline::hash_str;
+#[cfg(feature = "messaging_gpu")]
+use crate::gpu::GPUBindingDesc;
+#[cfg(feature = "messaging_gpu")]
+use std::collections::HashMap;
+
+struct DeviceRuntime {
     context: GPUContext,
-    mirror: Mirror,
     pipelines: PipelineCache,
-    pending_download: Signature,
-    params_buffer: Option<wgpu::Buffer>,
+    #[cfg(feature = "messaging_gpu")]
+    framework_pipelines: FrameworkPipelineCache,
 }
 
-impl Runtime {
-    #[inline]
-    fn download_pending_into(
-        &mut self,
-        archetypes_mut: &mut [Archetype],
-        pending: &Signature,
-        registry: &ComponentRegistry,
-    ) -> ECSResult<()> {
-        let ctx = &self.context;
-        self.mirror.download_signature(ctx, archetypes_mut, pending, registry)
+/// GPU state owned by one ECS world.
+pub(crate) struct GpuWorldState {
+    pub(crate) mirror: Mirror,
+    pub(crate) pending_download: Signature,
+    pub(crate) params_buffers: Vec<wgpu::Buffer>,
+}
+
+impl GpuWorldState {
+    /// Creates empty world-local GPU state.
+    pub(crate) fn new() -> Self {
+        Self {
+            mirror: Mirror::new(),
+            pending_download: Signature::default(),
+            params_buffers: Vec::new(),
+        }
     }
 }
 
-static RUNTIME: OnceLock<ECSResult<Mutex<Runtime>>> = OnceLock::new();
+static DEVICE_RUNTIME: OnceLock<ECSResult<Mutex<DeviceRuntime>>> = OnceLock::new();
 
-fn runtime() -> ECSResult<MutexGuard<'static, Runtime>> {
-    let cell: &ECSResult<Mutex<Runtime>> = RUNTIME.get_or_init(|| {
-        let run_time = Runtime {
+fn device_runtime() -> ECSResult<MutexGuard<'static, DeviceRuntime>> {
+    let cell: &ECSResult<Mutex<DeviceRuntime>> = DEVICE_RUNTIME.get_or_init(|| {
+        let run_time = DeviceRuntime {
             context: GPUContext::new()?,
-            mirror: Mirror::new(),
             pipelines: PipelineCache::new(),
-            pending_download: Signature::default(),
-            params_buffer: None,
+            #[cfg(feature = "messaging_gpu")]
+            framework_pipelines: FrameworkPipelineCache::new(),
         };
         Ok(Mutex::new(run_time))
     });
 
-    let mutex: &Mutex<Runtime> = match cell {
+    let mutex: &Mutex<DeviceRuntime> = match cell {
         Ok(matched_runtime) => matched_runtime,
         Err(e) => {
             return Err(ECSError::from(ExecutionError::GpuInitFailed {
@@ -105,9 +117,198 @@ fn runtime() -> ECSResult<MutexGuard<'static, Runtime>> {
         }
     };
 
-    mutex
-        .lock()
-        .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "gpu runtime" }))
+    mutex.lock().map_err(|_| {
+        ECSError::from(ExecutionError::LockPoisoned {
+            what: "gpu device runtime",
+        })
+    })
+}
+
+#[derive(Debug, Default)]
+#[cfg(feature = "messaging_gpu")]
+struct FrameworkPipelineCache {
+    map: HashMap<(u64, u64, u64), (wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
+}
+
+#[cfg(feature = "messaging_gpu")]
+impl FrameworkPipelineCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn get_or_create(
+        &mut self,
+        context: &GPUContext,
+        label: &'static str,
+        shader_wgsl: &'static str,
+        entry_point: &'static str,
+        bindings: &[GPUBindingDesc],
+    ) -> ECSResult<(&wgpu::ComputePipeline, &wgpu::BindGroupLayout)> {
+        let key = (
+            hash_str(label) ^ hash_str(shader_wgsl),
+            hash_str(entry_point),
+            hash_framework_layout(bindings),
+        );
+        if !self.map.contains_key(&key) {
+            let mut entries = Vec::with_capacity(bindings.len());
+            for (binding, desc) in bindings.iter().enumerate() {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: binding as u32,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage {
+                            read_only: desc.read_only,
+                        },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+            }
+
+            let bgl = context
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(label),
+                    entries: &entries,
+                });
+            let layout = context
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(label),
+                    bind_group_layouts: &[Some(&bgl)],
+                    immediate_size: 0,
+                });
+            let module = context
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
+                });
+            let pipeline =
+                context
+                    .device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&layout),
+                        module: &module,
+                        entry_point: Some(entry_point),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        cache: None,
+                    });
+            self.map.insert(key, (pipeline, bgl));
+        }
+
+        let (pipeline, bgl) = self.map.get(&key).unwrap();
+        Ok((pipeline, bgl))
+    }
+}
+
+#[inline]
+#[cfg(feature = "messaging_gpu")]
+fn hash_framework_layout(bindings: &[GPUBindingDesc]) -> u64 {
+    let mut hash: u64 = 1469598103934665603;
+    for desc in bindings {
+        hash ^= desc.key() as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+/// Description of one framework-owned compute dispatch.
+#[cfg(feature = "messaging_gpu")]
+pub(crate) struct BoundaryKernelDesc<'a> {
+    /// Diagnostic label and pipeline-cache discriminator.
+    pub label: &'static str,
+    /// WGSL shader source.
+    pub shader: &'static str,
+    /// Compute entry point.
+    pub entry_point: &'static str,
+    /// Storage binding layout for group(0).
+    pub bindings: &'a [GPUBindingDesc],
+    /// Bind group entries for group(0).
+    pub entries: &'a [wgpu::BindGroupEntry<'a>],
+    /// Number of workgroups in x.
+    pub workgroups_x: u32,
+    /// Number of workgroups in y.
+    pub workgroups_y: u32,
+    /// Number of workgroups in z.
+    pub workgroups_z: u32,
+}
+
+/// Narrow dispatch facade for framework-owned boundary compute work.
+#[cfg(feature = "messaging_gpu")]
+pub(crate) struct BoundaryGpuDispatch<'a> {
+    runtime: &'a mut DeviceRuntime,
+}
+
+#[cfg(feature = "messaging_gpu")]
+impl BoundaryGpuDispatch<'_> {
+    /// Accesses the centralized GPU context for framework-owned buffer IO.
+    #[inline]
+    pub(crate) fn context(&self) -> &GPUContext {
+        &self.runtime.context
+    }
+
+    /// Dispatches a framework-owned compute kernel through the shared runtime.
+    pub(crate) fn dispatch(&mut self, desc: BoundaryKernelDesc<'_>) -> ECSResult<()> {
+        let (pipeline, bgl) = self.runtime.framework_pipelines.get_or_create(
+            &self.runtime.context,
+            desc.label,
+            desc.shader,
+            desc.entry_point,
+            desc.bindings,
+        )?;
+
+        let bind_group =
+            self.runtime
+                .context
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(desc.label),
+                    layout: bgl,
+                    entries: desc.entries,
+                });
+
+        let mut encoder =
+            self.runtime
+                .context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some(desc.label),
+                });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(desc.label),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(
+                desc.workgroups_x.max(1),
+                desc.workgroups_y.max(1),
+                desc.workgroups_z.max(1),
+            );
+        }
+
+        self.runtime.context.queue.submit(Some(encoder.finish()));
+        poll_context(&self.runtime.context)
+    }
+}
+
+/// Runs framework-owned boundary GPU work through the centralized runtime.
+#[cfg(feature = "messaging_gpu")]
+pub(crate) fn with_boundary_dispatch<R>(
+    gpu_resources: &mut GPUResourceRegistry,
+    f: impl FnOnce(&mut BoundaryGpuDispatch<'_>, &mut GPUResourceRegistry) -> ECSResult<R>,
+) -> ECSResult<R> {
+    let mut run_time = device_runtime()?;
+    gpu_resources.ensure_created(&run_time.context)?;
+    gpu_resources.upload_dirty(&run_time.context)?;
+    let mut dispatch = BoundaryGpuDispatch {
+        runtime: &mut *run_time,
+    };
+    f(&mut dispatch, gpu_resources)
 }
 
 /// Synchronize pending GPU downloads into ECS storage.
@@ -116,19 +317,20 @@ pub fn sync_pending_to_cpu(
     affected_resources: &[GPUResourceID],
 ) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
-        let mut run_time = runtime()?;
+        let run_time = device_runtime()?;
 
         data.gpu_resources_mut().ensure_created(&run_time.context)?;
 
         if affected_resources.is_empty() {
-            data.gpu_resources_mut().download_pending(&run_time.context)?;
+            data.gpu_resources_mut()
+                .download_pending(&run_time.context)?;
         } else {
             data.gpu_resources_mut()
                 .download_pending_filtered(&run_time.context, affected_resources)?;
         }
 
         let pending = {
-            let p = run_time.pending_download.clone();
+            let p = data.gpu_world_state().pending_download.clone();
             if is_signature_empty(&p) {
                 return Ok(());
             }
@@ -136,13 +338,21 @@ pub fn sync_pending_to_cpu(
         };
 
         let registry_arc = data.registry().clone();
-        let registry = registry_arc.read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "component registry" }))?;
+        let registry = registry_arc.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component registry",
+            })
+        })?;
 
-        let archetypes_mut: &mut [Archetype] = data.archetypes_mut();
-        run_time.download_pending_into(archetypes_mut, &pending, &registry)?;
+        let (archetypes_mut, world_state) = data.gpu_download_parts();
+        world_state.mirror.download_signature(
+            &run_time.context,
+            archetypes_mut,
+            &pending,
+            &registry,
+        )?;
 
-        run_time.pending_download = Signature::default();
+        world_state.pending_download = Signature::default();
 
         Ok(())
     })
@@ -160,7 +370,12 @@ pub fn execute_gpu_system(
 
         #[cfg(debug_assertions)]
         {
-            for (r, w) in access.read.components.iter().zip(access.write.components.iter()) {
+            for (r, w) in access
+                .read
+                .components
+                .iter()
+                .zip(access.write.components.iter())
+            {
                 debug_assert_eq!(r & w, 0, "AccessSets overlap after normalization");
             }
         }
@@ -170,43 +385,53 @@ pub fn execute_gpu_system(
 
         let union = union_signatures(read_signature, write_signature);
 
-        let mut run_time = runtime()?;
+        let mut run_time = device_runtime()?;
 
         data.gpu_resources_mut().ensure_created(&run_time.context)?;
         data.gpu_resources_mut().upload_dirty(&run_time.context)?;
 
         let registry_arc = data.registry().clone();
-        let registry = registry_arc.read()
-            .map_err(|_| ECSError::from(ExecutionError::LockPoisoned { what: "component registry" }))?;
+        let registry = registry_arc.read().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component registry",
+            })
+        })?;
 
         {
-            let archetypes: &[Archetype] = data.archetypes();
-
-            {
-                let Runtime { context, mirror, .. } = &mut *run_time;
-                mirror.upload_signature_dirty_chunks(context, archetypes, &union, data.gpu_dirty_chunks(), &registry)?;
-            }
-
+            let (archetypes, dirty_chunks, world_state, gpu_resources) = data.gpu_execution_parts();
+            world_state.mirror.upload_signature_dirty_chunks(
+                &run_time.context,
+                archetypes,
+                &union,
+                dirty_chunks,
+                &registry,
+            )?;
             dispatch_over_archetypes(
                 &mut *run_time,
+                world_state,
                 system.id(),
                 gpu,
                 archetypes,
                 &access,
-                data.gpu_resources(),
+                gpu_resources,
             )?;
         }
 
-        or_signature_in_place(&mut run_time.pending_download, write_signature);
+        or_signature_in_place(
+            &mut data.gpu_world_state_mut().pending_download,
+            write_signature,
+        );
 
         let writes = gpu.writes_resources();
         if !writes.is_empty() {
             for &resource_id in writes {
-                data.gpu_resources_mut().mark_pending_download(resource_id);
+                data.gpu_resources_mut()
+                    .mark_pending_download(resource_id)?;
             }
         } else {
             for &resource_id in gpu.uses_resources() {
-                data.gpu_resources_mut().mark_pending_download(resource_id);
+                data.gpu_resources_mut()
+                    .mark_pending_download(resource_id)?;
             }
         }
 
@@ -215,7 +440,8 @@ pub fn execute_gpu_system(
 }
 
 fn dispatch_over_archetypes(
-    run_time: &mut Runtime,
+    run_time: &mut DeviceRuntime,
+    world_state: &mut GpuWorldState,
     system_id: crate::engine::types::SystemID,
     gpu: &dyn GpuSystem,
     archetypes: &[Archetype],
@@ -224,8 +450,12 @@ fn dispatch_over_archetypes(
 ) -> ECSResult<()> {
     // Resolve GPU resources
 
-    let mut resource_ids: Vec<_> = gpu.uses_resources().to_vec();
-    resource_ids.sort_unstable();
+    let mut resource_ids = Vec::new();
+    for &resource_id in gpu.uses_resources() {
+        if !resource_ids.contains(&resource_id) {
+            resource_ids.push(resource_id);
+        }
+    }
     let resource_layout = gpu_resources.flattened_binding_descs(&resource_ids);
 
     // Resolve component access
@@ -255,12 +485,13 @@ fn dispatch_over_archetypes(
     )?;
 
     // Destructure run_time so we can borrow fields independently inside the loop.
-    let Runtime {
-        context,
+    let DeviceRuntime { context, .. } = run_time;
+    let GpuWorldState {
         mirror,
-        params_buffer,
+        params_buffers,
         ..
-    } = run_time;
+    } = world_state;
+    let mut params_index = 0usize;
 
     let mut encoder = context
         .device
@@ -278,6 +509,7 @@ fn dispatch_over_archetypes(
 
         // Dispatch per archetype
 
+        let mut archetype_base = 0u32;
         for archetype in archetypes {
             if !archetype.signature().contains_all(&access.read)
                 || !archetype.signature().contains_all(&access.write)
@@ -323,7 +555,7 @@ fn dispatch_over_archetypes(
             #[derive(Clone, Copy)]
             struct Params {
                 entity_len: u32,
-                _pad0: u32,
+                archetype_base: u32,
                 _pad1: u32,
                 _pad2: u32,
             }
@@ -333,29 +565,31 @@ fn dispatch_over_archetypes(
 
             let params = Params {
                 entity_len,
-                _pad0: 0,
+                archetype_base,
                 _pad1: 0,
                 _pad2: 0,
             };
 
             let size = size_of::<Params>() as u64;
-            let recreate = match params_buffer.as_ref() {
-                Some(b) => b.size() < size,
-                None => true,
-            };
-
-            if recreate {
-                *params_buffer = Some(
+            if params_buffers.len() <= params_index {
+                params_buffers.push(context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("abm_params"),
+                    size,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            } else if params_buffers[params_index].size() < size {
+                params_buffers[params_index] =
                     context.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("abm_params"),
                         size,
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
-                    }),
-                );
+                    });
             }
 
-            let params_buf = params_buffer.as_ref().unwrap();
+            let params_buf = &params_buffers[params_index];
+            params_index += 1;
             context
                 .queue
                 .write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
@@ -365,32 +599,30 @@ fn dispatch_over_archetypes(
                 resource: params_buf.as_entire_binding(),
             });
 
-            let bind_group0 = context.device.create_bind_group(
-                &wgpu::BindGroupDescriptor {
+            let bind_group0 = context
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("abm_bind_group_group0"),
                     layout: bgl0,
                     entries: &entries0,
-                },
-            );
+                });
 
             // Bind group 1 (GPU resources)
 
             let bind_group1 = if let Some(bgl1) = bgl1_opt {
                 let mut entries1 = Vec::with_capacity(resource_layout.len());
 
-                gpu_resources.append_bind_group_entries(
-                    &resource_ids,
-                    0,
-                    &mut entries1,
-                )?;
+                gpu_resources.append_bind_group_entries(&resource_ids, 0, &mut entries1)?;
 
-                Some(context.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
-                        label: Some("abm_bind_group_group1"),
-                        layout: bgl1,
-                        entries: &entries1,
-                    },
-                ))
+                Some(
+                    context
+                        .device
+                        .create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("abm_bind_group_group1"),
+                            layout: bgl1,
+                            entries: &entries1,
+                        }),
+                )
             } else {
                 None
             };
@@ -405,12 +637,19 @@ fn dispatch_over_archetypes(
             let workgroup = gpu.workgroup_size().max(1);
             let groups = (entity_len + workgroup - 1) / workgroup;
             pass.dispatch_workgroups(groups, 1, 1);
+            archetype_base = archetype_base.saturating_add(entity_len);
         }
     }
 
     // Submit
 
     context.queue.submit(Some(encoder.finish()));
+    poll_context(context)?;
+
+    Ok(())
+}
+
+fn poll_context(context: &GPUContext) -> ECSResult<()> {
     context
         .device
         .poll(wgpu::PollType::Wait {
@@ -422,7 +661,6 @@ fn dispatch_over_archetypes(
                 message: format!("wgpu device poll failed: {e:?}").into(),
             })
         })?;
-
     Ok(())
 }
 
@@ -471,7 +709,32 @@ fn is_signature_empty(sig: &Signature) -> bool {
 
 #[inline]
 fn normalize_access_sets(access: &mut crate::engine::systems::AccessSets) {
-    for (r, w) in access.read.components.iter_mut().zip(access.write.components.iter()) {
+    for (r, w) in access
+        .read
+        .components
+        .iter_mut()
+        .zip(access.write.components.iter())
+    {
         *r &= !*w;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_world_state_keeps_pending_and_mirror_state_independent() {
+        let mut world_a = GpuWorldState::new();
+        let world_b = GpuWorldState::new();
+
+        world_a.pending_download.set(0);
+
+        assert!(world_a.pending_download.has(0));
+        assert!(!world_b.pending_download.has(0));
+        assert_ne!(
+            &world_a.mirror as *const Mirror,
+            &world_b.mirror as *const Mirror
+        );
     }
 }

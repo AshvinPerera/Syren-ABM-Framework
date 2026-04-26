@@ -34,33 +34,15 @@
 use std::fmt;
 use std::sync::{RwLock, RwLockWriteGuard};
 
-use crate::engine::types::{
-    ArchetypeID,
-    ComponentID,
-    CHUNK_CAP,
-};
+use crate::engine::types::{ArchetypeID, ComponentID, CHUNK_CAP};
 
-use crate::engine::storage::{
-    TypeErasedAttribute,
-    LockedAttribute,
-};
+use crate::engine::storage::{LockedAttribute, TypeErasedAttribute};
 
-use crate::engine::component::{
-    Signature,
-    iter_bits_from_words,
-    ComponentRegistry,
-};
+use crate::engine::component::{iter_bits_from_words, ComponentRegistry, Signature};
 
-use crate::engine::error::{
-    SpawnError,
-    MoveError,
-    ECSError,
-    ECSResult,
-    InternalViolation,
-};
+use crate::engine::error::{ECSError, ECSResult, InternalViolation, MoveError, SpawnError};
 
 use crate::engine::entity::Entity;
-
 
 // ---------------------------------------------------------------------------
 // Internal metadata
@@ -125,7 +107,6 @@ pub struct Archetype {
 }
 
 impl Archetype {
-
     /// Creates a new empty `Archetype` with the given identifier.
     ///
     /// ## Purpose
@@ -162,9 +143,12 @@ impl Archetype {
         };
 
         for component_id in iter_bits_from_words(&signature.components) {
-            let component = registry.make_empty_component(component_id)
+            let component = registry
+                .make_empty_component(component_id)
                 .map_err(ECSError::from)?;
-            archetype.components.push((component_id, LockedAttribute::new(component)));
+            archetype
+                .components
+                .push((component_id, LockedAttribute::new(component)));
             archetype.signature.set(component_id);
         }
 
@@ -179,7 +163,11 @@ impl Archetype {
     /// This reflects logical count only; physical chunk storage may contain unused rows.
 
     pub fn length(&self) -> ECSResult<usize> {
-        Ok(self.meta.read().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?.length)
+        Ok(self
+            .meta
+            .read()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?
+            .length)
     }
 
     /// Returns the `ArchetypeID` associated with this archetype.
@@ -196,7 +184,9 @@ impl Archetype {
     /// ## Notes
     /// Used by query and filtering logic.
 
-    pub fn signature(&self) -> &Signature { &self.signature }
+    pub fn signature(&self) -> &Signature {
+        &self.signature
+    }
 
     /// Returns `true` if this archetype contains all components described in `need`.
     ///
@@ -254,6 +244,21 @@ impl Archetype {
         self.find_component(component_id)
     }
 
+    /// Returns component column lengths for internal regression tests.
+    #[cfg(test)]
+    pub(crate) fn component_lengths_for_test(&self) -> Vec<(ComponentID, usize)> {
+        self.components
+            .iter()
+            .map(|(component_id, column)| {
+                let len = column
+                    .read()
+                    .map(|guard| guard.length())
+                    .unwrap_or(usize::MAX);
+                (*component_id, len)
+            })
+            .collect()
+    }
+
     #[inline]
     pub(super) fn lock_write_spawn<'a>(
         attr: &'a LockedAttribute,
@@ -266,7 +271,10 @@ impl Archetype {
         attr: &'a LockedAttribute,
         component_id: ComponentID,
     ) -> Result<RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>, MoveError> {
-        attr.write().map_err(|e| MoveError::PushFromFailed { component_id, source_error: e })
+        attr.write().map_err(|e| MoveError::PushFromFailed {
+            component_id,
+            source_error: e,
+        })
     }
 
     /// Computes how many chunks are required to store all active rows.

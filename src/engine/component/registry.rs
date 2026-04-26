@@ -42,10 +42,11 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::fmt;
+use std::mem::size_of;
 
+use crate::engine::error::{RegistryError, RegistryResult};
 use crate::engine::storage::{Attribute, TypeErasedAttribute};
 use crate::engine::types::{ComponentID, COMPONENT_CAP};
-use crate::engine::error::{RegistryError, RegistryResult};
 
 use super::descriptor::ComponentDesc;
 
@@ -134,10 +135,14 @@ impl ComponentRegistry {
     /// Locks component identity and storage layout so archetypes can assume IDs
     /// are complete and stable.
 
-    pub fn freeze(&mut self) { self.frozen = true; }
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
 
     /// Returns `true` if the registry has been frozen.
-    pub fn is_frozen(&self) -> bool { self.frozen }
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
 
     /// Returns the `ComponentID` associated with a `TypeId`, if registered.
     pub fn component_id_of_type_id(&self, type_id: TypeId) -> Option<ComponentID> {
@@ -146,7 +151,24 @@ impl ComponentRegistry {
 
     /// Returns the component descriptor for a `ComponentID`, if registered.
     pub fn description_by_component_id(&self, component_id: ComponentID) -> Option<&ComponentDesc> {
-        self.by_id.get(component_id as usize).and_then(|o| o.as_ref())
+        self.by_id
+            .get(component_id as usize)
+            .and_then(|o| o.as_ref())
+    }
+
+    /// Validates that a component ID is in range and registered in this registry.
+    pub fn require_component_id(&self, component_id: ComponentID) -> Result<(), RegistryError> {
+        let index = component_id as usize;
+        if index >= COMPONENT_CAP {
+            return Err(RegistryError::InvalidComponentId {
+                component_id,
+                cap: COMPONENT_CAP,
+            });
+        }
+        if self.by_id[index].is_none() {
+            return Err(RegistryError::ComponentIdNotRegistered { component_id });
+        }
+        Ok(())
     }
 
     /// Returns the storage factory for `component_id`, if registered.
@@ -163,7 +185,8 @@ impl ComponentRegistry {
         &self,
         component_id: ComponentID,
     ) -> RegistryResult<Box<dyn TypeErasedAttribute>> {
-        let factory = self.get_factory(component_id)
+        let factory = self
+            .get_factory(component_id)
             .ok_or(RegistryError::MissingFactory { component_id })?;
         Ok(factory())
     }
@@ -187,6 +210,10 @@ impl ComponentRegistry {
         let type_id = TypeId::of::<T>();
         if let Some(&existing) = self.by_type.get(&type_id) {
             return Ok(existing);
+        }
+
+        if size_of::<T>() == 0 {
+            return Err(RegistryError::ZeroSizedComponent { type_id });
         }
 
         if self.frozen {
@@ -253,10 +280,7 @@ impl ComponentRegistry {
     /// - Returns `RegistryError::NotRegistered` if `component_id` does not
     ///   correspond to a registered component.
     #[cfg(feature = "gpu")]
-    pub fn mark_gpu_safe(
-        &mut self,
-        component_id: ComponentID,
-    ) -> Result<(), RegistryError> {
+    pub fn mark_gpu_safe(&mut self, component_id: ComponentID) -> Result<(), RegistryError> {
         match self.by_id.get_mut(component_id as usize) {
             Some(Some(desc)) => {
                 desc.gpu_usage = true;
@@ -279,8 +303,9 @@ impl ComponentRegistry {
     /// Returns `RegistryError::NotRegistered` if `T` was not registered.
 
     pub fn require_id_of<T: 'static>(&self) -> Result<ComponentID, RegistryError> {
-        self.id_of::<T>()
-            .ok_or(RegistryError::NotRegistered { type_id: TypeId::of::<T>() })
+        self.id_of::<T>().ok_or(RegistryError::NotRegistered {
+            type_id: TypeId::of::<T>(),
+        })
     }
 }
 

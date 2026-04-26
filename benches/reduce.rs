@@ -17,8 +17,10 @@ fn reduce_benchmark(c: &mut Criterion) {
                 populate(&ecs, AGENTS_MED, pos_id, wealth_id, prod_id).unwrap();
 
                 let q = query_builder(&registry)
-                    .read::<Wealth>().unwrap()
-                    .build().unwrap();
+                    .read::<Wealth>()
+                    .unwrap()
+                    .build()
+                    .unwrap();
 
                 (ecs, q)
             },

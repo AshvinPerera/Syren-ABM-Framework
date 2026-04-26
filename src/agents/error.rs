@@ -2,9 +2,9 @@
 //!
 //! ## Design
 //!
-//! The `agents` module operates on top of the engine's public API and cannot
-//! add variants to [`ECSError`]. Instead, agent-specific failures are reported
-//! as `Result<T, AgentError>` at all public module boundaries.
+//! The `agents` module operates on top of the engine's public API where
+//! agent-specific failures are reported as `Result<T, AgentError>` at all
+//! public module boundaries.
 //!
 //! When results must cross into scheduler or manager APIs that require
 //! [`ECSResult`], callers can use the provided [`From<AgentError> for ECSError`]
@@ -22,14 +22,17 @@
 
 use std::fmt;
 
+use crate::engine::error::ECSError;
 use crate::engine::types::ComponentID;
-use crate::engine::error::{ECSError, ExecutionError};
 
 /// Errors specific to the `agents` domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentError {
     /// A named template was requested but not found in the [`AgentRegistry`].
     TemplateNotFound(String),
+
+    /// A named template was registered more than once.
+    DuplicateTemplate(String),
 
     /// A [`ComponentID`] was referenced that is not part of the template's
     /// declared [`Signature`].
@@ -49,10 +52,20 @@ impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AgentError::TemplateNotFound(name) => write!(f, "agent template not found: {name}"),
-            AgentError::MissingComponent(id) => write!(f, "component {id} is not in the template signature"),
+            AgentError::DuplicateTemplate(name) => {
+                write!(f, "agent template already registered: {name}")
+            }
+            AgentError::MissingComponent(id) => {
+                write!(f, "component {id} is not in the template signature")
+            }
             AgentError::StaleHandle => write!(f, "stale agent handle: entity no longer exists"),
-            AgentError::DuplicateComponent(id) => write!(f, "component {id} is already registered in this template"),
-            AgentError::RegistrySealed => write!(f, "agent registry is sealed; no further templates may be registered"),
+            AgentError::DuplicateComponent(id) => {
+                write!(f, "component {id} is already registered in this template")
+            }
+            AgentError::RegistrySealed => write!(
+                f,
+                "agent registry is sealed; no further templates may be registered"
+            ),
         }
     }
 }
@@ -60,14 +73,9 @@ impl fmt::Display for AgentError {
 impl std::error::Error for AgentError {}
 
 /// Converts an [`AgentError`] into an [`ECSError`].
-///
-/// Because [`ECSError`] has no generic agent-error variant (engine files cannot
-/// be modified per the constraint), this maps through
-/// `ExecutionError::SchedulerInvariantViolation`. Callers that need to
-/// distinguish agent errors should match `AgentError` before converting.
 impl From<AgentError> for ECSError {
-    fn from(_e: AgentError) -> Self {
-        ECSError::Execute(ExecutionError::SchedulerInvariantViolation)
+    fn from(e: AgentError) -> Self {
+        ECSError::Agent(e)
     }
 }
 
@@ -112,6 +120,9 @@ mod tests {
     fn into_ecs_error_does_not_panic() {
         let e = AgentError::TemplateNotFound("X".into());
         let ecs: ECSError = e.into();
-        assert!(matches!(ecs, ECSError::Execute(ExecutionError::SchedulerInvariantViolation)));
+        assert!(matches!(
+            ecs,
+            ECSError::Agent(AgentError::TemplateNotFound(_))
+        ));
     }
 }

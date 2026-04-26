@@ -59,7 +59,7 @@
 //! operate through [`ECSReference`], which provides controlled entry points into
 //! ECS execution phases.
 //!
-//! Correctness is enforced at runtime via borrow tracking and execution-phase discipline; 
+//! Correctness is enforced at runtime via borrow tracking and execution-phase discipline;
 //! the scheduler optimises parallelism.
 //!
 //! ## Intended Usage
@@ -71,17 +71,14 @@
 //!
 //! Together, these components form the execution layer of the ECS.
 
+use crate::engine::component::Signature;
+use crate::engine::error::{ECSError, ECSResult, ExecutionError, InvalidAccessReason};
+use crate::engine::manager::ECSReference;
 #[cfg(feature = "gpu")]
 use crate::engine::types::GPUResourceID;
 use crate::engine::types::{ChannelID, ComponentID, SystemID};
-use crate::engine::component::{Signature};
-use crate::engine::manager::ECSReference;
-use crate::engine::error::{
-    ECSResult, ECSError, ExecutionError, InvalidAccessReason,
-};
 
 use smallvec::SmallVec;
-
 
 /// Bitset of [`ChannelID`]s for non-component scheduling dependencies.
 ///
@@ -112,7 +109,7 @@ impl ChannelSet {
     #[inline]
     pub fn insert(&mut self, id: ChannelID) {
         let word = (id as usize) / 64;
-        let bit  = (id as usize) % 64;
+        let bit = (id as usize) % 64;
         if self.bits.len() <= word {
             self.bits.resize(word + 1, 0);
         }
@@ -123,8 +120,10 @@ impl ChannelSet {
     #[inline]
     pub fn contains(&self, id: ChannelID) -> bool {
         let word = (id as usize) / 64;
-        let bit  = (id as usize) % 64;
-        self.bits.get(word).map_or(false, |w| (w & (1u64 << bit)) != 0)
+        let bit = (id as usize) % 64;
+        self.bits
+            .get(word)
+            .map_or(false, |w| (w & (1u64 << bit)) != 0)
     }
 
     /// Returns `true` if this set is empty (no channels present).
@@ -254,13 +253,28 @@ impl AccessSets {
     /// duplicating the bitset loop.
     #[inline]
     pub(crate) fn component_conflict(&self, other: &AccessSets) -> bool {
-        for ((a_w, a_r), (b_w, b_r)) in self.write.components.iter()
+        for ((a_w, a_r), (b_w, b_r)) in self
+            .write
+            .components
+            .iter()
             .zip(self.read.components.iter())
-            .zip(other.write.components.iter().zip(other.read.components.iter()))
+            .zip(
+                other
+                    .write
+                    .components
+                    .iter()
+                    .zip(other.read.components.iter()),
+            )
         {
-            if (a_w & b_w) != 0 { return true; } // W∩W
-            if (a_w & b_r) != 0 { return true; } // W∩R
-            if (a_r & b_w) != 0 { return true; } // R∩W
+            if (a_w & b_w) != 0 {
+                return true;
+            } // W∩W
+            if (a_w & b_r) != 0 {
+                return true;
+            } // W∩R
+            if (a_r & b_w) != 0 {
+                return true;
+            } // R∩W
         }
         false
     }
@@ -300,7 +314,10 @@ impl AccessSets {
     /// rather than producing silently-wrong schedules.
     pub fn validate(&self) -> ECSResult<()> {
         // Component read/write self-alias.
-        for (i, (rw, ww)) in self.read.components.iter()
+        for (i, (rw, ww)) in self
+            .read
+            .components
+            .iter()
             .zip(self.write.components.iter())
             .enumerate()
         {
@@ -317,7 +334,9 @@ impl AccessSets {
 
         // Channel produces/consumes self-alias.
         if self.produces.intersects(&self.consumes) {
-            let offender = self.produces.iter()
+            let offender = self
+                .produces
+                .iter()
                 .find(|ch| self.consumes.contains(*ch))
                 .unwrap_or(0);
             return Err(ECSError::Execute(ExecutionError::SelfChannelAlias {
@@ -335,7 +354,7 @@ pub enum SystemBackend {
     /// Standard Rust / Rayon execution on CPU.
     CPU,
     /// GPU dispatch.
-    GPU
+    GPU,
 }
 
 /// GPU capability trait (feature-gated).
@@ -347,16 +366,24 @@ pub trait GpuSystem {
     fn shader(&self) -> &'static str;
 
     /// Entry point name (default "main")
-    fn entry_point(&self) -> &'static str { "main" }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
 
     /// Workgroup size (default 256)
-    fn workgroup_size(&self) -> u32 { 256 }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
 
     /// GPU resources read or used by this kernel.
-    fn uses_resources(&self) -> &[GPUResourceID] { &[] }
+    fn uses_resources(&self) -> &[GPUResourceID] {
+        &[]
+    }
 
     /// GPU resources that this kernel may write.
-    fn writes_resources(&self) -> &[GPUResourceID] { &[] }
+    fn writes_resources(&self) -> &[GPUResourceID] {
+        &[]
+    }
 }
 
 /// A unit of executable logic operating on the ECS world.
@@ -405,7 +432,6 @@ pub trait System: Send + Sync {
     fn gpu(&self) -> Option<&dyn GpuSystem> {
         None
     }
-
 }
 
 /// A concrete [`System`] backed by a function or closure.
@@ -417,10 +443,7 @@ pub trait System: Send + Sync {
 /// execution failures can be propagated through the scheduler.
 pub struct FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) -> ECSResult<()>
-    + Send
-    + Sync
-    + 'static,
+    F: Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static,
 {
     id: SystemID,
     name: &'static str,
@@ -430,10 +453,7 @@ where
 
 impl<F> FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) -> ECSResult<()>
-    + Send
-    + Sync
-    + 'static,
+    F: Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static,
 {
     /// Creates a new function-backed system.
     ///
@@ -442,22 +462,19 @@ where
     /// - `name`: Human-readable name, useful for debugging and profiling.
     /// - `access`: Declared component access used for scheduling.
     /// - `f`: The function or closure executed when the system runs.
-    pub fn new(
-        id: SystemID,
-        name: &'static str,
-        access: AccessSets,
-        f: F,
-    ) -> Self {
-        Self { id, name, access, f }
+    pub fn new(id: SystemID, name: &'static str, access: AccessSets, f: F) -> Self {
+        Self {
+            id,
+            name,
+            access,
+            f,
+        }
     }
 }
 
 impl<F> System for FnSystem<F>
 where
-    F: Fn(ECSReference<'_>) -> ECSResult<()>
-    + Send
-    + Sync
-    + 'static,
+    F: Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
         self.name

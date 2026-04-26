@@ -12,7 +12,6 @@
 
 use crate::engine::types::{ArchetypeID, ChunkID, RowID};
 
-
 /// Physical storage location of an entity within archetype storage.
 ///
 /// ## Purpose

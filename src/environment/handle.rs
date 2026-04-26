@@ -93,7 +93,7 @@ use crate::engine::types::ChannelID;
 /// ```
 #[derive(Clone, Copy)]
 pub struct EnvKey<T> {
-    pub(crate) name:       &'static str,
+    pub(crate) name: &'static str,
     pub(crate) channel_id: ChannelID,
     // `fn() -> T` makes PhantomData covariant in T while keeping EnvKey
     // unconditionally Send + Sync — no T is stored at runtime.
@@ -107,7 +107,11 @@ impl<T> EnvKey<T> {
     /// [`Environment::env_key`](crate::environment::Environment::env_key).
     #[inline]
     pub(crate) fn new(name: &'static str, channel_id: ChannelID) -> Self {
-        Self { name, channel_id, _marker: PhantomData }
+        Self {
+            name,
+            channel_id,
+            _marker: PhantomData,
+        }
     }
 
     /// Returns the [`ChannelID`] assigned to this key at environment build time.
@@ -155,14 +159,14 @@ mod tests {
     fn is_copy() {
         let key: EnvKey<f32> = EnvKey::new("x", 1);
         let key2 = key; // copy
-        let _ = key;    // original still accessible
+        let _ = key; // original still accessible
         assert_eq!(key2.channel_id(), 1);
     }
 
     #[test]
     fn distinct_type_params_compile() {
-        let _f: EnvKey<f32>  = EnvKey::new("a", 0);
-        let _u: EnvKey<u32>  = EnvKey::new("b", 1);
+        let _f: EnvKey<f32> = EnvKey::new("a", 0);
+        let _u: EnvKey<u32> = EnvKey::new("b", 1);
         let _b: EnvKey<bool> = EnvKey::new("c", 2);
     }
 }

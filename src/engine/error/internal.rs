@@ -45,9 +45,7 @@ use std::fmt;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalViolation {
-
     // -- archetype.rs -------------------------------------------------------
-
     /// An `RwLock` protecting archetype metadata was poisoned.
     ArchetypeMetaLockPoisoned,
 
@@ -79,7 +77,6 @@ pub enum InternalViolation {
     SignatureStorageMismatch,
 
     // -- manager.rs ---------------------------------------------------------
-
     /// A typed iteration helper (e.g. `for_each_read`, `for_each_write`)
     /// was invoked with a query whose read/write shape does not match the
     /// helper's requirements.
@@ -105,6 +102,11 @@ pub enum InternalViolation {
 
     /// `get_archetype_pair_mut` was called with two identical archetype IDs.
     ArchetypePairSameId,
+
+    /// A [`std::sync::Mutex`] or [`std::sync::RwLock`] was found in a
+    /// poisoned state, indicating that another thread panicked while holding
+    /// the lock.
+    PoisonedLock,
 }
 
 impl fmt::Display for InternalViolation {
@@ -134,7 +136,11 @@ impl fmt::Display for InternalViolation {
             InternalViolation::SignatureStorageMismatch => {
                 f.write_str("from_components: archetype signature and storage mismatch")
             }
-            InternalViolation::QueryShapeMismatch { method, expected_reads, expected_writes } => {
+            InternalViolation::QueryShapeMismatch {
+                method,
+                expected_reads,
+                expected_writes,
+            } => {
                 write!(
                     f,
                     "{}: query must have exactly {} read(s) and {} write(s)",
@@ -144,8 +150,11 @@ impl fmt::Display for InternalViolation {
             InternalViolation::ReduceWritesNotAllowed => {
                 f.write_str("reduce_abstraction: writes not allowed")
             }
-            InternalViolation::ArchetypePairSameId => {
-                f.write_str("get_archetype_pair_mut: source and destination archetype IDs are equal")
+            InternalViolation::ArchetypePairSameId => f.write_str(
+                "get_archetype_pair_mut: source and destination archetype IDs are equal",
+            ),
+            InternalViolation::PoisonedLock => {
+                f.write_str("a Mutex or RwLock was found in a poisoned state")
             }
         }
     }

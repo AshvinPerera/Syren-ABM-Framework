@@ -47,35 +47,19 @@
 
 use std::any::TypeId;
 
-use std::sync::{
-    Arc,
-    RwLock,
-    RwLockReadGuard,
-    RwLockWriteGuard,
-    Mutex,
-};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-use smallvec::SmallVec;
-
-use crate::engine::commands::Command;
-use crate::engine::types::{
-    ComponentID,
-    ArchetypeID,
-    ShardID,
-    SIGNATURE_SIZE,
-};
-use crate::engine::query::{QuerySignature, BuiltQuery};
-use crate::engine::archetype::{Archetype, ArchetypeMatch};
+use crate::engine::archetype::Archetype;
+use crate::engine::commands::{Command, CommandEvents, DespawnEvent, SpawnEvent};
+use crate::engine::component::{ComponentRegistry, Signature};
 use crate::engine::entity::{Entity, EntityShards};
-use crate::engine::storage::TypeErasedAttribute;
-use crate::engine::component::{Signature, ComponentRegistry};
 use crate::engine::error::{
-    ECSResult, ECSError, ExecutionError, InternalViolation,
-    RegistryError, SpawnError, StaleEntityError, AccessKind,
-    AttributeError,
+    AccessKind, AttributeError, ECSError, ECSResult, ExecutionError, InternalViolation, MoveError,
+    RegistryError, SpawnError, StaleEntityError,
 };
+use crate::engine::query::BuiltQuery;
+use crate::engine::types::{ArchetypeID, ComponentID, ShardID, SIGNATURE_SIZE};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::DirtyChunks;
@@ -84,9 +68,7 @@ use crate::engine::dirty::DirtyChunks;
 use crate::engine::types::GPUResourceID;
 
 #[cfg(feature = "gpu")]
-use crate::gpu::{GPUResource, GPUResourceRegistry};
-
-use super::iteration::ChunkView;
+use crate::gpu::{GPUResource, GPUResourceRegistry, GpuWorldState};
 
 /// Core ECS storage and orchestration structure.
 pub struct ECSData {
@@ -101,6 +83,19 @@ pub struct ECSData {
 
     #[cfg(feature = "gpu")]
     gpu_resources: GPUResourceRegistry,
+
+    #[cfg(feature = "gpu")]
+    gpu_world_state: GpuWorldState,
+}
+
+/// Result of a deferred command drain that stopped before applying the whole batch.
+pub(crate) struct CommandDrainFailure {
+    /// Error returned by the failed command.
+    pub(crate) error: ECSError,
+    /// Commands that were never attempted and must remain queued.
+    pub(crate) unapplied: Vec<Command>,
+    /// Lifecycle events produced by commands that completed before the failure.
+    pub(crate) events: CommandEvents,
 }
 
 impl ECSData {
@@ -123,6 +118,9 @@ impl ECSData {
 
             #[cfg(feature = "gpu")]
             gpu_resources: GPUResourceRegistry::new(),
+
+            #[cfg(feature = "gpu")]
+            gpu_world_state: GpuWorldState::new(),
         }
     }
 
@@ -138,8 +136,7 @@ impl ECSData {
     #[inline]
     fn pick_spawn_shard(&mut self) -> ShardID {
         let shard = self.next_spawn_shard;
-        self.next_spawn_shard =
-            (self.next_spawn_shard + 1) % (self.shards.shard_count() as u16);
+        self.next_spawn_shard = (self.next_spawn_shard + 1) % (self.shards.shard_count() as u16);
         shard
     }
 
@@ -155,6 +152,42 @@ impl ECSData {
         &self.gpu_dirty_chunks
     }
 
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_world_state(&self) -> &GpuWorldState {
+        &self.gpu_world_state
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_world_state_mut(&mut self) -> &mut GpuWorldState {
+        &mut self.gpu_world_state
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_execution_parts(
+        &mut self,
+    ) -> (
+        &[Archetype],
+        &DirtyChunks,
+        &mut GpuWorldState,
+        &GPUResourceRegistry,
+    ) {
+        (
+            &self.archetypes,
+            &self.gpu_dirty_chunks,
+            &mut self.gpu_world_state,
+            &self.gpu_resources,
+        )
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_download_parts(&mut self) -> (&mut [Archetype], &mut GpuWorldState) {
+        (&mut self.archetypes, &mut self.gpu_world_state)
+    }
+
     fn get_or_create_archetype(&mut self, signature: &Signature) -> ECSResult<ArchetypeID> {
         let key = signature.components;
         if let Some(&id) = self.signature_map.get(&key) {
@@ -164,7 +197,9 @@ impl ECSData {
         let id = self.archetypes.len() as ArchetypeID;
         self.signature_map.insert(key, id);
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
         let arch = Archetype::new(id, *signature, &registry)?;
         self.archetypes.push(arch);
@@ -213,13 +248,31 @@ impl ECSData {
         added_component_id: ComponentID,
         added_value: Box<dyn std::any::Any>,
     ) -> ECSResult<()> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(added_component_id)?;
+        }
+
         let Some(location) = self.shards.get_location(entity)? else {
             return Err(SpawnError::StaleEntity(StaleEntityError).into());
         };
         let source_id = location.archetype;
 
+        if self.archetypes[source_id as usize]
+            .signature()
+            .try_has(added_component_id)?
+        {
+            return Err(MoveError::ComponentAlreadyPresent {
+                component_id: added_component_id,
+            }
+            .into());
+        }
+
         let mut new_signature = self.archetypes[source_id as usize].signature().clone();
-        new_signature.set(added_component_id);
+        new_signature.try_set(added_component_id)?;
 
         let destination_id = self.get_or_create_archetype(&new_signature)?;
         let source_sig = self.archetypes[source_id as usize].signature().clone();
@@ -228,7 +281,9 @@ impl ECSData {
         let (source, destination) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
 
         let factory = || registry.make_empty_component(added_component_id);
@@ -277,21 +332,31 @@ impl ECSData {
         entity: Entity,
         removed_component_id: ComponentID,
     ) -> ECSResult<()> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(removed_component_id)?;
+        }
+
         let Some(location) = self.shards.get_location(entity)? else {
             return Err(SpawnError::StaleEntity(StaleEntityError).into());
         };
         let source_id = location.archetype;
 
-        if !self.archetypes[source_id as usize].has(removed_component_id) {
+        if !self.archetypes[source_id as usize]
+            .signature()
+            .try_has(removed_component_id)?
+        {
             return Ok(());
         }
 
         let mut new_signature = self.archetypes[source_id as usize].signature().clone();
-        new_signature.clear(removed_component_id);
+        new_signature.try_clear(removed_component_id)?;
 
         if new_signature.components.iter().all(|&bits| bits == 0) {
-            self.archetypes[source_id as usize]
-                .despawn_on(&mut self.shards, entity)?;
+            self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity)?;
             return Ok(());
         }
 
@@ -302,12 +367,12 @@ impl ECSData {
         let (source_arch, dest_arch) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
 
-        Self::ensure_shared_components(
-            &source_sig, dest_arch, removed_component_id, &registry,
-        )?;
+        Self::ensure_shared_components(&source_sig, dest_arch, removed_component_id, &registry)?;
 
         drop(registry);
 
@@ -349,26 +414,43 @@ impl ECSData {
         component_id: ComponentID,
         value: Box<dyn std::any::Any + Send>,
     ) -> ECSResult<()> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(component_id)?;
+        }
+
         // 1. Resolve entity location.
-        let location = self.shards.get_location(entity)?
+        let location = self
+            .shards
+            .get_location(entity)?
             .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
 
         // 2. Verify archetype contains the component.
-        let archetype = self.archetypes
+        let archetype = self
+            .archetypes
             .get(location.archetype as usize)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
         if !archetype.has(component_id) {
-            return Err(ECSError::from(ExecutionError::MissingComponent { component_id }));
+            return Err(ECSError::from(ExecutionError::MissingComponent {
+                component_id,
+            }));
         }
 
         // 3. Acquire an exclusive write lock on the column.
         let col_lock = archetype
             .component_locked(component_id)
-            .ok_or(ECSError::from(ExecutionError::MissingComponent { component_id }))?;
+            .ok_or(ECSError::from(ExecutionError::MissingComponent {
+                component_id,
+            }))?;
 
         let mut col_guard = col_lock.write().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned { what: "component column (set)" })
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component column (set)",
+            })
         })?;
 
         // 4. Delegate the actual replace to the storage layer, which:
@@ -394,54 +476,161 @@ impl ECSData {
 
     /// Applies all queued deferred commands.
     /// `Spawn`, `Despawn`, `Add`, and `Remove` variants.
-    pub fn apply_deferred_commands(
+    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) -> ECSResult<CommandEvents> {
+        self.apply_deferred_commands_partial(commands)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Applies deferred commands until completion or the first error.
+    ///
+    /// On error, commands that were never attempted are returned so the manager
+    /// can preserve their relative order in the deferred queue.
+    pub(crate) fn apply_deferred_commands_partial(
         &mut self,
         commands: Vec<Command>,
-    ) -> ECSResult<Vec<Entity>> {
-        let mut spawned = Vec::new();
+    ) -> Result<CommandEvents, CommandDrainFailure> {
+        let mut events = CommandEvents::default();
+        #[cfg(feature = "gpu")]
+        let mut applied_any = false;
+        let mut iter = commands.into_iter();
 
-        for command in commands {
-            match command {
+        while let Some(command) = iter.next() {
+            let result = match command {
                 Command::Spawn { bundle } => {
                     let signature = bundle.signature();
-                    let archetype_id = self.get_or_create_archetype(&signature)?;
+                    let archetype_id = self.get_or_create_archetype(&signature);
+                    let archetype_id = match archetype_id {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return Err(CommandDrainFailure {
+                                error,
+                                unapplied: iter.collect(),
+                                events,
+                            });
+                        }
+                    };
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
-                    let entity = archetype.spawn_on(&mut self.shards, shard_id, bundle)?;
-                    spawned.push(entity);
+                    archetype
+                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .map(|entity| {
+                            events.spawned.push(SpawnEvent::untagged(entity));
+                        })
+                }
+
+                Command::SpawnTagged { bundle, tag } => {
+                    let signature = bundle.signature();
+                    let archetype_id = self.get_or_create_archetype(&signature);
+                    let archetype_id = match archetype_id {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return Err(CommandDrainFailure {
+                                error,
+                                unapplied: iter.collect(),
+                                events,
+                            });
+                        }
+                    };
+                    let shard_id = self.pick_spawn_shard();
+                    let archetype = &mut self.archetypes[archetype_id as usize];
+                    archetype
+                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .map(|entity| {
+                            events.spawned.push(SpawnEvent::tagged(entity, tag));
+                        })
                 }
 
                 Command::Despawn { entity } => {
-                    let loc = self.shards.get_location(entity)
-                        .map_err(ECSError::from)?
-                        .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
-                    let archetype = &mut self.archetypes[loc.archetype as usize];
-                    archetype.despawn_on(&mut self.shards, entity)?;
+                    let loc = self
+                        .shards
+                        .get_location(entity)
+                        .map_err(ECSError::from)
+                        .and_then(|loc| {
+                            loc.ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))
+                        });
+                    match loc {
+                        Ok(loc) => {
+                            let archetype = &mut self.archetypes[loc.archetype as usize];
+                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                                events.despawned.push(DespawnEvent::untagged(entity));
+                            })
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
 
-                Command::Add { entity, component_id, value } => {
-                    self.add_component(entity, component_id, value)?;
+                Command::DespawnTagged { entity, tag } => {
+                    let loc = self
+                        .shards
+                        .get_location(entity)
+                        .map_err(ECSError::from)
+                        .and_then(|loc| {
+                            loc.ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))
+                        });
+                    match loc {
+                        Ok(loc) => {
+                            let archetype = &mut self.archetypes[loc.archetype as usize];
+                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                                events.despawned.push(DespawnEvent::tagged(entity, tag));
+                            })
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
 
-                Command::Remove { entity, component_id } => {
-                    self.remove_component(entity, component_id)?;
-                }
+                Command::Add {
+                    entity,
+                    component_id,
+                    value,
+                } => self.add_component(entity, component_id, value),
 
-                Command::Set { entity, component_id, value } => {
-                    self.apply_set_command(entity, component_id, value)?;
+                Command::Remove {
+                    entity,
+                    component_id,
+                } => self.remove_component(entity, component_id),
+
+                Command::Set {
+                    entity,
+                    component_id,
+                    value,
+                } => self.apply_set_command(entity, component_id, value),
+            };
+
+            match result {
+                Ok(()) => {
+                    #[cfg(feature = "gpu")]
+                    {
+                        applied_any = true;
+                    }
+                }
+                Err(error) => {
+                    #[cfg(feature = "gpu")]
+                    if applied_any {
+                        self.notify_all_archetypes_dirty();
+                    }
+                    return Err(CommandDrainFailure {
+                        error,
+                        unapplied: iter.collect(),
+                        events,
+                    });
                 }
             }
         }
 
         #[cfg(feature = "gpu")]
-        {
-            for archetype in &self.archetypes {
-                self.gpu_dirty_chunks
-                    .notify_archetype_changed(archetype.archetype_id());
-            }
+        if applied_any {
+            self.notify_all_archetypes_dirty();
         }
 
-        Ok(spawned)
+        Ok(events)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn notify_all_archetypes_dirty(&self) {
+        for archetype in &self.archetypes {
+            self.gpu_dirty_chunks
+                .notify_archetype_changed(archetype.archetype_id());
+        }
     }
 
     fn ensure_shared_components(
@@ -451,28 +640,13 @@ impl ECSData {
         registry: &ComponentRegistry,
     ) -> ECSResult<()> {
         for cid in source_sig.iterate_over_components() {
-            if cid == excluded { continue; }
+            if cid == excluded {
+                continue;
+            }
             let factory = || registry.make_empty_component(cid);
-            destination.ensure_component(cid, factory).map_err(ECSError::from)?;
-        }
-        Ok(())
-    }
-
-    fn collect_read_ptrs_by_id(
-        guards: &[(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)],
-        declaration_order: &[ComponentID],
-        chunk_id: crate::engine::types::ChunkID,
-        len: usize,
-        out: &mut Vec<(*const u8, usize)>,
-    ) -> Result<(), ExecutionError> {
-        for &cid in declaration_order {
-            let (_, g) = guards.iter()
-                .find(|(id, _)| *id == cid)
-                .ok_or(ExecutionError::InternalExecutionError)?;
-            let (ptr, bytes) = g
-                .chunk_bytes(chunk_id, len)
-                .ok_or(ExecutionError::InternalExecutionError)?;
-            out.push((ptr, bytes));
+            destination
+                .ensure_component(cid, factory)
+                .map_err(ECSError::from)?;
         }
         Ok(())
     }
@@ -505,26 +679,29 @@ impl ECSData {
         entity: Entity,
         component_id: ComponentID,
     ) -> ECSResult<T> {
-        let loc = self.shards.get_location(entity)?
+        let loc = self
+            .shards
+            .get_location(entity)?
             .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
 
-        let arch = self.archetypes.get(loc.archetype as usize)
+        let arch = self
+            .archetypes
+            .get(loc.archetype as usize)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        let col_lock = arch.component_locked(component_id)
-            .ok_or(ECSError::from(ExecutionError::MissingComponent { component_id }))?;
+        let col_lock = arch.component_locked(component_id).ok_or(ECSError::from(
+            ExecutionError::MissingComponent { component_id },
+        ))?;
 
         let col = col_lock.try_read().map_err(|e| match e {
-            std::sync::TryLockError::WouldBlock => ECSError::from(
-                ExecutionError::BorrowConflict {
-                    component_id,
-                    held: AccessKind::Write,
-                    requested: AccessKind::Read,
-                }
-            ),
-            std::sync::TryLockError::Poisoned(_) => ECSError::from(
-                ExecutionError::LockPoisoned { what: "component column" }
-            ),
+            std::sync::TryLockError::WouldBlock => ECSError::from(ExecutionError::BorrowConflict {
+                component_id,
+                held: AccessKind::Write,
+                requested: AccessKind::Read,
+            }),
+            std::sync::TryLockError::Poisoned(_) => ECSError::from(ExecutionError::LockPoisoned {
+                what: "component column",
+            }),
         })?;
 
         if col.element_type_id() != TypeId::of::<T>() {
@@ -532,12 +709,11 @@ impl ECSData {
         }
 
         let chunk_len = arch.chunk_valid_length(loc.chunk as usize)?;
-        let (ptr, bytes) = col.chunk_bytes(loc.chunk, chunk_len)
+        let (ptr, bytes) = col
+            .chunk_bytes(loc.chunk, chunk_len)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        let slice: &[T] = unsafe {
-            crate::engine::storage::cast_slice::<T>(ptr, bytes)
-        };
+        let slice: &[T] = unsafe { crate::engine::storage::cast_slice::<T>(ptr, bytes) };
 
         let row = loc.row as usize;
         if row >= slice.len() {
@@ -552,153 +728,62 @@ impl ECSData {
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
     ) -> Result<(), ExecutionError> {
-        let matches = self.matching_archetypes(&query.signature)?;
-        let f = Arc::new(f);
-        let abort = Arc::new(AtomicBool::new(false));
-        let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
-
-        for matched_archetype in matches {
-            let archetype = &self.archetypes[matched_archetype.archetype_id as usize];
-
-            let mut lock_order: Vec<(ComponentID, bool)> =
-                Vec::with_capacity(query.reads.len() + query.writes.len());
-            for &cid in &query.reads  { lock_order.push((cid, false)); }
-            for &cid in &query.writes { lock_order.push((cid, true));  }
-            lock_order.sort_unstable_by_key(|(cid, _)| *cid);
-            lock_order.dedup_by_key(|(cid, _)| *cid);
-
-            let mut read_guards:  Vec<(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)>  = Vec::new();
-            let mut write_guards: Vec<(ComponentID, RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>)> = Vec::new();
-
-            for (cid, is_write) in &lock_order {
-                let locked = archetype.component_locked(*cid)
-                    .ok_or(ExecutionError::MissingComponent { component_id: *cid })?;
-                if *is_write {
-                    let g = locked.write().map_err(|_| ExecutionError::LockPoisoned {
-                        what: "component column (write)",
-                    })?;
-                    write_guards.push((*cid, g));
-                } else {
-                    let g = locked.read().map_err(|_| ExecutionError::LockPoisoned {
-                        what: "component column (read)",
-                    })?;
-                    read_guards.push((*cid, g));
-                }
-            }
-
-            let chunk_count = archetype
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            if chunk_count == 0 { continue; }
-
-            let mut chunk_lens = Vec::with_capacity(chunk_count);
-            for c in 0..chunk_count {
-                let len = archetype
-                    .chunk_valid_length(c)
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                chunk_lens.push(len);
-            }
-
-            let n_reads  = query.reads.len();
-            let n_writes = query.writes.len();
-
-            let mut read_ptrs:  Vec<(*const u8, usize)> = Vec::with_capacity(chunk_count * n_reads);
-            let mut write_ptrs: Vec<(*mut   u8, usize)> = Vec::with_capacity(chunk_count * n_writes);
-
-            for chunk in 0..chunk_count {
-                let len = chunk_lens[chunk];
-                let chunk_id = chunk as crate::engine::types::ChunkID;
-
-                if len == 0 {
-                    for _ in 0..n_reads  { read_ptrs .push((std::ptr::null(), 0)); }
-                    for _ in 0..n_writes { write_ptrs.push((std::ptr::null_mut(), 0)); }
-                    continue;
-                }
-
-                Self::collect_read_ptrs_by_id(&read_guards, &query.reads, chunk_id, len, &mut read_ptrs)?;
-
-                for &cid in &query.writes {
-                    let (_, g) = write_guards.iter_mut()
-                        .find(|(id, _)| *id == cid)
-                        .ok_or(ExecutionError::InternalExecutionError)?;
-                    let (ptr, bytes) = g.chunk_bytes_mut(chunk_id, len)
-                        .ok_or(ExecutionError::InternalExecutionError)?;
-                    write_ptrs.push((ptr, bytes));
-                }
-            }
-
-            let views = ChunkView {
-                chunk_count,
-                chunk_lens,
-                n_reads,
-                n_writes,
-                read_ptrs,
-                write_ptrs,
-            };
-
-            let threads = rayon::current_num_threads().max(1);
-            let grainsize = (views.chunk_count / threads).max(8);
-            let views_ref = &views;
-            let f_ref = &*f;
-            let abort_ref = &abort;
-            let err_ref = &err;
-
-            rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
-                    let abort = abort_ref.clone();
-                    let _err   = err_ref.clone();
-                    let views = views_ref;
-
-                    s.spawn(move |_| {
-                        if abort.load(Ordering::Acquire) { return; }
-
-                        let mut read_views:  SmallVec<[&[u8]; 8]>      = SmallVec::new();
-                        let mut write_views: SmallVec<[&mut [u8]; 8]>  = SmallVec::new();
-
-                        for chunk in start..end {
-                            let len = views.chunk_lens[chunk];
-                            if len == 0 { continue; }
-
-                            read_views.clear();
-                            write_views.clear();
-
-                            let rbase = chunk * views.n_reads;
-                            for i in 0..views.n_reads {
-                                let (ptr, bytes) = views.read_ptrs[rbase + i];
-                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
-                            }
-
-                            let wbase = chunk * views.n_writes;
-                            for i in 0..views.n_writes {
-                                let (ptr, bytes) = views.write_ptrs[wbase + i];
-                                unsafe { write_views.push(std::slice::from_raw_parts_mut(ptr, bytes)); }
-                            }
-
-                            // SAFETY: The caller (ECSReference::for_each_abstraction) holds
-                            // the shared phase lock and has validated borrows; the byte slices
-                            // correspond to correctly typed and aligned component storage.
-                            f_ref(&read_views, &mut write_views);
-                        }
-                    });
-
-                    start = end;
-                }
-            });
-
-            if abort.load(Ordering::Acquire) {
-                let guard = err.lock().map_err(|_| ExecutionError::LockPoisoned {
-                    what: "job error latch",
-                })?;
-                return Err(guard.clone().unwrap_or(ExecutionError::InternalExecutionError));
-            }
-
-            drop(read_guards);
-            drop(write_guards);
+        #[cfg(feature = "gpu")]
+        {
+            super::query_executor::for_each_unchecked(
+                &self.archetypes,
+                query,
+                &self.gpu_dirty_chunks,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
         }
 
-        Ok(())
+        #[cfg(not(feature = "gpu"))]
+        {
+            super::query_executor::for_each_unchecked(
+                &self.archetypes,
+                query,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+    }
+
+    /// Parallel chunk iteration whose closure may return an error.
+    ///
+    /// Identical contract to [`for_each_abstraction_unchecked`] for borrow,
+    /// phase, and aliasing safety, but the user closure returns
+    /// [`ECSResult<()>`]. If any chunk's closure returns `Err`, every other
+    /// chunk in the same archetype short-circuits and the lowest-chunk-index
+    /// error is returned. The selected error is therefore deterministic in
+    /// the chunk identifier rather than wall-clock first-to-error, so
+    /// repeated runs over identical data produce identical error reports.
+    pub(crate) fn for_each_abstraction_fallible_unchecked(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) -> crate::engine::error::ECSResult<()> + Send + Sync,
+    ) -> crate::engine::error::ECSResult<()> {
+        #[cfg(feature = "gpu")]
+        {
+            super::query_executor::for_each_fallible_unchecked(
+                &self.archetypes,
+                query,
+                &self.gpu_dirty_chunks,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+
+        #[cfg(not(feature = "gpu"))]
+        {
+            super::query_executor::for_each_fallible_unchecked(
+                &self.archetypes,
+                query,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
     }
 
     pub(crate) fn reduce_abstraction_unchecked<R>(
@@ -711,135 +796,8 @@ impl ECSData {
     where
         R: Send + 'static,
     {
-        let matches = self.matching_archetypes(&query.signature)?;
-        let init = Arc::new(init);
-        let fold_chunk = Arc::new(fold_chunk);
-        let combine = Arc::new(combine);
-        let partials: Arc<Mutex<Vec<(usize, R)>>> = Arc::new(Mutex::new(Vec::new()));
-
-        for matched in matches {
-            let archetype = &self.archetypes[matched.archetype_id as usize];
-
-            let mut sorted_reads: Vec<ComponentID> = query.reads.clone();
-            sorted_reads.sort_unstable();
-
-            let mut read_guards: Vec<(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)> =
-                Vec::with_capacity(query.reads.len());
-
-            for &cid in &sorted_reads {
-                let locked = archetype
-                    .component_locked(cid)
-                    .ok_or(ExecutionError::MissingComponent { component_id: cid })?;
-                let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
-                    what: "component column (read)",
-                })?;
-                read_guards.push((cid, guard));
-            }
-
-            let chunk_count = archetype
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            if chunk_count == 0 { continue; }
-
-            let mut chunk_lens = Vec::with_capacity(chunk_count);
-            for c in 0..chunk_count {
-                let len = archetype
-                    .chunk_valid_length(c)
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                chunk_lens.push(len);
-            }
-
-            let n_reads = query.reads.len();
-            let mut read_ptrs: Vec<(*const u8, usize)> =
-                Vec::with_capacity(chunk_count * n_reads);
-
-            for chunk in 0..chunk_count {
-                let len = chunk_lens[chunk];
-                if len == 0 {
-                    for _ in 0..n_reads { read_ptrs.push((std::ptr::null(), 0)); }
-                    continue;
-                }
-                let chunk_id = chunk as crate::engine::types::ChunkID;
-                Self::collect_read_ptrs_by_id(&read_guards, &query.reads, chunk_id, len, &mut read_ptrs)?;
-            }
-
-            let views = ChunkView {
-                chunk_count,
-                chunk_lens,
-                n_reads,
-                n_writes: 0,
-                read_ptrs,
-                write_ptrs: Vec::new(),
-            };
-
-            let threads = rayon::current_num_threads().max(1);
-            let grainsize = (views.chunk_count / threads).max(8);
-            let views_ref = &views;
-
-            rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
-                    let init = init.clone();
-                    let fold_chunk = fold_chunk.clone();
-                    let partials = partials.clone();
-                    let views = views_ref;
-
-                    s.spawn(move |_| {
-                        let mut local = init();
-                        let mut read_views: SmallVec<[&[u8]; 8]> =
-                            SmallVec::with_capacity(views.n_reads);
-
-                        for chunk in start..end {
-                            let len = views.chunk_lens[chunk];
-                            if len == 0 { continue; }
-                            read_views.clear();
-                            let base = chunk * views.n_reads;
-                            for i in 0..views.n_reads {
-                                let (ptr, bytes) = views.read_ptrs[base + i];
-                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
-                            }
-                            fold_chunk(&mut local, &read_views, len);
-                        }
-
-                        partials.lock().unwrap().push((start, local));
-                    });
-
-                    start = end;
-                }
-            });
-
-            drop(read_guards);
-        }
-
-        let mut parts = partials.lock().unwrap();
-        parts.sort_by_key(|(start, _)| *start);
-        let mut out = init();
-        for (_, p) in parts.drain(..) { combine(&mut out, p); }
-        Ok(out)
+        super::query_executor::reduce_unchecked(&self.archetypes, query, init, fold_chunk, combine)
     }
-
-    fn matching_archetypes(
-        &self,
-        query: &QuerySignature,
-    ) -> Result<Vec<ArchetypeMatch>, ExecutionError> {
-        let mut out = Vec::new();
-        for a in &self.archetypes {
-            if !query.requires_all(a.signature()) { continue; }
-            let chunks = a.chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            out.push(ArchetypeMatch { archetype_id: a.archetype_id(), chunks });
-        }
-        Ok(out)
-    }
-
-    #[cfg(feature = "gpu")]
-    #[inline]
-    pub(crate) fn archetypes(&self) -> &[Archetype] { &self.archetypes }
-
-    #[cfg(feature = "gpu")]
-    #[inline]
-    pub(crate) fn archetypes_mut(&mut self) -> &mut [Archetype] { &mut self.archetypes }
 
     #[cfg(feature = "gpu")]
     /// Registers a GPU resource with the ECS world.
@@ -863,7 +821,10 @@ impl ECSData {
     /// let buffer = world.create_buffer(&device, &descriptor);
     /// let resource_id = ecs_data.register_gpu_resource(buffer);
     /// ```
-    pub fn register_gpu_resource<R: GPUResource + 'static>(&mut self, r: R) -> GPUResourceID {
+    pub fn register_gpu_resource<R: GPUResource + 'static>(
+        &mut self,
+        r: R,
+    ) -> ECSResult<GPUResourceID> {
         self.gpu_resources.register(r)
     }
 
@@ -874,7 +835,9 @@ impl ECSData {
     /// The registry holds all world-owned GPU resources (buffers, textures,
     /// bind groups) and provides lookup by [`GPUResourceID`]. This is used
     /// by GPU systems to access resources during execution.
-    pub fn gpu_resources(&self) -> &GPUResourceRegistry { &self.gpu_resources }
+    pub fn gpu_resources(&self) -> &GPUResourceRegistry {
+        &self.gpu_resources
+    }
 
     #[cfg(feature = "gpu")]
     #[inline]
@@ -886,5 +849,283 @@ impl ECSData {
     /// # Safety
     /// Callers must ensure that no GPU systems are currently executing when
     /// mutating the registry, as this may invalidate active resource bindings.
-    pub fn gpu_resources_mut(&mut self) -> &mut GPUResourceRegistry { &mut self.gpu_resources }
+    pub fn gpu_resources_mut(&mut self) -> &mut GPUResourceRegistry {
+        &mut self.gpu_resources
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::component::Bundle;
+    use crate::engine::entity::EntityShards;
+    use std::sync::{Arc, RwLock};
+
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)]
+    struct Marker(u32);
+
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)]
+    struct Extra(u32);
+
+    fn test_manager() -> (crate::engine::manager::ECSManager, ComponentID, ComponentID) {
+        let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+        let (marker_id, extra_id) = {
+            let mut registry = registry.write().unwrap();
+            let marker_id = registry.register::<Marker>().unwrap();
+            let extra_id = registry.register::<Extra>().unwrap();
+            registry.freeze();
+            (marker_id, extra_id)
+        };
+        (
+            crate::engine::manager::ECSManager::with_registry(
+                EntityShards::new(1).unwrap(),
+                registry,
+            ),
+            marker_id,
+            extra_id,
+        )
+    }
+
+    fn marker_bundle(marker_id: ComponentID, value: u32) -> Bundle {
+        let mut bundle = Bundle::new();
+        bundle.insert(marker_id, Marker(value));
+        bundle
+    }
+
+    fn spawn_marker(
+        ecs: &crate::engine::manager::ECSManager,
+        marker_id: ComponentID,
+        value: u32,
+    ) -> Entity {
+        let world = ecs.world_ref();
+        world
+            .defer(Command::Spawn {
+                bundle: marker_bundle(marker_id, value),
+            })
+            .unwrap();
+        ecs.apply_deferred_commands().unwrap().spawned[0].entity
+    }
+
+    fn assert_all_columns_empty(data: &ECSData) {
+        for archetype in &data.archetypes {
+            assert_eq!(archetype.length().unwrap(), 0);
+            for (_, len) in archetype.component_lengths_for_test() {
+                assert_eq!(len, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn wrong_type_spawn_rolls_back_all_written_columns() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let mut bundle = Bundle::new();
+        bundle.insert(marker_id, Marker(1));
+        bundle.insert(extra_id, Marker(2));
+
+        world.defer(Command::Spawn { bundle }).unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        world
+            .with_exclusive(|data| {
+                assert_all_columns_empty(data);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_add_component_leaves_source_destination_and_location_unchanged() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 7);
+        let world = ecs.world_ref();
+
+        let before = world
+            .with_exclusive(|data| {
+                let loc = data.shards.get_location(entity)?.unwrap();
+                let source_len = data.archetypes[loc.archetype as usize].length()?;
+                let marker_len = data.archetypes[loc.archetype as usize]
+                    .component_locked(marker_id)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .length();
+                Ok((loc, source_len, marker_len))
+            })
+            .unwrap();
+
+        world
+            .defer(Command::Add {
+                entity,
+                component_id: extra_id,
+                value: Box::new(Marker(99)),
+            })
+            .unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        world
+            .with_exclusive(|data| {
+                let loc = data.shards.get_location(entity)?.unwrap();
+                assert_eq!(loc.archetype, before.0.archetype);
+                assert_eq!(loc.chunk, before.0.chunk);
+                assert_eq!(loc.row, before.0.row);
+                assert_eq!(
+                    data.archetypes[loc.archetype as usize].length().unwrap(),
+                    before.1
+                );
+                assert_eq!(
+                    data.archetypes[loc.archetype as usize]
+                        .component_locked(marker_id)
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                        .length(),
+                    before.2
+                );
+                for archetype in &data.archetypes {
+                    if archetype.archetype_id() != loc.archetype {
+                        assert_eq!(archetype.length().unwrap(), 0);
+                        for (_, len) in archetype.component_lengths_for_test() {
+                            assert_eq!(len, 0);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicate_add_component_returns_error_without_migration() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 7);
+        let world = ecs.world_ref();
+
+        world
+            .defer(Command::Add {
+                entity,
+                component_id: marker_id,
+                value: Box::new(Marker(8)),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Move(MoveError::ComponentAlreadyPresent { .. }))
+        ));
+    }
+
+    #[cfg(feature = "gpu")]
+    fn clear_dirty_for_entity(
+        data: &mut ECSData,
+        entity: Entity,
+        component_id: ComponentID,
+    ) -> (ArchetypeID, usize) {
+        let loc = data.shards.get_location(entity).unwrap().unwrap();
+        let chunk_count = data.archetypes[loc.archetype as usize]
+            .chunk_count()
+            .unwrap();
+        let _ = data
+            .gpu_dirty_chunks
+            .take_dirty_chunks(loc.archetype, component_id, chunk_count);
+        (loc.archetype, chunk_count)
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn cpu_write_query_marks_gpu_dirty_chunks() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 1);
+        let world = ecs.world_ref();
+        let (archetype_id, chunk_count) = world
+            .with_exclusive(|data| Ok(clear_dirty_for_entity(data, entity, marker_id)))
+            .unwrap();
+
+        let query = world
+            .query()
+            .unwrap()
+            .write::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        world
+            .for_each_w1(query, |marker: &mut Marker| marker.0 += 1)
+            .unwrap();
+
+        world
+            .with_exclusive(|data| {
+                let dirty =
+                    data.gpu_dirty_chunks
+                        .take_dirty_chunks(archetype_id, marker_id, chunk_count);
+                assert_eq!(dirty, vec![0]);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn cpu_read_query_does_not_mark_gpu_dirty_chunks() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 1);
+        let world = ecs.world_ref();
+        let (archetype_id, chunk_count) = world
+            .with_exclusive(|data| Ok(clear_dirty_for_entity(data, entity, marker_id)))
+            .unwrap();
+
+        let query = world
+            .query()
+            .unwrap()
+            .read::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        world.for_each_r1(query, |_marker: &Marker| {}).unwrap();
+
+        world
+            .with_exclusive(|data| {
+                let dirty =
+                    data.gpu_dirty_chunks
+                        .take_dirty_chunks(archetype_id, marker_id, chunk_count);
+                assert!(dirty.is_empty());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn fallible_cpu_write_query_marks_gpu_dirty_before_error() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 1);
+        let world = ecs.world_ref();
+        let (archetype_id, chunk_count) = world
+            .with_exclusive(|data| Ok(clear_dirty_for_entity(data, entity, marker_id)))
+            .unwrap();
+
+        let query = world
+            .query()
+            .unwrap()
+            .write::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = world.for_each_w1_fallible(query, |marker: &mut Marker| {
+            marker.0 += 1;
+            Err(ECSError::from(ExecutionError::InternalExecutionError))
+        });
+        assert!(result.is_err());
+
+        world
+            .with_exclusive(|data| {
+                let dirty =
+                    data.gpu_dirty_chunks
+                        .take_dirty_chunks(archetype_id, marker_id, chunk_count);
+                assert_eq!(dirty, vec![0]);
+                Ok(())
+            })
+            .unwrap();
+    }
 }

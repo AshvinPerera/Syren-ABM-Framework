@@ -34,6 +34,7 @@
 
 use std::any::Any;
 
+use crate::engine::error::RegistryResult;
 use crate::engine::types::ComponentID;
 
 use super::signature::Signature;
@@ -77,6 +78,22 @@ impl Bundle {
         }
     }
 
+    /// Inserts a component value, returning an error if `component_id` is out of range.
+    #[inline]
+    pub fn try_insert<T: Any + Send>(
+        &mut self,
+        component_id: ComponentID,
+        value: T,
+    ) -> RegistryResult<()> {
+        self.signature.try_set(component_id)?;
+        if let Some((_, slot)) = self.values.iter_mut().find(|(cid, _)| *cid == component_id) {
+            *slot = Box::new(value);
+        } else {
+            self.values.push((component_id, Box::new(value)));
+        }
+        Ok(())
+    }
+
     /// Inserts multiple component values from an iterator.
     #[inline]
     pub fn extend_from_iter<T: Any + Send, I: IntoIterator<Item = (ComponentID, T)>>(
@@ -111,6 +128,21 @@ impl Bundle {
             self.values.push((id, value));
         }
     }
+
+    /// Inserts a boxed component value, returning an error if `id` is out of range.
+    pub fn try_insert_boxed(
+        &mut self,
+        id: ComponentID,
+        value: Box<dyn Any + Send>,
+    ) -> RegistryResult<()> {
+        self.signature.try_set(id)?;
+        if let Some((_, slot)) = self.values.iter_mut().find(|(cid, _)| *cid == id) {
+            *slot = value;
+        } else {
+            self.values.push((id, value));
+        }
+        Ok(())
+    }
 }
 
 impl Default for Bundle {
@@ -132,5 +164,27 @@ impl DynamicBundle for Bundle {
 
         let (_, value) = self.values.swap_remove(index);
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::error::RegistryError;
+    use crate::engine::types::COMPONENT_CAP;
+
+    #[test]
+    fn fallible_insert_helpers_reject_out_of_range_component_id() {
+        let invalid = COMPONENT_CAP as ComponentID;
+        let mut bundle = Bundle::new();
+
+        assert!(matches!(
+            bundle.try_insert(invalid, 1_u32),
+            Err(RegistryError::InvalidComponentId { .. })
+        ));
+        assert!(matches!(
+            bundle.try_insert_boxed(invalid, Box::new(2_u32)),
+            Err(RegistryError::InvalidComponentId { .. })
+        ));
     }
 }

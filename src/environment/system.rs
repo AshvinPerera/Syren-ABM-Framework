@@ -60,9 +60,7 @@ pub struct EnvironmentSystem {
     name: String,
     access: AccessSets,
     env: Arc<Environment>,
-    func: Box<
-        dyn Fn(Arc<Environment>, ECSReference<'_>) -> ECSResult<()> + Send + Sync,
-    >,
+    func: Box<dyn Fn(Arc<Environment>, ECSReference<'_>) -> ECSResult<()> + Send + Sync>,
 }
 
 impl EnvironmentSystem {
@@ -141,19 +139,25 @@ mod tests {
     fn trait_accessors() {
         let env = EnvironmentBuilder::new()
             .register::<f32>("rate", 0.0f32)
-            .build();
+            .unwrap()
+            .build()
+            .unwrap();
 
-        let sys = EnvironmentSystem::new(
-            7u16,
-            "TestSystem",
-            AccessSets::default(),
-            env,
-            |_, _| Ok(()),
-        );
+        let sys =
+            EnvironmentSystem::new(
+                7u16,
+                "TestSystem",
+                AccessSets::default(),
+                env,
+                |_, _| Ok(()),
+            );
 
         assert_eq!(sys.id(), 7u16);
         assert_eq!(sys.name(), "TestSystem");
-        assert!(matches!(sys.backend(), crate::engine::systems::SystemBackend::CPU));
+        assert!(matches!(
+            sys.backend(),
+            crate::engine::systems::SystemBackend::CPU
+        ));
     }
 
     /// Verify that construction captures the shared `Arc<Environment>` and
@@ -167,7 +171,9 @@ mod tests {
     fn system_captures_shared_env() {
         let env = EnvironmentBuilder::new()
             .register::<u32>("counter", 0u32)
-            .build();
+            .unwrap()
+            .build()
+            .unwrap();
 
         let _sys = EnvironmentSystem::new(
             0u16,
@@ -188,17 +194,15 @@ mod tests {
     fn shared_env_across_systems() {
         let env = EnvironmentBuilder::new()
             .register::<i32>("val", 10)
-            .build();
+            .unwrap()
+            .build()
+            .unwrap();
 
         let env_a = Arc::clone(&env);
         let env_b = Arc::clone(&env);
 
-        let _a = EnvironmentSystem::new(
-            0u16, "A", AccessSets::default(), env_a, |_, _| Ok(()),
-        );
-        let _b = EnvironmentSystem::new(
-            1u16, "B", AccessSets::default(), env_b, |_, _| Ok(()),
-        );
+        let _a = EnvironmentSystem::new(0u16, "A", AccessSets::default(), env_a, |_, _| Ok(()));
+        let _b = EnvironmentSystem::new(1u16, "B", AccessSets::default(), env_b, |_, _| Ok(()));
 
         env.set::<i32>("val", 99).unwrap();
         assert_eq!(env.get::<i32>("val").unwrap(), 99);
@@ -210,13 +214,23 @@ mod tests {
     fn duplicate_names_are_independent() {
         let env = EnvironmentBuilder::new()
             .register::<f32>("x", 0.0)
-            .build();
+            .unwrap()
+            .build()
+            .unwrap();
 
         let a = EnvironmentSystem::new(
-            0u16, "SharedName", AccessSets::default(), Arc::clone(&env), |_, _| Ok(()),
+            0u16,
+            "SharedName",
+            AccessSets::default(),
+            Arc::clone(&env),
+            |_, _| Ok(()),
         );
         let b = EnvironmentSystem::new(
-            1u16, "SharedName", AccessSets::default(), Arc::clone(&env), |_, _| Ok(()),
+            1u16,
+            "SharedName",
+            AccessSets::default(),
+            Arc::clone(&env),
+            |_, _| Ok(()),
         );
 
         assert_eq!(a.name(), "SharedName");

@@ -136,7 +136,7 @@ impl Environment {
     /// [`EnvironmentBuilder::build_with_allocator`](super::builder::EnvironmentBuilder::build_with_allocator);
     /// not part of the public API.
     pub(super) fn from_schema(
-        schema:      Vec<(String, Box<dyn Any + Send + Sync>, TypeId, &'static str)>,
+        schema: Vec<(String, Box<dyn Any + Send + Sync>, TypeId, &'static str)>,
         channel_ids: Vec<ChannelID>,
     ) -> Self {
         debug_assert_eq!(
@@ -146,14 +146,16 @@ impl Environment {
         );
 
         let mut entries = HashMap::with_capacity(schema.len());
-        for ((key, value, type_id, type_name), channel_id) in
-            schema.into_iter().zip(channel_ids)
-        {
+        for ((key, value, type_id, type_name), channel_id) in schema.into_iter().zip(channel_ids) {
             entries.insert(
                 key,
                 EntrySlot {
                     channel_id,
-                    value: RwLock::new(EntryValue { value, type_id, type_name }),
+                    value: RwLock::new(EntryValue {
+                        value,
+                        type_id,
+                        type_name,
+                    }),
                 },
             );
         }
@@ -197,6 +199,19 @@ impl Environment {
         self.entries.get(key).map(|slot| slot.channel_id)
     }
 
+    /// Returns every [`ChannelID`] owned by this environment, sorted in
+    /// ascending order.
+    ///
+    /// Used by [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary)
+    /// to declare its set of owned channels to the engine so that
+    /// `finalise` is dispatched only when one of them appears in a boundary
+    /// stage.
+    pub fn all_channel_ids(&self) -> Vec<ChannelID> {
+        let mut ids: Vec<ChannelID> = self.entries.values().map(|s| s.channel_id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Returns a typed handle for `key`, or `None` if the key is not
     /// registered.
     ///
@@ -210,10 +225,7 @@ impl Environment {
     ///
     /// Returns `None` if no key with that name was registered.
     #[inline]
-    pub fn env_key<T: Any + Clone + Send + Sync>(
-        &self,
-        key: &'static str,
-    ) -> Option<EnvKey<T>> {
+    pub fn env_key<T: Any + Clone + Send + Sync>(&self, key: &'static str) -> Option<EnvKey<T>> {
         let channel_id = self.channel_of(key)?;
         Some(EnvKey::new(key, channel_id))
     }
@@ -231,18 +243,24 @@ impl Environment {
     /// Panics if the internal [`RwLock`] is poisoned (a thread panicked while
     /// holding a write lock on this entry).
     pub fn get<T: Any + Clone + Send + Sync>(&self, key: &str) -> EnvironmentResult<T> {
-        let slot = self.entries.get(key).ok_or_else(|| {
-            EnvironmentError::KeyNotFound(key.to_owned())
-        })?;
+        let slot = self
+            .entries
+            .get(key)
+            .ok_or_else(|| EnvironmentError::KeyNotFound(key.to_owned()))?;
 
-        let entry = slot.value.read().expect("environment entry lock poisoned");
+        let entry = slot
+            .value
+            .read()
+            .map_err(|_| EnvironmentError::LockPoisoned {
+                what: "environment entry",
+            })?;
 
         let requested_type_id = TypeId::of::<T>();
         if entry.type_id != requested_type_id {
             return Err(EnvironmentError::TypeMismatch {
-                key:      key.to_owned(),
+                key: key.to_owned(),
                 expected: entry.type_name,
-                actual:   std::any::type_name::<T>(),
+                actual: std::any::type_name::<T>(),
             });
         }
 
@@ -272,14 +290,11 @@ impl Environment {
     /// # Panics
     ///
     /// Panics if any internal [`RwLock`] is poisoned.
-    pub fn set<T: Any + Clone + Send + Sync>(
-        &self,
-        key: &str,
-        value: T,
-    ) -> EnvironmentResult<()> {
-        let slot = self.entries.get(key).ok_or_else(|| {
-            EnvironmentError::KeyNotFound(key.to_owned())
-        })?;
+    pub fn set<T: Any + Clone + Send + Sync>(&self, key: &str, value: T) -> EnvironmentResult<()> {
+        let slot = self
+            .entries
+            .get(key)
+            .ok_or_else(|| EnvironmentError::KeyNotFound(key.to_owned()))?;
 
         // Channel ID is immutable and lives outside the lock — read it
         // directly without acquiring the inner RwLock.
@@ -287,14 +302,19 @@ impl Environment {
 
         // Take the inner write lock only for the value update.
         {
-            let mut entry = slot.value.write().expect("environment entry lock poisoned");
+            let mut entry = slot
+                .value
+                .write()
+                .map_err(|_| EnvironmentError::LockPoisoned {
+                    what: "environment entry",
+                })?;
 
             let requested_type_id = TypeId::of::<T>();
             if entry.type_id != requested_type_id {
                 return Err(EnvironmentError::TypeMismatch {
-                    key:      key.to_owned(),
+                    key: key.to_owned(),
                     expected: entry.type_name,
-                    actual:   std::any::type_name::<T>(),
+                    actual: std::any::type_name::<T>(),
                 });
             }
 
@@ -309,7 +329,9 @@ impl Environment {
         // are never held simultaneously.
         self.dirty_channels
             .write()
-            .expect("dirty_channels lock poisoned")
+            .map_err(|_| EnvironmentError::LockPoisoned {
+                what: "environment dirty channels",
+            })?
             .insert(channel_id);
 
         Ok(())
@@ -325,11 +347,14 @@ impl Environment {
     pub(crate) fn has_any_dirty_channels(
         &self,
         channels: impl Iterator<Item = ChannelID>,
-    ) -> bool {
-        let dirty = self.dirty_channels
+    ) -> EnvironmentResult<bool> {
+        let dirty = self
+            .dirty_channels
             .read()
-            .expect("dirty_channels lock poisoned");
-        channels.into_iter().any(|id| dirty.contains(&id))
+            .map_err(|_| EnvironmentError::LockPoisoned {
+                what: "environment dirty channels",
+            })?;
+        Ok(channels.into_iter().any(|id| dirty.contains(&id)))
     }
 
     /// Returns `true` if `id` is currently in the dirty set.
@@ -345,11 +370,14 @@ impl Environment {
     /// added.
     #[cfg(feature = "gpu")]
     #[inline]
-    pub(crate) fn is_channel_dirty(&self, id: ChannelID) -> bool {
-        self.dirty_channels
+    pub(crate) fn is_channel_dirty(&self, id: ChannelID) -> EnvironmentResult<bool> {
+        Ok(self
+            .dirty_channels
             .read()
-            .expect("dirty_channels lock poisoned")
-            .contains(&id)
+            .map_err(|_| EnvironmentError::LockPoisoned {
+                what: "environment dirty channels",
+            })?
+            .contains(&id))
     }
 
     /// Returns a snapshot of [`ChannelID`]s whose values have been mutated
@@ -359,11 +387,14 @@ impl Environment {
     /// Clones the entire set. Prefer [`has_any_dirty_channels`](Self::has_any_dirty_channels)
     /// when only a membership check is needed.
     #[inline]
-    pub(crate) fn dirty_channel_ids(&self) -> HashSet<ChannelID> {
-        self.dirty_channels
+    pub(crate) fn dirty_channel_ids(&self) -> EnvironmentResult<HashSet<ChannelID>> {
+        Ok(self
+            .dirty_channels
             .read()
-            .expect("dirty_channels lock poisoned")
-            .clone()
+            .map_err(|_| EnvironmentError::LockPoisoned {
+                what: "environment dirty channels",
+            })?
+            .clone())
     }
 
     /// Removes the specified [`ChannelID`]s from the dirty set.
@@ -372,13 +403,17 @@ impl Environment {
     /// the channels it owns, leaving the remaining channels dirty for other
     /// consumers.
     #[inline]
-    pub(crate) fn clear_dirty_for_channels(&self, channels: &[ChannelID]) {
-        let mut dirty = self.dirty_channels
-            .write()
-            .expect("dirty_channels lock poisoned");
+    pub(crate) fn clear_dirty_for_channels(&self, channels: &[ChannelID]) -> EnvironmentResult<()> {
+        let mut dirty =
+            self.dirty_channels
+                .write()
+                .map_err(|_| EnvironmentError::LockPoisoned {
+                    what: "environment dirty channels",
+                })?;
         for id in channels {
             dirty.remove(id);
         }
+        Ok(())
     }
 
     /// Clears the entire dirty-channel set.
@@ -387,26 +422,33 @@ impl Environment {
     /// at the end of each tick after all consumers have processed their
     /// pending dirty channels.
     #[inline]
-    pub(crate) fn clear_dirty(&self) {
+    pub(crate) fn clear_dirty(&self) -> EnvironmentResult<()> {
         self.dirty_channels
             .write()
-            .expect("dirty_channels lock poisoned")
+            .map_err(|_| EnvironmentError::LockPoisoned {
+                what: "environment dirty channels",
+            })?
             .clear();
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
     use crate::environment::builder::EnvironmentBuilder;
+    use std::sync::Arc;
 
     fn build_env() -> Arc<Environment> {
         EnvironmentBuilder::new()
             .register::<f32>("interest_rate", 0.05)
+            .unwrap()
             .register::<u32>("world_width", 100)
+            .unwrap()
             .register::<bool>("verbose", false)
+            .unwrap()
             .build()
+            .unwrap()
     }
 
     #[test]
@@ -444,7 +486,7 @@ mod tests {
         let env = build_env();
         let id = env.channel_of("interest_rate").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
-        let dirty = env.dirty_channel_ids();
+        let dirty = env.dirty_channel_ids().unwrap();
         assert!(dirty.contains(&id));
     }
 
@@ -452,8 +494,8 @@ mod tests {
     fn clear_dirty_empties_set() {
         let env = build_env();
         env.set::<f32>("interest_rate", 0.10).unwrap();
-        env.clear_dirty();
-        assert!(env.dirty_channel_ids().is_empty());
+        env.clear_dirty().unwrap();
+        assert!(env.dirty_channel_ids().unwrap().is_empty());
     }
 
     #[test]
@@ -492,7 +534,7 @@ mod tests {
         assert_eq!(env.len(), 3);
         assert!(!env.is_empty());
 
-        let empty = EnvironmentBuilder::new().build();
+        let empty = EnvironmentBuilder::new().build().unwrap();
         assert!(empty.is_empty());
     }
 
@@ -504,7 +546,7 @@ mod tests {
         for _ in 0..100 {
             env.set::<f32>("interest_rate", 0.10).unwrap();
         }
-        let dirty = env.dirty_channel_ids();
+        let dirty = env.dirty_channel_ids().unwrap();
         // HashSet guarantees the channel appears at most once.
         assert_eq!(dirty.len(), 1);
         assert!(dirty.contains(&id));
@@ -513,11 +555,11 @@ mod tests {
     #[test]
     fn dirty_tracks_multiple_distinct_channels() {
         let env = build_env();
-        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_rate = env.channel_of("interest_rate").unwrap();
         let id_width = env.channel_of("world_width").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.set::<u32>("world_width", 200).unwrap();
-        let dirty = env.dirty_channel_ids();
+        let dirty = env.dirty_channel_ids().unwrap();
         assert_eq!(dirty.len(), 2);
         assert!(dirty.contains(&id_rate));
         assert!(dirty.contains(&id_width));
@@ -528,35 +570,37 @@ mod tests {
         let env = build_env();
         let id = env.channel_of("interest_rate").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
-        assert!(env.has_any_dirty_channels([id].into_iter()));
+        assert!(env.has_any_dirty_channels([id].into_iter()).unwrap());
     }
 
     #[test]
     fn has_any_dirty_channels_returns_false_for_clean() {
         let env = build_env();
         let id = env.channel_of("interest_rate").unwrap();
-        assert!(!env.has_any_dirty_channels([id].into_iter()));
+        assert!(!env.has_any_dirty_channels([id].into_iter()).unwrap());
     }
 
     #[test]
     fn has_any_dirty_channels_ignores_unrelated() {
         let env = build_env();
-        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_rate = env.channel_of("interest_rate").unwrap();
         let id_width = env.channel_of("world_width").unwrap();
         env.set::<u32>("world_width", 200).unwrap();
-        assert!(!env.has_any_dirty_channels([id_rate].into_iter()));
-        assert!(env.has_any_dirty_channels([id_rate, id_width].into_iter()));
+        assert!(!env.has_any_dirty_channels([id_rate].into_iter()).unwrap());
+        assert!(env
+            .has_any_dirty_channels([id_rate, id_width].into_iter())
+            .unwrap());
     }
 
     #[test]
     fn clear_dirty_for_channels_is_selective() {
         let env = build_env();
-        let id_rate  = env.channel_of("interest_rate").unwrap();
+        let id_rate = env.channel_of("interest_rate").unwrap();
         let id_width = env.channel_of("world_width").unwrap();
         env.set::<f32>("interest_rate", 0.10).unwrap();
         env.set::<u32>("world_width", 200).unwrap();
-        env.clear_dirty_for_channels(&[id_rate]);
-        let dirty = env.dirty_channel_ids();
+        env.clear_dirty_for_channels(&[id_rate]).unwrap();
+        let dirty = env.dirty_channel_ids().unwrap();
         assert!(!dirty.contains(&id_rate));
         assert!(dirty.contains(&id_width));
     }
@@ -570,8 +614,8 @@ mod tests {
     #[test]
     fn channel_of_returns_distinct_ids_for_distinct_keys() {
         let env = build_env();
-        let id_rate    = env.channel_of("interest_rate").unwrap();
-        let id_width   = env.channel_of("world_width").unwrap();
+        let id_rate = env.channel_of("interest_rate").unwrap();
+        let id_width = env.channel_of("world_width").unwrap();
         let id_verbose = env.channel_of("verbose").unwrap();
         // All three must be distinct.
         assert_ne!(id_rate, id_width);

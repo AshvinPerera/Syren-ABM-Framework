@@ -27,7 +27,8 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::engine::types::{ComponentID, SIGNATURE_SIZE};
+use crate::engine::error::{RegistryError, RegistryResult};
+use crate::engine::types::{ComponentID, COMPONENT_CAP, SIGNATURE_SIZE};
 
 /// Bitset representing a set of components.
 ///
@@ -70,6 +71,18 @@ impl Hash for Signature {
 }
 
 impl Signature {
+    #[inline]
+    fn checked_index(component_id: ComponentID) -> RegistryResult<(usize, usize)> {
+        let component_index = component_id as usize;
+        if component_index >= COMPONENT_CAP {
+            return Err(RegistryError::InvalidComponentId {
+                component_id,
+                cap: COMPONENT_CAP,
+            });
+        }
+        Ok((component_index / 64, component_index % 64))
+    }
+
     /// Sets the bit corresponding to `component_id`.
     ///
     /// # Panics
@@ -78,8 +91,23 @@ impl Signature {
     pub fn set(&mut self, component_id: ComponentID) {
         let index = (component_id as usize) / 64;
         let bits = (component_id as usize) % 64;
-        assert!(index < SIGNATURE_SIZE, "component_id {} exceeds COMPONENT_CAP", component_id);
+        assert!(
+            index < SIGNATURE_SIZE,
+            "component_id {} exceeds COMPONENT_CAP",
+            component_id
+        );
         self.components[index] |= 1u64 << bits;
+    }
+
+    /// Fallibly sets the bit corresponding to `component_id`.
+    ///
+    /// Returns an error instead of panicking when the ID is outside
+    /// `COMPONENT_CAP`.
+    #[inline]
+    pub fn try_set(&mut self, component_id: ComponentID) -> RegistryResult<()> {
+        let (index, bits) = Self::checked_index(component_id)?;
+        self.components[index] |= 1u64 << bits;
+        Ok(())
     }
 
     /// Clears the bit corresponding to `component_id`.
@@ -90,8 +118,23 @@ impl Signature {
     pub fn clear(&mut self, component_id: ComponentID) {
         let index = (component_id as usize) / 64;
         let bits = (component_id as usize) % 64;
-        assert!(index < SIGNATURE_SIZE, "component_id {} exceeds COMPONENT_CAP", component_id);
+        assert!(
+            index < SIGNATURE_SIZE,
+            "component_id {} exceeds COMPONENT_CAP",
+            component_id
+        );
         self.components[index] &= !(1u64 << bits);
+    }
+
+    /// Fallibly clears the bit corresponding to `component_id`.
+    ///
+    /// Returns an error instead of panicking when the ID is outside
+    /// `COMPONENT_CAP`.
+    #[inline]
+    pub fn try_clear(&mut self, component_id: ComponentID) -> RegistryResult<()> {
+        let (index, bits) = Self::checked_index(component_id)?;
+        self.components[index] &= !(1u64 << bits);
+        Ok(())
     }
 
     /// Returns `true` if `component_id` is present in this signature.
@@ -102,15 +145,31 @@ impl Signature {
     pub fn has(&self, component_id: ComponentID) -> bool {
         let index = (component_id as usize) / 64;
         let bits = (component_id as usize) % 64;
-        assert!(index < SIGNATURE_SIZE, "component_id {} exceeds COMPONENT_CAP", component_id);
+        assert!(
+            index < SIGNATURE_SIZE,
+            "component_id {} exceeds COMPONENT_CAP",
+            component_id
+        );
         (self.components[index] >> bits) & 1 == 1
+    }
+
+    /// Fallibly returns `true` if `component_id` is present in this signature.
+    ///
+    /// Returns an error instead of panicking when the ID is outside
+    /// `COMPONENT_CAP`.
+    #[inline]
+    pub fn try_has(&self, component_id: ComponentID) -> RegistryResult<bool> {
+        let (index, bits) = Self::checked_index(component_id)?;
+        Ok((self.components[index] >> bits) & 1 == 1)
     }
 
     /// Returns `true` if all components in `signature` are present.
     #[inline]
     pub fn contains_all(&self, signature: &Signature) -> bool {
         for (component_a, component_b) in self.components.iter().zip(signature.components.iter()) {
-            if (component_a & component_b) != *component_b { return false; }
+            if (component_a & component_b) != *component_b {
+                return false;
+            }
         }
         true
     }
@@ -135,21 +194,18 @@ impl Signature {
 pub fn iter_bits_from_words<'a>(
     words: &'a [u64; SIGNATURE_SIZE],
 ) -> impl Iterator<Item = ComponentID> + 'a {
-    words
-        .iter()
-        .enumerate()
-        .flat_map(|(word_index, &word)| {
-            let base = word_index * 64;
-            let mut bits = word;
-            std::iter::from_fn(move || {
-                if bits == 0 {
-                    return None;
-                }
-                let tz = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                Some((base + tz) as ComponentID)
-            })
+    words.iter().enumerate().flat_map(|(word_index, &word)| {
+        let base = word_index * 64;
+        let mut bits = word;
+        std::iter::from_fn(move || {
+            if bits == 0 {
+                return None;
+            }
+            let tz = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            Some((base + tz) as ComponentID)
         })
+    })
 }
 
 /// Bitwise-ORs every word of `src` into the corresponding word of `dst`.
@@ -160,5 +216,30 @@ pub fn iter_bits_from_words<'a>(
 pub(crate) fn or_signature_in_place(dst: &mut Signature, src: &Signature) {
     for (d, s) in dst.components.iter_mut().zip(src.components.iter()) {
         *d |= *s;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::error::RegistryError;
+
+    #[test]
+    fn fallible_helpers_reject_out_of_range_component_id() {
+        let invalid = COMPONENT_CAP as ComponentID;
+        let mut signature = Signature::default();
+
+        assert!(matches!(
+            signature.try_set(invalid),
+            Err(RegistryError::InvalidComponentId { .. })
+        ));
+        assert!(matches!(
+            signature.try_clear(invalid),
+            Err(RegistryError::InvalidComponentId { .. })
+        ));
+        assert!(matches!(
+            signature.try_has(invalid),
+            Err(RegistryError::InvalidComponentId { .. })
+        ));
     }
 }

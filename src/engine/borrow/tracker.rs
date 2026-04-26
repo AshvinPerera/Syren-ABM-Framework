@@ -39,10 +39,9 @@
 //! The per-component state array is heap-allocated to prevent a ~32 KB stack
 //! frame during construction (see [`BorrowTracker::with_spin_limit`]).
 
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
-use crate::engine::types::{ComponentID, COMPONENT_CAP};
 use crate::engine::error::{AccessKind, ExecutionError};
-
+use crate::engine::types::{ComponentID, COMPONENT_CAP};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Default maximum number of spin iterations before `acquire_read` or
 /// `acquire_write` gives up and returns `Err(ExecutionError::BorrowConflict)`.

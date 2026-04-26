@@ -22,31 +22,28 @@
 //! | `boundary`                | None    | None           | None (interior mut) |
 
 use std::sync::atomic::Ordering;
-use std::sync::MutexGuard;
 
-use crate::engine::boundary::BoundaryResource;
-use crate::engine::commands::Command;
-use crate::engine::query::{QueryBuilder, BuiltQuery};
-use crate::engine::storage::{cast_slice, cast_slice_mut};
+use parking_lot::ArcRwLockReadGuard;
+use parking_lot::RawRwLock;
+
 use crate::engine::borrow::BorrowGuard;
+use crate::engine::boundary::BoundaryResource;
+use crate::engine::commands::{Command, CommandEvents};
+use crate::engine::error::{ECSError, ECSResult, ExecutionError, InternalViolation};
+use crate::engine::query::{BuiltQuery, QueryBuilder};
+use crate::engine::storage::{cast_slice, cast_slice_mut};
 use crate::engine::types::{BoundaryID, ChannelID};
-use crate::engine::error::{
-    ECSResult,
-    ECSError,
-    ExecutionError,
-    InternalViolation,
-};
 
 #[cfg(feature = "gpu")]
 use crate::engine::types::GPUResourceID;
-use crate::{ComponentID, Entity};
 #[cfg(feature = "gpu")]
 use crate::gpu::GPUResource;
+use crate::{ComponentID, Entity};
 
-use super::iteration::IterationScope;
-use super::query_param::{Read, Write, QueryParam};
-use super::ecs_manager::ECSManager;
 use super::data::ECSData;
+use super::ecs_manager::{CommandDrainError, ECSManager};
+use super::iteration::IterationScope;
+use super::query_param::{QueryParam, Read, Write};
 
 /// A non-owning handle granting access to ECS data.
 ///
@@ -58,7 +55,6 @@ pub struct ECSReference<'a> {
 }
 
 impl<'a> ECSReference<'a> {
-
     /// Clears all component borrows. Must only be called when no systems are running.
     #[inline]
     pub(crate) fn clear_borrows(&self) {
@@ -66,20 +62,21 @@ impl<'a> ECSReference<'a> {
     }
 
     #[inline]
-    pub(crate) fn apply_deferred_commands(&self) -> ECSResult<Vec<Entity>> {
-        self.manager.apply_deferred_commands()
+    pub(crate) fn apply_deferred_commands_with_events(
+        &self,
+    ) -> Result<CommandEvents, CommandDrainError> {
+        self.manager.apply_deferred_commands_with_events()
     }
 
     /// Executes a closure with **exclusive access** to the ECS world.
     ///
     /// Must not be called during parallel iteration.
     #[inline]
-    pub fn with_exclusive<R>(
-        &self,
-        f: impl FnOnce(&mut ECSData) -> ECSResult<R>,
-    ) -> ECSResult<R> {
+    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut ECSData) -> ECSResult<R>) -> ECSResult<R> {
         if self.manager.active_iters.load(Ordering::Acquire) != 0 {
-            return Err(ECSError::from(ExecutionError::StructuralMutationDuringIteration));
+            return Err(ECSError::from(
+                ExecutionError::StructuralMutationDuringIteration,
+            ));
         }
         let _phase = self.manager.phase_write()?;
         // SAFETY: We hold the exclusive phase lock.
@@ -91,7 +88,9 @@ impl<'a> ECSReference<'a> {
     #[inline]
     pub fn defer(&self, command: Command) -> ECSResult<()> {
         let mut queue = self.manager.deferred.lock().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned { what: "deferred command queue" })
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "deferred command queue",
+            })
         })?;
         queue.push(command);
         Ok(())
@@ -105,25 +104,15 @@ impl<'a> ECSReference<'a> {
 
     /// Returns a typed handle to a registered boundary resource.
     ///
-    /// The handle holds the boundary registry `Mutex` for its lifetime.
-    /// Drop it as soon as the interaction is complete.
+    /// The returned [`BoundaryHandle`] owns a clone of the resource's `Arc`
+    /// and a per-resource read guard. The outer registry mutex is dropped
+    /// before the handle is returned, so two systems holding handles to
+    /// different resources never contend, and two systems holding handles
+    /// to the same resource take read locks in parallel.
     ///
-    /// # Co-scheduling hazard
-    ///
-    /// The mutex held by `BoundaryHandle` is the single global lock over
-    /// the scheduler's entire boundary-resource list. Two systems placed in
-    /// the **same parallel CPU stage** that both call this method will
-    /// serialise on that lock — defeating the parallelism the scheduler
-    /// otherwise provides.
-    ///
-    /// The scheduler does not currently detect this automatically. Callers
-    /// must either:
-    ///
-    /// - declare a channel dependency (`AccessSets::produces` /
-    ///   `AccessSets::consumes`) so the scheduler places the systems in
-    ///   different stages, or
-    /// - force an explicit ordering via
-    ///   [`Scheduler::add_ordering`](crate::engine::scheduler::Scheduler::add_ordering).
+    /// Drop the handle as soon as the interaction is complete; lifecycle
+    /// hooks at the next boundary stage need to acquire the per-resource
+    /// write lock and will block until the last reader releases.
     ///
     /// # Errors
     /// - [`ExecutionError::BoundaryAccessFailed`] with
@@ -137,48 +126,82 @@ impl<'a> ECSReference<'a> {
     pub fn boundary<R: BoundaryResource + 'static>(
         &self,
         id: BoundaryID,
-    ) -> ECSResult<BoundaryHandle<'_, R>> {
-        let guard = self.manager.boundary_resources.lock().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned {
-                what: "boundary_resources (ECSReference::boundary)",
-            })
-        })?;
+    ) -> ECSResult<BoundaryHandle<R>> {
+        let slot = {
+            let guard = self.manager.boundary_resources.lock().map_err(|_| {
+                ECSError::from(ExecutionError::LockPoisoned {
+                    what: "boundary_resources (ECSReference::boundary)",
+                })
+            })?;
+            if id as usize >= guard.slots.len() {
+                return Err(ECSError::from(ExecutionError::BoundaryAccessFailed {
+                    reason: crate::engine::error::BoundaryAccessFailure::OutOfRange,
+                    id,
+                }));
+            }
+            guard.slots[id as usize].clone()
+        };
 
-        if id as usize >= guard.len() {
-            return Err(ECSError::from(ExecutionError::BoundaryAccessFailed {
-                reason: crate::engine::error::BoundaryAccessFailure::OutOfRange,
-                id,
-            }));
-        }
-        if !guard[id as usize].as_any().is::<R>() {
-            return Err(ECSError::from(ExecutionError::BoundaryAccessFailed {
-                reason: crate::engine::error::BoundaryAccessFailure::TypeMismatch,
-                id,
-            }));
+        // Type-check before acquiring the read guard so the type-mismatch
+        // path doesn't pay for a lock acquisition.
+        {
+            let probe = slot.read();
+            if !probe.as_any().is::<R>() {
+                return Err(ECSError::from(ExecutionError::BoundaryAccessFailed {
+                    reason: crate::engine::error::BoundaryAccessFailure::TypeMismatch,
+                    id,
+                }));
+            }
         }
 
-        Ok(BoundaryHandle { guard, id, _phantom: std::marker::PhantomData })
+        let read_guard = slot.read_arc();
+        Ok(BoundaryHandle {
+            guard: read_guard,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     /// Generic parallel chunk-oriented ECS query.
-    pub fn for_each_abstraction(
+    pub unsafe fn for_each_abstraction(
         &self,
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
     ) -> ECSResult<()> {
         let _phase = self.manager.phase_read()?;
         let _iter_scope = IterationScope::new(&self.manager.active_iters);
-        let _borrows = BorrowGuard::new(
-            &self.manager.borrows, &query.reads, &query.writes,
-        ).map_err(ECSError::from)?;
+        let _borrows = BorrowGuard::new(&self.manager.borrows, query.read_ids(), query.write_ids())
+            .map_err(ECSError::from)?;
         // SAFETY: shared phase lock held; iteration scope active.
         let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
-        data.for_each_abstraction_unchecked(query, f).map_err(ECSError::from)?;
+        data.for_each_abstraction_unchecked(query, f)
+            .map_err(ECSError::from)?;
         Ok(())
     }
 
+    /// Parallel chunk iteration whose closure may return an error.
+    ///
+    /// Same semantics as [`for_each_abstraction`] for borrow checking, phase
+    /// discipline, and chunk-disjoint parallel execution. The closure
+    /// returns [`ECSResult<()>`]; on the first error the iteration short-
+    /// circuits and that error is returned. When two chunks fail
+    /// concurrently the lower-indexed chunk's error wins, so the surfaced
+    /// error is deterministic across thread counts.
+    pub unsafe fn for_each_abstraction_fallible(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()> {
+        let _phase = self.manager.phase_read()?;
+        let _iter_scope = IterationScope::new(&self.manager.active_iters);
+        let _borrows = BorrowGuard::new(&self.manager.borrows, query.read_ids(), query.write_ids())
+            .map_err(ECSError::from)?;
+        // SAFETY: shared phase lock held; iteration scope active.
+        let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
+        data.for_each_abstraction_fallible_unchecked(query, f)
+    }
+
     /// Generic parallel read-only reduction over ECS data.
-    pub fn reduce_abstraction<R>(
+    pub unsafe fn reduce_abstraction<R>(
         &self,
         query: BuiltQuery,
         init: impl Fn() -> R + Send + Sync,
@@ -188,14 +211,13 @@ impl<'a> ECSReference<'a> {
     where
         R: Send + 'static,
     {
-        if !query.writes.is_empty() {
+        if !query.write_ids().is_empty() {
             return Err(InternalViolation::ReduceWritesNotAllowed.into());
         }
         let _phase = self.manager.phase_read()?;
         let _iter = IterationScope::new(&self.manager.active_iters);
-        let _borrows = BorrowGuard::new(
-            &self.manager.borrows, &query.reads, &query.writes,
-        ).map_err(ECSError::from)?;
+        let _borrows = BorrowGuard::new(&self.manager.borrows, query.read_ids(), query.write_ids())
+            .map_err(ECSError::from)?;
         // SAFETY: shared phase lock held.
         let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
         data.reduce_abstraction_unchecked(query, init, fold_chunk, combine)
@@ -205,29 +227,28 @@ impl<'a> ECSReference<'a> {
     /// Registers a world-owned GPU resource.
     #[cfg(feature = "gpu")]
     pub fn register_gpu_resource<R: GPUResource + 'static>(
-        &self, r: R,
+        &self,
+        r: R,
     ) -> ECSResult<GPUResourceID> {
-        self.with_exclusive(|data| Ok(data.register_gpu_resource(r)))
+        self.with_exclusive(|data| data.register_gpu_resource(r))
     }
 }
 
 // Generic tuple for_each
 impl ECSReference<'_> {
     /// Generic tuple-based parallel iteration. `P` is `Read<T>`/`Write<T>` or a tuple thereof.
-    pub fn for_each<P>(
-        &self,
-        query: BuiltQuery,
-        f: &P::Closure,
-    ) -> ECSResult<()>
+    pub fn for_each<P>(&self, query: BuiltQuery, f: &P::Closure) -> ECSResult<()>
     where
         P: QueryParam,
         P::Closure: Send + Sync,
     {
-        P::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, writes| {
-            // SAFETY: for_each_abstraction guarantees correct types and borrow rules.
-            unsafe { P::for_each_chunk(reads, writes, f); }
-        })
+        P::validate(&query)?;
+        // SAFETY: the typed query was validated against its stored TypeIds.
+        unsafe {
+            self.for_each_abstraction(query, move |reads, writes| {
+                P::for_each_chunk(reads, writes, f)
+            })
+        }
     }
 }
 
@@ -245,16 +266,28 @@ impl ECSReference<'_> {
         A: 'static + Send + Sync,
         R: Send + 'static,
     {
-        if query.reads.len() != 1 || !query.writes.is_empty() {
+        if query.reads().len() != 1 || !query.writes().is_empty() {
             return Err(InternalViolation::QueryShapeMismatch {
-                method: "reduce_read", expected_reads: 1, expected_writes: 0,
-            }.into());
+                method: "reduce_read",
+                expected_reads: 1,
+                expected_writes: 0,
+            }
+            .into());
         }
-        self.reduce_abstraction(query, init,
-                                move |acc, cols, _| unsafe {
-                                    let slice = cast_slice::<A>(cols[0].as_ptr(), cols[0].len());
-                                    for v in slice { fold(acc, v); }
-                                }, combine)
+        query.validate_read_type::<A>(0, "reduce_read")?;
+        unsafe {
+            self.reduce_abstraction(
+                query,
+                init,
+                move |acc, cols, _| {
+                    let slice = cast_slice::<A>(cols[0].as_ptr(), cols[0].len());
+                    for v in slice {
+                        fold(acc, v);
+                    }
+                },
+                combine,
+            )
+        }
     }
 
     /// Typed parallel reduction over two read components.
@@ -270,125 +303,317 @@ impl ECSReference<'_> {
         B: 'static + Send + Sync,
         R: Send + 'static,
     {
-        if query.reads.len() != 2 || !query.writes.is_empty() {
+        if query.reads().len() != 2 || !query.writes().is_empty() {
             return Err(InternalViolation::QueryShapeMismatch {
-                method: "reduce_read2", expected_reads: 2, expected_writes: 0,
-            }.into());
+                method: "reduce_read2",
+                expected_reads: 2,
+                expected_writes: 0,
+            }
+            .into());
         }
-        self.reduce_abstraction(query, init,
-                                move |acc, cols, _| unsafe {
-                                    let a = cast_slice::<A>(cols[0].as_ptr(), cols[0].len());
-                                    let b = cast_slice::<B>(cols[1].as_ptr(), cols[1].len());
-                                    debug_assert_eq!(a.len(), b.len());
-                                    for i in 0..a.len() { fold(acc, &a[i], &b[i]); }
-                                }, combine)
+        query.validate_read_type::<A>(0, "reduce_read2")?;
+        query.validate_read_type::<B>(1, "reduce_read2")?;
+        unsafe {
+            self.reduce_abstraction(
+                query,
+                init,
+                move |acc, cols, _| {
+                    let a = cast_slice::<A>(cols[0].as_ptr(), cols[0].len());
+                    let b = cast_slice::<B>(cols[1].as_ptr(), cols[1].len());
+                    debug_assert_eq!(a.len(), b.len());
+                    for i in 0..a.len() {
+                        fold(acc, &a[i], &b[i]);
+                    }
+                },
+                combine,
+            )
+        }
     }
 }
 
 // Named rNwM helpers
 impl ECSReference<'_> {
     /// Single read.
-    pub fn for_each_r1<A>(&self, query: BuiltQuery, f: impl Fn(&A) + Send + Sync)
-                          -> ECSResult<()> where A: 'static + Send + Sync
+    pub fn for_each_r1<A>(&self, query: BuiltQuery, f: impl Fn(&A) + Send + Sync) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
     {
-        <(Read<A>,) as QueryParam>::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, _| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            for v in a { f(v); }
-        })
+        <(Read<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                for v in a {
+                    f(v);
+                }
+            })
+        }
     }
 
     /// Single write.
-    pub fn for_each_w1<A>(&self, query: BuiltQuery, f: impl Fn(&mut A) + Send + Sync)
-                          -> ECSResult<()> where A: 'static + Send + Sync
+    pub fn for_each_w1<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&mut A) + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
     {
-        <(Write<A>,) as QueryParam>::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |_, writes| unsafe {
-            let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
-            for item in slice { f(item); }
-        })
+        <(Write<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |_, writes| {
+                let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
+                for item in slice {
+                    f(item);
+                }
+            })
+        }
     }
 
     /// Two reads.
-    pub fn for_each_r2<A, B>(&self, query: BuiltQuery, f: impl Fn(&A, &B) + Send + Sync)
-                             -> ECSResult<()> where A: 'static + Send + Sync, B: 'static + Send + Sync
+    pub fn for_each_r2<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B) + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
     {
-        <(Read<A>, Read<B>) as QueryParam>::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, _| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            debug_assert_eq!(a.len(), b.len());
-            for i in 0..a.len() { f(&a[i], &b[i]); }
-        })
+        <(Read<A>, Read<B>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    f(&a[i], &b[i]);
+                }
+            })
+        }
     }
 
     /// Three reads.
     pub fn for_each_r3<A, B, C>(
-        &self, query: BuiltQuery, f: impl Fn(&A, &B, &C) + Send + Sync,
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &C) + Send + Sync,
     ) -> ECSResult<()>
-    where A: 'static + Send + Sync, B: 'static + Send + Sync, C: 'static + Send + Sync
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
     {
-        <(Read<A>, Read<B>, Read<C>) as QueryParam>::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, _| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            let c = cast_slice::<C>(reads[2].as_ptr(), reads[2].len());
-            debug_assert_eq!(a.len(), b.len()); debug_assert_eq!(a.len(), c.len());
-            for i in 0..a.len() { f(&a[i], &b[i], &c[i]); }
-        })
+        <(Read<A>, Read<B>, Read<C>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+                let c = cast_slice::<C>(reads[2].as_ptr(), reads[2].len());
+                debug_assert_eq!(a.len(), b.len());
+                debug_assert_eq!(a.len(), c.len());
+                for i in 0..a.len() {
+                    f(&a[i], &b[i], &c[i]);
+                }
+            })
+        }
     }
 
     /// One read, one write.
     pub fn for_each_r1w1<A, B>(
-        &self, query: BuiltQuery, f: impl Fn(&A, &mut B) + Send + Sync,
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &mut B) + Send + Sync,
     ) -> ECSResult<()>
-    where A: 'static + Send + Sync, B: 'static + Send + Sync
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
     {
-        <(Read<A>, Write<B>) as QueryParam>::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
-            debug_assert_eq!(a.len(), b.len());
-            for i in 0..a.len() { f(&a[i], &mut b[i]); }
-        })
+        <(Read<A>, Write<B>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    f(&a[i], &mut b[i]);
+                }
+            })
+        }
     }
 
     /// Two reads, one write.
     pub fn for_each_r2w1<A, B, C>(
-        &self, query: BuiltQuery, f: impl Fn(&A, &B, &mut C) + Send + Sync,
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &mut C) + Send + Sync,
     ) -> ECSResult<()>
-    where A: 'static + Send + Sync, B: 'static + Send + Sync, C: 'static + Send + Sync
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
     {
-        <(Read<A>, Read<B>, Write<C>) as QueryParam>::validate(&query).map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
-            debug_assert_eq!(a.len(), b.len()); debug_assert_eq!(a.len(), c.len());
-            for i in 0..a.len() { f(&a[i], &b[i], &mut c[i]); }
-        })
+        <(Read<A>, Read<B>, Write<C>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+                let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(a.len(), b.len());
+                debug_assert_eq!(a.len(), c.len());
+                for i in 0..a.len() {
+                    f(&a[i], &b[i], &mut c[i]);
+                }
+            })
+        }
     }
 
     /// Two reads, two writes.
     pub fn for_each_r2w2<A, B, C, D>(
-        &self, query: BuiltQuery, f: impl Fn(&A, &B, &mut C, &mut D) + Send + Sync,
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &mut C, &mut D) + Send + Sync,
     ) -> ECSResult<()>
     where
-        A: 'static + Send + Sync, B: 'static + Send + Sync,
-        C: 'static + Send + Sync, D: 'static + Send + Sync,
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
+        D: 'static + Send + Sync,
     {
-        <(Read<A>, Read<B>, Write<C>, Write<D>) as QueryParam>::validate(&query)
-            .map_err(ECSError::from)?;
-        self.for_each_abstraction(query, move |reads, writes| unsafe {
-            let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
-            let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
-            let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
-            let d = cast_slice_mut::<D>(writes[1].as_mut_ptr(), writes[1].len());
-            debug_assert_eq!(a.len(), b.len());
-            debug_assert_eq!(a.len(), c.len());
-            debug_assert_eq!(a.len(), d.len());
-            for i in 0..a.len() { f(&a[i], &b[i], &mut c[i], &mut d[i]); }
-        })
+        <(Read<A>, Read<B>, Write<C>, Write<D>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction(query, move |reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+                let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
+                let d = cast_slice_mut::<D>(writes[1].as_mut_ptr(), writes[1].len());
+                debug_assert_eq!(a.len(), b.len());
+                debug_assert_eq!(a.len(), c.len());
+                debug_assert_eq!(a.len(), d.len());
+                for i in 0..a.len() {
+                    f(&a[i], &b[i], &mut c[i], &mut d[i]);
+                }
+            })
+        }
+    }
+}
+
+// Named rNwM helpers whose closures return ECSResult.
+impl ECSReference<'_> {
+    /// Single read, fallible closure.
+    pub fn for_each_r1_fallible<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+    {
+        <(Read<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction_fallible(query, move |reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                for v in a {
+                    f(v)?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Single write, fallible closure.
+    pub fn for_each_w1_fallible<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&mut A) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+    {
+        <(Write<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction_fallible(query, move |_, writes| {
+                let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
+                for item in slice {
+                    f(item)?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Two reads, fallible closure.
+    pub fn for_each_r2_fallible<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+    {
+        <(Read<A>, Read<B>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction_fallible(query, move |reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    f(&a[i], &b[i])?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// One read, one write, fallible closure.
+    pub fn for_each_r1w1_fallible<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &mut B) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+    {
+        <(Read<A>, Write<B>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction_fallible(query, move |reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    f(&a[i], &mut b[i])?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Two reads, one write, fallible closure.
+    pub fn for_each_r2w1_fallible<A, B, C>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&A, &B, &mut C) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+        C: 'static + Send + Sync,
+    {
+        <(Read<A>, Read<B>, Write<C>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_abstraction_fallible(query, move |reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice::<B>(reads[1].as_ptr(), reads[1].len());
+                let c = cast_slice_mut::<C>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(a.len(), b.len());
+                debug_assert_eq!(a.len(), c.len());
+                for i in 0..a.len() {
+                    f(&a[i], &b[i], &mut c[i])?;
+                }
+                Ok(())
+            })
+        }
     }
 
     /// Random-access single-entity component read.
@@ -402,34 +627,36 @@ impl ECSReference<'_> {
         data.read_component::<T>(entity, component_id)
     }
 
-    /// Finalises boundary channels by merging thread-local buffers and building
-    /// acceleration indices for the specified channels.
-    ///
-    /// This is called by the scheduler at boundary stages.
+    /// Finalises boundary channels with scheduler-derived backend profiles.
     #[inline]
-    pub(crate) fn finalise_boundaries(&self, channels: &[ChannelID]) -> ECSResult<()> {
-        self.manager.finalise_boundaries(channels)
+    pub(crate) fn finalise_boundaries_with_profiles(
+        &self,
+        channels: &[ChannelID],
+        profiles: &[crate::engine::boundary::BoundaryChannelProfile],
+    ) -> ECSResult<()> {
+        self.manager
+            .finalise_boundaries_with_profiles(channels, profiles)
     }
 }
 
 /// Short-lived typed reference to a boundary resource.
 ///
-/// Acquired via [`ECSReference::boundary`]. Holds the boundary registry
-/// `Mutex` guard for its lifetime; dereferences to `R`. Drop promptly.
-pub struct BoundaryHandle<'a, R: BoundaryResource + 'static> {
-    guard: MutexGuard<'a, Vec<Box<dyn BoundaryResource>>>,
-    id: BoundaryID,
+/// Acquired via [`ECSReference::boundary`]. Owns a per-resource read guard
+/// (no other reader is blocked, write locks block until all handles are
+/// dropped) and dereferences to `R`. Drop promptly.
+pub struct BoundaryHandle<R: BoundaryResource + 'static> {
+    guard: ArcRwLockReadGuard<RawRwLock, dyn BoundaryResource>,
     _phantom: std::marker::PhantomData<R>,
 }
 
-impl<'a, R: BoundaryResource + 'static> std::ops::Deref for BoundaryHandle<'a, R> {
+impl<R: BoundaryResource + 'static> std::ops::Deref for BoundaryHandle<R> {
     type Target = R;
 
     fn deref(&self) -> &R {
-        // SAFETY: `ECSReference::boundary` verified `guard[id]` stores type `R`
-        // before constructing this handle. The Box is stable in memory for the
-        // duration of the guard. The expect cannot fire in correct code.
-        self.guard[self.id as usize]
+        // SAFETY: `ECSReference::boundary` verified that the inner resource
+        // is of type `R` before constructing this handle. The Arc keeps the
+        // resource pinned in memory for the duration of the guard.
+        self.guard
             .as_any()
             .downcast_ref::<R>()
             .expect("BoundaryHandle downcast failed.")

@@ -19,13 +19,13 @@
 //! ## Overflow
 //!
 //! A [`ChannelID`] is `u32`. Overflow from calling [`alloc`] more than
-//! `u32::MAX + 1` times panics via `checked_add`. This is not a practical
-//! concern for any realistic simulation.
+//! `u32::MAX + 1` times returns
+//! [`ExecutionError::ChannelIdOverflow`](crate::engine::error::ExecutionError::ChannelIdOverflow).
 
+use crate::engine::error::{ECSResult, ExecutionError};
 use crate::engine::types::ChannelID;
 
-
-/// Monotonic, infallible allocator for [`ChannelID`]s.
+/// Monotonic allocator for [`ChannelID`]s.
 ///
 /// One instance exists per `Model`, shared between messaging and environment
 /// during construction so that all channel IDs live in one flat `u32` space.
@@ -43,17 +43,13 @@ impl ChannelAllocator {
     }
 
     /// Allocates and returns the next available [`ChannelID`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if more than `u32::MAX + 1` channels are allocated, indicating a
-    /// programming error (no realistic simulation needs that many channels).
-    pub fn alloc(&mut self) -> ChannelID {
+    pub fn alloc(&mut self) -> ECSResult<ChannelID> {
         let id = self.next;
-        self.next = self.next
+        self.next = self
+            .next
             .checked_add(1)
-            .expect("ChannelID overflow: more than u32::MAX channels allocated");
-        id
+            .ok_or(ExecutionError::ChannelIdOverflow)?;
+        Ok(id)
     }
 
     /// Returns the next ID that *would* be allocated without consuming it.
@@ -73,9 +69,9 @@ mod tests {
     #[test]
     fn alloc_is_monotonic() {
         let mut a = ChannelAllocator::new();
-        assert_eq!(a.alloc(), 0);
-        assert_eq!(a.alloc(), 1);
-        assert_eq!(a.alloc(), 2);
+        assert_eq!(a.alloc().unwrap(), 0);
+        assert_eq!(a.alloc().unwrap(), 1);
+        assert_eq!(a.alloc().unwrap(), 2);
         assert_eq!(a.peek_next(), 3);
     }
 
