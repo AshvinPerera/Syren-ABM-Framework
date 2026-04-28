@@ -2,3 +2,4 @@
 /profile/*.etl
 /profile/*.csv
 .vs/
+/CODE_REVIEW_FINDINGS.md
