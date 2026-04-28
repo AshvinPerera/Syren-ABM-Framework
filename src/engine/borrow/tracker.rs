@@ -11,9 +11,9 @@
 //!
 //! | Value | Meaning                                      |
 //! |-------|----------------------------------------------|
-//! | `0`   | Unlocked — no active borrows                 |
-//! | `1`   | Write-locked — one exclusive writer          |
-//! | `≥ 2` | Read-locked — `state - 1` concurrent readers |
+//! | `0`   | Unlocked - no active borrows                 |
+//! | `1`   | Write-locked - one exclusive writer          |
+//! | `>= 2` | Read-locked - `state - 1` concurrent readers |
 //!
 //! This encoding ensures that the transient value `1` is never produced
 //! during read-lock transitions, keeping write-lock detection unambiguous.
@@ -24,7 +24,7 @@
 //! [`BorrowTracker::acquire_write`]) spin using [`std::hint::spin_loop`],
 //! yielding the thread every 1 024 iterations. If the configured
 //! [`spin_limit`](BorrowTracker::with_spin_limit) is exceeded,
-//! [`ExecutionError::BorrowConflict`] is returned — signalling a scheduling
+//! [`ExecutionError::BorrowConflict`] is returned - signalling a scheduling
 //! bug rather than hanging indefinitely.
 //!
 //! # Stage Boundaries
@@ -98,7 +98,7 @@ impl BorrowTracker {
     pub fn with_spin_limit(spin_limit: u32) -> Self {
         // Phase 2.3: Heap-allocate `states` to avoid 32 KB on the stack.
         //
-        // SAFETY: The layout is valid (non-zero size — COMPONENT_CAP > 0 and
+        // SAFETY: The layout is valid (non-zero size - COMPONENT_CAP > 0 and
         // AtomicUsize is at least 1 word).  `alloc_zeroed` returns zeroed
         // memory, which is a valid bit pattern for `AtomicUsize` (represents 0,
         // the "unlocked" state).  `Box::from_raw` takes ownership and will
@@ -169,8 +169,8 @@ impl BorrowTracker {
     ///
     /// ## State Transitions
     ///
-    /// - `0 → 2` : first reader
-    /// - `N → N+1` : additional reader (where `N >= 2`)
+    /// - `0 -> 2` : first reader
+    /// - `N -> N+1` : additional reader (where `N >= 2`)
 
     pub fn acquire_read(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
         let state = &self.states[component_id as usize];
@@ -179,7 +179,7 @@ impl BorrowTracker {
         loop {
             let current = state.load(Ordering::Acquire);
 
-            // State 1 means write-locked — spin or bail.
+            // State 1 means write-locked - spin or bail.
             if current == 1 {
                 spins += 1;
                 if spins > self.spin_limit {
@@ -197,7 +197,7 @@ impl BorrowTracker {
                 continue;
             }
 
-            // 0 → 2 (first reader) or N → N+1 (additional reader).
+            // 0 -> 2 (first reader) or N -> N+1 (additional reader).
             let next = if current == 0 { 2 } else { current + 1 };
 
             if state
@@ -230,9 +230,9 @@ impl BorrowTracker {
     /// ## Behaviour
     ///
     /// Uses a `compare_exchange` loop to atomically transition:
-    /// - `2 → 0` when this is the last reader (avoids the transient state `1`
+    /// - `2 -> 0` when this is the last reader (avoids the transient state `1`
     ///   which is indistinguishable from a write lock).
-    /// - `N → N-1` when other readers remain (where `N > 2`).
+    /// - `N -> N-1` when other readers remain (where `N > 2`).
     ///
     /// ## Safety
     ///
@@ -265,7 +265,7 @@ impl BorrowTracker {
                 return;
             }
 
-            // Another reader released concurrently — retry with fresh state.
+            // Another reader released concurrently - retry with fresh state.
             std::hint::spin_loop();
         }
     }
@@ -283,7 +283,7 @@ impl BorrowTracker {
     ///
     /// ## State Transition
     ///
-    /// - `0 → 1`
+    /// - `0 -> 1`
 
     pub fn acquire_write(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
         let state = &self.states[component_id as usize];

@@ -15,12 +15,12 @@
 //! these global convenience functions.
 //!
 //! # Lifecycle
-//! 1. **Registration** — call [`register_component`] (or [`register_gpu_component`]
+//! 1. **Registration** - call [`register_component`] (or [`register_gpu_component`]
 //!    with the `gpu` feature) for every component type before simulation begins.
-//! 2. **Freeze** — call [`freeze_components`] once all components are registered.
+//! 2. **Freeze** - call [`freeze_components`] once all components are registered.
 //!    After this point the registry is immutable: component IDs and storage
 //!    factories are stable and safe to use for archetype construction.
-//! 3. **Query / allocate** — use [`component_id_of`], [`component_description_by_component_id`],
+//! 3. **Query / allocate** - use [`component_id_of`], [`component_description_by_component_id`],
 //!    and [`make_empty_component`] freely throughout the rest of the program.
 //!
 //! # GPU support

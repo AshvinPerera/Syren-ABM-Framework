@@ -79,6 +79,24 @@ pub enum MessagingError {
         max: u32,
     },
 
+    /// A message specialisation was missing its erased accessor function.
+    #[error("message specialisation {specialisation} is missing erased function {function}")]
+    MissingErasedFunction {
+        /// Specialisation being finalised.
+        specialisation: &'static str,
+        /// Missing erased function name.
+        function: &'static str,
+    },
+
+    /// A message finalisation invariant was violated.
+    #[error("message finalise invariant failed for {specialisation}: {reason}")]
+    FinaliseInvariant {
+        /// Specialisation being finalised.
+        specialisation: &'static str,
+        /// Human-readable failure reason.
+        reason: &'static str,
+    },
+
     /// GPU message metadata does not match the payload layout.
     #[cfg(feature = "messaging_gpu")]
     #[error("gpu message layout invalid for {type_name}: {reason}")]

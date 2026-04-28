@@ -9,8 +9,8 @@
 //!
 //! During system execution, components are accessed in bulk across a contiguous
 //! chunk of archetype storage. [`ChunkBorrow`] captures this access pattern by
-//! holding [`RwLock`] guards for every requested component column — read guards
-//! for shared access, write guards for exclusive access — and exposing the
+//! holding [`RwLock`] guards for every requested component column - read guards
+//! for shared access, write guards for exclusive access - and exposing the
 //! underlying data as raw pointers for zero-cost iteration.
 //!
 //! Borrows are constructed via [`Archetype::borrow_chunk_for`], which validates

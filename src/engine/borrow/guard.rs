@@ -3,7 +3,7 @@
 //! This module provides [`BorrowGuard`], a RAII type that acquires and releases
 //! read/write borrows on [`ComponentID`]s through a shared [`BorrowTracker`].
 //! It is the primary mechanism by which the engine enforces Rust-like aliasing
-//! rules at runtime — ensuring no component is accessed mutably while any other
+//! rules at runtime - ensuring no component is accessed mutably while any other
 //! system holds a reference to it.
 //!
 //! ## Acquisition protocol
@@ -20,7 +20,7 @@
 //! A guard is typically constructed by the scheduler immediately before a
 //! system runs and is dropped when the system's closure returns:
 //!
-//! ```ignore
+//! ```text
 //! let guard = BorrowGuard::new(&tracker, &[position_id], &[velocity_id])?;
 //! // system executes here
 //! // borrows released automatically when `guard` is dropped

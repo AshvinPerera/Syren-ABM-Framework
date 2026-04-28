@@ -1,7 +1,7 @@
 //! Raw byte slice reinterpretation utilities.
 //!
-//! This module provides two `unsafe` helper functions — [`cast_slice`] and
-//! [`cast_slice_mut`] — for reinterpreting a raw byte pointer and length as a
+//! This module provides two `unsafe` helper functions - [`cast_slice`] and
+//! [`cast_slice_mut`] - for reinterpreting a raw byte pointer and length as a
 //! typed slice without copying any data.
 //!
 //! # Purpose
@@ -21,7 +21,7 @@
 //! - `bytes` must be an exact multiple of `size_of::<T>()`.
 //! - The entire memory region must contain fully initialized, valid `T` values.
 //! - The returned slice must not outlive the allocation the pointer was derived from.
-//! - For [`cast_slice_mut`]: no other live references — mutable or shared — may
+//! - For [`cast_slice_mut`]: no other live references - mutable or shared - may
 //!   alias the same memory region.
 //!
 //! Alignment and byte-length preconditions are verified with `assert_eq!` at

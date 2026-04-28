@@ -8,11 +8,11 @@
 //!
 //! # Entity Lifecycle
 //!
-//! 1. **Spawn** — a free index is claimed from the free list (or new slots are grown),
+//! 1. **Spawn** - a free index is claimed from the free list (or new slots are grown),
 //!    marked alive, and bundled with a shard ID and version into an [`Entity`] handle.
-//! 2. **Live** — the slot holds a valid [`EntityLocation`] pointing into archetype storage.
+//! 2. **Live** - the slot holds a valid [`EntityLocation`] pointing into archetype storage.
 //!    Location can be updated as entities move between archetypes.
-//! 3. **Despawn** — the version is incremented, the slot is marked dead, its location is
+//! 3. **Despawn** - the version is incremented, the slot is marked dead, its location is
 //!    cleared, and the index is returned to the free list. All previously issued handles
 //!    for the entity become permanently stale.
 //!

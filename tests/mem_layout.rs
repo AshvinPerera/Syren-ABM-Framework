@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use abm_framework::{
     advanced::{cast_slice, Archetype, Attribute, EntityShards, TypeErasedAttribute},
-    ArchetypeID, Bundle, ChunkID, ComponentRegistry, Signature, CHUNK_CAP,
+    ArchetypeID, Bundle, ChunkID, Command, ComponentRegistry, ECSManager, Signature, CHUNK_CAP,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,6 +23,14 @@ struct A(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct B(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReduceValue(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReduceTag {
+    _tag: u8,
+}
 
 /// Creates a fresh, frozen registry with Position, Velocity, A, and B registered.
 fn make_registry() -> Arc<RwLock<ComponentRegistry>> {
@@ -99,7 +107,7 @@ fn attribute_chunk_is_contiguous_and_aligned() {
 fn attribute_crosses_chunk_boundary_as_expected() {
     let mut attr: Attribute<u64> = Attribute::default();
 
-    // Write CHUNK_CAP + 1 values → forces chunk 1 allocation
+    // Write CHUNK_CAP + 1 values -> forces chunk 1 allocation
     for i in 0..(CHUNK_CAP + 1) {
         let (c, r) = attr_push(&mut attr, i as u64);
         if i < CHUNK_CAP {
@@ -264,4 +272,52 @@ fn archetype_chunk_pointer_is_stable_across_borrows() {
     let p2 = b2.reads[0].0 as usize;
 
     assert_eq!(p1, p2, "chunk pointer moved between borrows");
+}
+
+#[test]
+fn reduction_combines_multi_archetype_chunks_deterministically() {
+    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+    let (value_id, tag_id) = {
+        let mut reg = registry.write().unwrap();
+        let value_id = reg.register::<ReduceValue>().unwrap();
+        let tag_id = reg.register::<ReduceTag>().unwrap();
+        reg.freeze();
+        (value_id, tag_id)
+    };
+
+    let world = ECSManager::with_registry(EntityShards::new(4).unwrap(), Arc::clone(&registry));
+    let ecs = world.world_ref();
+    let per_archetype = CHUNK_CAP + 16;
+
+    for i in 0..per_archetype {
+        let mut bundle = Bundle::new();
+        bundle.insert(value_id, ReduceValue((i * 2) as u32));
+        ecs.defer(Command::Spawn { bundle }).unwrap();
+    }
+
+    for i in 0..per_archetype {
+        let mut bundle = Bundle::new();
+        bundle.insert(value_id, ReduceValue((i * 2 + 1) as u32));
+        bundle.insert(tag_id, ReduceTag { _tag: 1 });
+        ecs.defer(Command::Spawn { bundle }).unwrap();
+    }
+
+    world.apply_deferred_commands().unwrap();
+
+    let query = ecs.query().unwrap().read::<ReduceValue>().unwrap().build().unwrap();
+    let mut expected = Vec::with_capacity(per_archetype * 2);
+    expected.extend((0..per_archetype).map(|i| (i * 2) as u32));
+    expected.extend((0..per_archetype).map(|i| (i * 2 + 1) as u32));
+
+    for _ in 0..8 {
+        let observed = ecs
+            .reduce_read::<ReduceValue, Vec<u32>>(
+                query.clone(),
+                Vec::new,
+                |acc, value| acc.push(value.0),
+                |acc, mut other| acc.append(&mut other),
+            )
+            .unwrap();
+        assert_eq!(observed, expected);
+    }
 }

@@ -2,7 +2,7 @@
 //!
 //! ## Warning
 //!
-//! [`AgentHandle`] is for **single-entity CPU lookups only** — for example,
+//! [`AgentHandle`] is for **single-entity CPU lookups only** - for example,
 //! a market-clearing step that needs to inspect one specific agent.
 //!
 //! ## Read implementation
@@ -18,7 +18,7 @@
 //!
 //! [`AgentHandle::write`] enqueues a deferred `Command::Set` via
 //! [`ECSReference::defer`]. Write is applied at the next
-//! `apply_deferred_commands` boundary — it is not an immediate in-place
+//! `apply_deferred_commands` boundary - it is not an immediate in-place
 //! mutation.
 
 use crate::engine::commands::Command;
@@ -33,7 +33,7 @@ use super::error::AgentError;
 /// # Warning
 ///
 /// This type is for **single-entity CPU lookups only** (e.g. market-clearing
-/// logic that inspects one specific agent). Never use in hot iteration paths —
+/// logic that inspects one specific agent). Never use in hot iteration paths -
 /// use `ECSReference::for_each_*` instead.
 ///
 /// For reading other agents' components *during* iteration (e.g. social
@@ -47,7 +47,7 @@ use super::error::AgentError;
 /// resolved and the entity handle is available (returned by
 /// `apply_deferred_commands`):
 ///
-/// ```ignore
+/// ```text
 /// let ids: Vec<ComponentID> = template.signature()
 ///     .iterate_over_components()
 ///     .collect();
@@ -94,9 +94,9 @@ impl AgentHandle {
     ///
     /// # Errors
     ///
-    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] — `id` not
+    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] - `id` not
     ///   in template signature.
-    /// * [`AgentHandleError::ECS`] — entity is stale, component is missing
+    /// * [`AgentHandleError::ECS`] - entity is stale, component is missing
     ///   from the archetype, the column is currently write-locked by the
     ///   calling system, the requested type does not match the stored type,
     ///   or a lock is poisoned.
@@ -119,9 +119,9 @@ impl AgentHandle {
     ///
     /// # Errors
     ///
-    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] — `id` is
+    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] - `id` is
     ///   not in the template signature cached by this handle.
-    /// * [`AgentHandleError::ECS`] — the deferred command queue lock is
+    /// * [`AgentHandleError::ECS`] - the deferred command queue lock is
     ///   poisoned.
     pub fn write<T: 'static + Send>(
         &self,
@@ -141,16 +141,16 @@ impl AgentHandle {
     }
 }
 
-// ── Error type ───────────────────────────────────────────────────────────────
+// -- Error type ---------------------------------------------------------------
 
 /// Combined error returned by [`AgentHandle::read`] and [`AgentHandle::write`].
 ///
 /// Both methods can fail for two orthogonal reasons:
 ///
-/// * An agent-domain invariant violation (wrong component ID, stale entity) →
+/// * An agent-domain invariant violation (wrong component ID, stale entity) ->
 ///   [`AgentHandleError::Agent`].
 /// * An ECS-level failure (lock poison, structural mutation during iteration)
-///   → [`AgentHandleError::ECS`].
+///   -> [`AgentHandleError::ECS`].
 ///
 /// Collapsing both into `AgentError` would lose ECS diagnostic detail, so
 /// they are kept as separate variants.

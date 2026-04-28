@@ -8,9 +8,9 @@
 //!
 //! # Core abstractions
 //!
-//! - [`DynamicBundle`] — a trait for any type that can yield component values
+//! - [`DynamicBundle`] - a trait for any type that can yield component values
 //!   by ID, enabling interoperability between different bundle representations.
-//! - [`Bundle`] — the standard implementation, backed by a [`Signature`]
+//! - [`Bundle`] - the standard implementation, backed by a [`Signature`]
 //!   bitset for O(1) membership checks and a sparse `Vec` for value storage.
 //!
 //! # Example

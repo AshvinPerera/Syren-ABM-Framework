@@ -8,15 +8,15 @@
 //!
 //! # Core types
 //!
-//! - [`Signature`] — the primary bitset type; supports setting, clearing, and
+//! - [`Signature`] - the primary bitset type; supports setting, clearing, and
 //!   querying individual component bits, as well as subset checks via
 //!   [`contains_all`](Signature::contains_all).
 //!
 //! # Free functions
 //!
-//! - [`build_signature`] — constructs a [`Signature`] from a slice of
+//! - [`build_signature`] - constructs a [`Signature`] from a slice of
 //!   [`ComponentID`]s.
-//! - [`iter_bits_from_words`] — low-level iterator over set bits in a raw word
+//! - [`iter_bits_from_words`] - low-level iterator over set bits in a raw word
 //!   array, used internally by [`Signature::iterate_over_components`] and
 //!   exposed for performance-critical callers that operate on raw words directly.
 //!

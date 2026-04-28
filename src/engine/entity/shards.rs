@@ -12,7 +12,7 @@
 //! Each [`Shard`] owns a [`Mutex`]-protected [`Entities`] pool along with
 //! atomic counters that provide lock-free estimates of live entity count and
 //! free slot availability. These counters are intentionally approximate and
-//! used only for load-balancing heuristics — they are never relied upon for
+//! used only for load-balancing heuristics - they are never relied upon for
 //! correctness.
 //!
 //! # Entity Identity
@@ -32,9 +32,9 @@
 //! Operations propagate [`SpawnError`] on failure. The two most common failure
 //! modes are:
 //!
-//! - [`SpawnError::ShardBounds`] — a shard index encoded in an [`Entity`] or
+//! - [`SpawnError::ShardBounds`] - a shard index encoded in an [`Entity`] or
 //!   passed directly exceeds the initialized shard count.
-//! - [`SpawnError::ShardLockPoisoned`] — a shard mutex was poisoned by a
+//! - [`SpawnError::ShardLockPoisoned`] - a shard mutex was poisoned by a
 //!   panicking thread.
 
 use std::fmt;

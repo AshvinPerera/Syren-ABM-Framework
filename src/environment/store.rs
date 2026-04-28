@@ -40,9 +40,9 @@ use crate::engine::types::ChannelID;
 use super::error::{EnvironmentError, EnvironmentResult};
 use super::handle::EnvKey;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Internal storage entry
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// One registered parameter slot.
 ///
@@ -69,9 +69,9 @@ struct EntryValue {
     type_name: &'static str,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Environment
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// The central simulation-wide parameter store.
 ///
@@ -102,7 +102,7 @@ struct EntryValue {
 pub struct Environment {
     /// Per-entry storage, keyed by parameter name.
     ///
-    /// Schema is frozen at construction — no new entries are ever inserted after
+    /// Schema is frozen at construction - no new entries are ever inserted after
     /// [`EnvironmentBuilder::build`] returns. Each [`EntrySlot`] holds an
     /// immutable [`ChannelID`] outside any lock, so name-to-channel queries
     /// never contend with value writers.
@@ -234,8 +234,8 @@ impl Environment {
     ///
     /// # Errors
     ///
-    /// - [`EnvironmentError::KeyNotFound`] — the key was never registered.
-    /// - [`EnvironmentError::TypeMismatch`] — the key exists but was registered
+    /// - [`EnvironmentError::KeyNotFound`] - the key was never registered.
+    /// - [`EnvironmentError::TypeMismatch`] - the key exists but was registered
     ///   with a different type.
     ///
     /// # Panics
@@ -268,7 +268,7 @@ impl Environment {
         let value = entry
             .value
             .downcast_ref::<T>()
-            .expect("TypeId matched but downcast failed — this is a bug");
+            .expect("TypeId matched but downcast failed - this is a bug");
 
         Ok(value.clone())
     }
@@ -283,8 +283,8 @@ impl Environment {
     ///
     /// # Errors
     ///
-    /// - [`EnvironmentError::KeyNotFound`] — the key was never registered.
-    /// - [`EnvironmentError::TypeMismatch`] — the key exists but was registered
+    /// - [`EnvironmentError::KeyNotFound`] - the key was never registered.
+    /// - [`EnvironmentError::TypeMismatch`] - the key exists but was registered
     ///   with a different type.
     ///
     /// # Panics
@@ -296,7 +296,7 @@ impl Environment {
             .get(key)
             .ok_or_else(|| EnvironmentError::KeyNotFound(key.to_owned()))?;
 
-        // Channel ID is immutable and lives outside the lock — read it
+        // Channel ID is immutable and lives outside the lock - read it
         // directly without acquiring the inner RwLock.
         let channel_id = slot.channel_id;
 
@@ -322,7 +322,7 @@ impl Environment {
             *entry
                 .value
                 .downcast_mut::<T>()
-                .expect("TypeId matched but downcast_mut failed — this is a bug") = value;
+                .expect("TypeId matched but downcast_mut failed - this is a bug") = value;
         }
 
         // Mark the channel dirty after releasing the entry lock so the two
@@ -361,7 +361,7 @@ impl Environment {
     ///
     /// Single-channel membership probe used by
     /// [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary)
-    /// to compute the precise intersection of `channels ∩ env.dirty ∩
+    /// to compute the precise intersection of `channels  intersection  env.dirty  intersection 
     /// uniform.owned` without constructing intermediate iterators.
     ///
     /// Currently only the GPU uniform-buffer integration needs this primitive,
@@ -430,6 +430,12 @@ impl Environment {
             })?
             .clear();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_dirty_channels_for_test(&self) {
+        let _guard = self.dirty_channels.write().unwrap();
+        panic!("poison environment dirty-channel lock");
     }
 }
 
@@ -680,7 +686,7 @@ mod tests {
 
         // While the writer is running, channel_of calls must stay fast.
         // We run many of them and verify the total is well under the writer's
-        // lifetime — proving no per-call serialisation against the writer.
+        // lifetime - proving no per-call serialisation against the writer.
         let start = Instant::now();
         for _ in 0..100_000 {
             let _ = env.channel_of("interest_rate").unwrap();
@@ -697,5 +703,62 @@ mod tests {
             "channel_of appears to serialise against writers: {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn poisoned_entry_lock_returns_structured_error() {
+        use std::thread;
+
+        let env = build_env();
+        let env_for_thread = Arc::clone(&env);
+        let _ = thread::spawn(move || {
+            let slot = env_for_thread.entries.get("interest_rate").unwrap();
+            let _guard = slot.value.write().unwrap();
+            panic!("poison environment entry");
+        })
+        .join();
+
+        let err = env.get::<f32>("interest_rate").unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentError::LockPoisoned {
+                what: "environment entry"
+            }
+        ));
+    }
+
+    #[test]
+    fn poisoned_dirty_channel_helpers_return_structured_errors() {
+        use std::thread;
+
+        let env = build_env();
+        let id = env.channel_of("interest_rate").unwrap();
+        let env_for_thread = Arc::clone(&env);
+        let _ = thread::spawn(move || env_for_thread.poison_dirty_channels_for_test()).join();
+
+        assert!(matches!(
+            env.has_any_dirty_channels([id].into_iter()),
+            Err(EnvironmentError::LockPoisoned {
+                what: "environment dirty channels"
+            })
+        ));
+        assert!(matches!(
+            env.dirty_channel_ids(),
+            Err(EnvironmentError::LockPoisoned {
+                what: "environment dirty channels"
+            })
+        ));
+        assert!(matches!(
+            env.clear_dirty_for_channels(&[id]),
+            Err(EnvironmentError::LockPoisoned {
+                what: "environment dirty channels"
+            })
+        ));
+        assert!(matches!(
+            env.clear_dirty(),
+            Err(EnvironmentError::LockPoisoned {
+                what: "environment dirty channels"
+            })
+        ));
     }
 }

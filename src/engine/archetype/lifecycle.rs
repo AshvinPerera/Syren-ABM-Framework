@@ -7,12 +7,12 @@
 //!
 //! Both operations uphold the following invariants:
 //!
-//! - **Column density** — component storage is always kept dense. Removal uses
+//! - **Column density** - component storage is always kept dense. Removal uses
 //!   `swap_remove` to fill gaps left by departed rows.
-//! - **Attribute alignment** — every column for a given archetype must agree on
+//! - **Attribute alignment** - every column for a given archetype must agree on
 //!   the `(chunk, row)` position of each entity. Any disagreement is treated as
 //!   an [`InternalViolation`] and the operation is aborted.
-//! - **Metadata consistency** — `entity_positions` and per-entity [`EntityLocation`]
+//! - **Metadata consistency** - `entity_positions` and per-entity [`EntityLocation`]
 //!   records are updated atomically with respect to the metadata lock, and only
 //!   after all column operations have completed.
 //!
@@ -20,9 +20,9 @@
 //!
 //! To prevent deadlocks, a strict acquisition order is observed throughout:
 //!
-//! 1. **Column locks** — acquired and released one at a time during the component
+//! 1. **Column locks** - acquired and released one at a time during the component
 //!    read/write loop.
-//! 2. **Metadata lock** (`self.meta`) — acquired only *after* all column locks
+//! 2. **Metadata lock** (`self.meta`) - acquired only *after* all column locks
 //!    have been released and, in the case of despawn, after the entity handle
 //!    has been returned to [`EntityShards`].
 //!

@@ -1,4 +1,4 @@
-//! [`TargetedBuffer`] — an inbox index keyed on the full [`Entity`].
+//! [`TargetedBuffer`] - an inbox index keyed on the full [`Entity`].
 //!
 //! Messages are sorted so that each entity's messages occupy a contiguous
 //! slice, enabling O(1) inbox lookup after an O(n) scatter pass.
@@ -15,12 +15,14 @@ use std::ops::Range;
 
 use crate::engine::entity::Entity;
 use crate::messaging::aligned_buffer::AlignedBuffer;
+use crate::messaging::error::MessagingError;
 use crate::messaging::message::Message;
 use crate::messaging::registry::ErasedFns;
+use crate::ECSResult;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Buffer
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Stores all messages for a `Targeted`-specialised type, sorted by recipient.
 pub(crate) struct TargetedBuffer {
@@ -51,15 +53,24 @@ impl TargetedBuffer {
     /// # Safety
     ///
     /// `fns.recipient` must be `Some` and must read items of the registered type.
-    pub(crate) unsafe fn finalise(&mut self, raw: &AlignedBuffer, fns: &ErasedFns) {
+    pub(crate) unsafe fn finalise(
+        &mut self,
+        raw: &AlignedBuffer,
+        fns: &ErasedFns,
+    ) -> ECSResult<()> {
         let n = raw.len();
         if n == 0 {
-            return;
+            return Ok(());
         }
 
-        let recipient_fn = fns.recipient.expect("TargetedBuffer: missing recipient_fn");
+        let recipient_fn = fns
+            .recipient
+            .ok_or(MessagingError::MissingErasedFunction {
+                specialisation: "Targeted",
+                function: "recipient",
+            })?;
 
-        // ── 1. Count per-entity ───────────────────────────────────────────────
+        // -- 1. Count per-entity -----------------------------------------------
         // We use a deterministic two-pass approach to avoid per-entity Vec
         // allocations: first count, then prefix-sum into a sorted order.
 
@@ -74,7 +85,7 @@ impl TargetedBuffer {
             *counts.entry(entity).or_insert(0) += 1;
         }
 
-        // ── 2. Assign contiguous ranges ───────────────────────────────────────
+        // -- 2. Assign contiguous ranges ---------------------------------------
         // Sort entities for deterministic output (matches scheduler
         // reproducibility goals).
         let mut entities: Vec<Entity> = counts.keys().copied().collect();
@@ -89,7 +100,7 @@ impl TargetedBuffer {
             self.inbox_index.insert(entity, start..cursor);
         }
 
-        // ── 3. Scatter ────────────────────────────────────────────────────────
+        // -- 3. Scatter --------------------------------------------------------
         self.data.reserve(n);
         unsafe { self.data.set_len(n) };
 
@@ -102,19 +113,30 @@ impl TargetedBuffer {
 
         for (i, &entity) in entity_pairs.iter().enumerate() {
             let src = unsafe { raw.as_ptr_at(i) };
-            let dst_idx = *scatter_cursor
-                .get(&entity)
-                .expect("entity missing from scatter_cursor") as usize;
+            let dst_idx = *scatter_cursor.get(&entity).ok_or(
+                MessagingError::FinaliseInvariant {
+                    specialisation: "Targeted",
+                    reason: "entity missing from scatter cursor",
+                },
+            )? as usize;
             let dst = unsafe { self.data.as_mut_ptr_at(dst_idx) };
             unsafe { std::ptr::copy_nonoverlapping(src, dst, self.item_size) };
-            *scatter_cursor.get_mut(&entity).unwrap() += 1;
+            let cursor =
+                scatter_cursor
+                    .get_mut(&entity)
+                    .ok_or(MessagingError::FinaliseInvariant {
+                        specialisation: "Targeted",
+                        reason: "entity missing from scatter cursor",
+                    })?;
+            *cursor += 1;
         }
+        Ok(())
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Iterator
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// An iterator over all messages addressed to a specific [`Entity`].
 ///
@@ -185,3 +207,43 @@ impl<'a, M: Copy> Iterator for InboxIter<'a, M> {
 }
 
 impl<'a, M: Copy> ExactSizeIterator for InboxIter<'a, M> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::error::ECSError;
+
+    #[derive(Clone, Copy)]
+    struct TestMsg {
+        _value: u32,
+    }
+
+    #[test]
+    fn missing_recipient_accessor_returns_error() {
+        let mut raw = AlignedBuffer::with_capacity(
+            std::mem::size_of::<TestMsg>(),
+            std::mem::align_of::<TestMsg>(),
+            1,
+        );
+        unsafe { raw.push(TestMsg { _value: 1 }) };
+        let mut buf = TargetedBuffer::new(
+            std::mem::size_of::<TestMsg>(),
+            std::mem::align_of::<TestMsg>(),
+            1,
+        );
+        let fns = ErasedFns {
+            bucket_key: None,
+            position: None,
+            recipient: None,
+        };
+
+        let err = unsafe { buf.finalise(&raw, &fns) }.unwrap_err();
+        assert!(matches!(
+            err,
+            ECSError::Messaging(MessagingError::MissingErasedFunction {
+                specialisation: "Targeted",
+                function: "recipient"
+            })
+        ));
+    }
+}

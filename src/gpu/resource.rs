@@ -9,9 +9,9 @@
 //! Resources are registered once and assigned a stable [`GPUResourceID`]. The registry tracks
 //! three independent dirty flags per resource:
 //!
-//! - **`created`** — GPU buffers have been allocated via [`GPUResource::create_gpu`].
-//! - **`cpu_dirty`** — CPU-side data has changed and needs to be uploaded to the GPU.
-//! - **`pending_download`** — GPU-side data has been written and needs to be read back to the CPU.
+//! - **`created`** - GPU buffers have been allocated via [`GPUResource::create_gpu`].
+//! - **`cpu_dirty`** - CPU-side data has changed and needs to be uploaded to the GPU.
+//! - **`pending_download`** - GPU-side data has been written and needs to be read back to the CPU.
 //!
 //! Synchronization is **explicit**: callers must call [`GPUResourceRegistry::mark_cpu_dirty`] or
 //! [`GPUResourceRegistry::mark_pending_download`] to schedule transfers, then drive them with
@@ -111,15 +111,6 @@ pub trait GPUResource: Send + Sync {
 
     /// Downcasts to mutable `Any`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-#[allow(dead_code)]
-/// Common helper for mapping a string error into the ECS error type.
-#[inline]
-pub fn gpu_resource_err(what: &'static str, detail: impl Into<String>) -> ECSError {
-    ECSError::from(ExecutionError::GpuDispatchFailed {
-        message: format!("{what}: {}", detail.into()).into(),
-    })
 }
 
 #[cfg(feature = "gpu")]

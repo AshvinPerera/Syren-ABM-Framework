@@ -1,8 +1,8 @@
 //! Stable per-thread worker identifiers shared by all parallel extension
 //! modules.
 //!
-//! Extensions that accumulate per-worker state — message emit slots, agent
-//! spawn buckets, env-write tracking — need a deterministic worker index so
+//! Extensions that accumulate per-worker state - message emit slots, agent
+//! spawn buckets, env-write tracking - need a deterministic worker index so
 //! that drain/merge passes produce identical output across runs and across
 //! thread counts. This module exposes that index on top of Rayon's pool so
 //! every extension uses the same numbering.
@@ -12,17 +12,16 @@
 //! - Inside a Rayon parallel section, [`worker_id`] returns the calling
 //!   worker's pool-relative index.
 //! - On the main thread (or any other non-Rayon thread), [`worker_id`]
-//!   returns a stable identifier obtained from a process-wide registry. The
-//!   first non-Rayon thread to call gets `rayon::current_num_threads()`,
-//!   the second gets `rayon::current_num_threads() + 1`, and so on.
+//!   returns a stable identifier obtained from a process-wide registry.
+//!   Foreign-thread IDs are allocated downward from `u32::MAX` so they cannot
+//!   collide with Rayon's dense pool-relative IDs.
 //! - The returned `u32` is stable for the lifetime of the calling thread.
 //!
 //! # Capacity
 //!
-//! [`max_workers`] returns an upper bound on the worker IDs that may be
-//! observed. Callers that pre-size per-worker storage should treat this as
-//! a soft hint and grow lazily — Rayon pools can be reconfigured and
-//! foreign-thread IDs are assigned on demand.
+//! [`max_workers`] returns Rayon's current pool size. It is only an initial
+//! sizing hint for Rayon-worker storage, not an upper bound for every possible
+//! [`worker_id`], because foreign-thread IDs are intentionally sparse.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

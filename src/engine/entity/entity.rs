@@ -10,15 +10,15 @@
 //! into three contiguous fields, from least-significant to most-significant:
 //!
 //! ```text
-//! ┌─────────────────┬───────────────┬──────────────────────────────┐
-//! │     version     │     shard     │            index             │
-//! │  (upper bits)   │  (SHARD_BITS) │          (INDEX_BITS)        │
-//! └─────────────────┴───────────────┴──────────────────────────────┘
+//! +-----------------+---------------+------------------------------+
+//! |     version     |     shard     |            index             |
+//! |  (upper bits)   |  (SHARD_BITS) |          (INDEX_BITS)        |
+//! +-----------------+---------------+------------------------------+
 //! ```
 //!
-//! - **`index`** (`INDEX_BITS` wide) — slot within the owning shard's storage array.
-//! - **`shard`** (`SHARD_BITS` wide) — identifies which shard owns the entity.
-//! - **`version`** (remaining upper bits) — incremented each time a slot is
+//! - **`index`** (`INDEX_BITS` wide) - slot within the owning shard's storage array.
+//! - **`shard`** (`SHARD_BITS` wide) - identifies which shard owns the entity.
+//! - **`version`** (remaining upper bits) - incremented each time a slot is
 //!   recycled, so stale handles from before a despawn can be detected.
 //!
 //! The exact widths of each field are controlled by the constants imported from

@@ -1,4 +1,19 @@
 //! Runtime model owner.
+//!
+//! A [`Model`] owns the root ECS world plus model-level resources such as the
+//! environment, agent registry, root scheduler, optional shared sub-schedulers,
+//! and isolated nested child models.
+//!
+//! Tick order is explicit:
+//!
+//! 1. Begin all boundary resources on the root ECS world.
+//! 2. Run shared sub-schedulers against the root ECS world, flushing agent
+//!    lifecycle hooks after each deferred-command drain.
+//! 3. Tick each isolated nested child model. After a child tick succeeds, run
+//!    its bridge into the parent before moving to the next child.
+//! 4. Run the root scheduler.
+//! 5. Drain tail deferred commands, flush agent hooks, then end root
+//!    boundaries.
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -35,6 +50,11 @@ pub struct Model {
 
 impl Model {
     /// Runs one simulation tick.
+    ///
+    /// Nested models are isolated worlds. Each nested child completes its own
+    /// `tick`, then its bridge writes any parent-facing effects, and only then
+    /// does the root scheduler run. This keeps child state evolution and
+    /// parent observation order deterministic.
     pub fn tick(&mut self) -> ECSResult<()> {
         self.ecs.begin_tick()?;
 

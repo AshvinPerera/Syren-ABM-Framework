@@ -1,7 +1,7 @@
 //! Typed enumeration of internal ECS framework invariant violations.
 //!
 //! This module defines [`InternalViolation`], a structured error type that
-//! represents bugs in the ECS engine or its scheduling layer — not recoverable
+//! represents bugs in the ECS engine or its scheduling layer - not recoverable
 //! user errors. Each variant encodes a specific invariant that was broken,
 //! making these errors matchable, testable, and grep-friendly compared to
 //! freeform string messages.
@@ -10,9 +10,9 @@
 //!
 //! Variants are grouped by the module in which the violation originates:
 //!
-//! - **`archetype.rs`** — violations of per-archetype structural invariants
+//! - **`archetype.rs`** - violations of per-archetype structural invariants
 //!   (slot occupancy, component presence, metadata consistency, registry state).
-//! - **`manager.rs`** — violations of query shape contracts and archetype
+//! - **`manager.rs`** - violations of query shape contracts and archetype
 //!   pair access rules enforced by the world manager.
 //!
 //! ## Usage
@@ -36,7 +36,7 @@ use std::fmt;
 /// variant, making internal errors matchable, testable, and grep-friendly.
 ///
 /// Each variant corresponds to a specific framework-level invariant that was
-/// violated. These are **not** user-recoverable — they indicate bugs in the
+/// violated. These are **not** user-recoverable - they indicate bugs in the
 /// ECS engine or its scheduling layer.
 ///
 /// ## Design
@@ -65,7 +65,7 @@ pub enum InternalViolation {
     DespawnSwapMisalignment,
 
     /// During `despawn_on`, the moved (swapped) slot had no associated
-    /// entity — metadata is out of sync.
+    /// entity - metadata is out of sync.
     DespawnMovedSlotMissingEntity,
 
     /// `from_components` encountered a component type that is not
@@ -82,9 +82,9 @@ pub enum InternalViolation {
     /// helper's requirements.
     ///
     /// ## Fields
-    /// * `method` — name of the helper that was called.
-    /// * `expected_reads` — number of read components the helper expects.
-    /// * `expected_writes` — number of write components the helper expects.
+    /// * `method` - name of the helper that was called.
+    /// * `expected_reads` - number of read components the helper expects.
+    /// * `expected_writes` - number of write components the helper expects.
     QueryShapeMismatch {
         /// Name of the iteration helper that was called.
         method: &'static str,

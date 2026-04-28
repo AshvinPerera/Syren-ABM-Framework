@@ -4,17 +4,17 @@ use crate::engine::entity::Entity;
 use crate::engine::types::ChannelID;
 use std::marker::PhantomData;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Base trait
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A value that can be sent as a message between agents.
 ///
 /// Messages must be:
-/// - [`Copy`] — emitted by value, stored in a plain byte buffer.
-/// - [`Send`] + [`Sync`] — safe to produce on one thread and consume on
+/// - [`Copy`] - emitted by value, stored in a plain byte buffer.
+/// - [`Send`] + [`Sync`] - safe to produce on one thread and consume on
 ///   another.
-/// - `'static` — no borrowed data; message lifetimes are not tracked.
+/// - `'static` - no borrowed data; message lifetimes are not tracked.
 ///
 /// The optional [`GPU_SAFE`](Message::GPU_SAFE) associated constant signals
 /// that the message's memory layout is compatible with GPU buffers (i.e. the
@@ -25,9 +25,9 @@ pub trait Message: Copy + Send + Sync + 'static {
     const GPU_SAFE: bool = false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Specialisation traits
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A [`Message`] that is consumed by iterating over *all* messages of this
 /// type in arrival order (linear scan, no index).
@@ -68,9 +68,9 @@ pub trait TargetedMessage: Message {
     fn recipient(&self) -> Entity;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Opaque identifier
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A typed handle to a registered message channel.
 ///

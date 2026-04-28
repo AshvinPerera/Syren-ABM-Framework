@@ -38,7 +38,7 @@ use crate::engine::types::ComponentID;
 use super::error::{AgentError, AgentResult};
 use super::template::AgentTemplate;
 
-// ── AgentSpawner ─────────────────────────────────────────────────────────────
+// -- AgentSpawner -------------------------------------------------------------
 
 /// Builder for spawning one agent from a template with per-field overrides.
 ///
@@ -117,9 +117,10 @@ mod tests {
     use crate::agents::error::AgentError;
     use crate::agents::template::AgentTemplate;
 
-    #[allow(dead_code)]
     #[derive(Default, Clone)]
-    struct Wealth(f64);
+    struct Wealth {
+        _value: f64,
+    }
 
     #[test]
     fn spawner_set_overrides_are_stored() {
@@ -127,7 +128,10 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let spawner = tmpl.spawner().set::<Wealth>(0, Wealth(99.0)).unwrap();
+        let spawner = tmpl
+            .spawner()
+            .set::<Wealth>(0, Wealth { _value: 99.0 })
+            .unwrap();
         assert_eq!(spawner.overrides.len(), 1);
         let (cid, _) = &spawner.overrides[0];
         assert_eq!(*cid, 0);
@@ -141,9 +145,9 @@ mod tests {
             .build();
         let spawner = tmpl
             .spawner()
-            .set::<Wealth>(0, Wealth(1.0))
+            .set::<Wealth>(0, Wealth { _value: 1.0 })
             .unwrap()
-            .set::<Wealth>(0, Wealth(2.0))
+            .set::<Wealth>(0, Wealth { _value: 2.0 })
             .unwrap();
         assert_eq!(spawner.overrides.len(), 1);
     }
@@ -154,7 +158,7 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let result = tmpl.spawner().set::<Wealth>(99, Wealth(1.0));
+        let result = tmpl.spawner().set::<Wealth>(99, Wealth { _value: 1.0 });
         assert!(matches!(result, Err(AgentError::MissingComponent(99))));
     }
 }

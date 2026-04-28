@@ -9,14 +9,14 @@
 //!
 //! # Responsibilities
 //!
-//! - **Identity assignment** – maps [`TypeId`] → [`ComponentID`] via a monotonically
+//! - **Identity assignment** - maps [`TypeId`] -> [`ComponentID`] via a monotonically
 //!   increasing counter bounded by [`COMPONENT_CAP`].
-//! - **Metadata storage** – holds a [`ComponentDesc`] per registered component for use
+//! - **Metadata storage** - holds a [`ComponentDesc`] per registered component for use
 //!   in diagnostics and validation.
-//! - **Factory registration** – stores a [`FactoryFn`] per component so that
+//! - **Factory registration** - stores a [`FactoryFn`] per component so that
 //!   [`Attribute`] columns can be constructed without knowing the concrete type at the
 //!   call site.
-//! - **Lifecycle enforcement** – can be [`freeze`](ComponentRegistry::freeze)'d once the
+//! - **Lifecycle enforcement** - can be [`freeze`](ComponentRegistry::freeze)'d once the
 //!   world is initialized, after which further registration is rejected, guaranteeing
 //!   that component IDs and storage layouts remain stable.
 //!
@@ -239,7 +239,7 @@ impl ComponentRegistry {
     ///
     /// ## Requirements
     /// * The component type must implement [`GPUPod`], guaranteeing that its
-    ///   memory layout is safe for direct CPU↔GPU transfers.
+    ///   memory layout is safe for direct CPU<->GPU transfers.
     /// * The component must satisfy all normal ECS component constraints
     ///   (non-zero-sized, `'static`, `Send`, `Sync`).
     ///

@@ -7,12 +7,12 @@
 //!
 //! ## Organization
 //!
-//! - [`ArchetypeMeta`] — lightweight metadata (entity count, per-chunk entity
+//! - [`ArchetypeMeta`] - lightweight metadata (entity count, per-chunk entity
 //!   position maps) guarded by its own `RwLock`.
-//! - [`Archetype`] — owns the component columns and exposes spawn, move, and
+//! - [`Archetype`] - owns the component columns and exposes spawn, move, and
 //!   query operations.
-//! - [`ArchetypeMatch`] — a plain record returned by query matching, carrying
-//!   an archetype ID and its current chunk count.
+//! Query matching returns cached archetype IDs from `ECSData`; chunk lengths
+//! stay live and are read from each archetype during iteration.
 //!
 //! ## Storage layout
 //!
@@ -31,7 +31,6 @@
 //! ascending `ComponentID` order. The sorted `components` vec naturally
 //! enforces this ordering during iteration.
 
-use std::fmt;
 use std::sync::{RwLock, RwLockWriteGuard};
 
 use crate::engine::types::{ArchetypeID, ComponentID, CHUNK_CAP};
@@ -315,31 +314,5 @@ impl Archetype {
             let used = len % CHUNK_CAP;
             Ok(if used == 0 { CHUNK_CAP } else { used })
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ArchetypeMatch
-// ---------------------------------------------------------------------------
-
-/// Represents an archetype selected during query matching.
-///
-/// ## Purpose
-/// Used by query systems to record which archetypes satisfy a component filter
-/// and how many chunks they contain.
-
-pub struct ArchetypeMatch {
-    /// Identifier of the matched archetype.
-    pub archetype_id: ArchetypeID,
-    /// Number of chunks currently allocated in the archetype.
-    pub chunks: usize,
-}
-
-impl fmt::Debug for ArchetypeMatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ArchetypeMatch")
-            .field("archetype_id", &self.archetype_id)
-            .field("chunks", &self.chunks)
-            .finish()
     }
 }

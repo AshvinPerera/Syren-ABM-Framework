@@ -1,8 +1,8 @@
 //! Tick-lifecycle integration for [`Environment`].
 //!
 //! [`EnvironmentBoundary`] implements [`BoundaryResource`] so that the
-//! scheduler can drive environment dirty-channel housekeeping — and optionally
-//! GPU uniform buffer uploads — at the correct points in each tick.
+//! scheduler can drive environment dirty-channel housekeeping - and optionally
+//! GPU uniform buffer uploads - at the correct points in each tick.
 //!
 //! ## Lifecycle
 //!
@@ -32,7 +32,7 @@
 //!
 //! ## Registration
 //!
-//! ```ignore
+//! ```text
 //! let boundary = EnvironmentBoundary::new(Arc::clone(&env));
 //! let boundary_id = ecs_manager.register_boundary(Box::new(boundary));
 //! ```
@@ -48,9 +48,9 @@ use super::store::Environment;
 #[cfg(feature = "gpu")]
 use super::uniform::EnvUniformBuffer;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // EnvironmentBoundary
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// [`BoundaryResource`] that drives dirty-channel housekeeping for an
 /// [`Environment`].
@@ -224,7 +224,9 @@ impl BoundaryResource for EnvironmentBoundary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::error::ECSError;
     use crate::environment::builder::EnvironmentBuilder;
+    use crate::environment::EnvironmentError;
     use std::sync::Arc;
 
     fn make_boundary() -> (Arc<Environment>, EnvironmentBoundary) {
@@ -283,7 +285,7 @@ mod tests {
         let mut ctx = BoundaryContext::empty();
         boundary.finalise(&mut ctx, &[unrelated_id]).unwrap();
 
-        // interest_rate must still be dirty — finalise saw only an unrelated ID.
+        // interest_rate must still be dirty - finalise saw only an unrelated ID.
         let dirty = env.dirty_channel_ids().unwrap();
         assert!(dirty.contains(&id_rate));
     }
@@ -293,7 +295,7 @@ mod tests {
         let (env, mut boundary) = make_boundary();
         let id_rate = env.channel_of("interest_rate").unwrap();
 
-        // Do not set any values — env is clean.
+        // Do not set any values - env is clean.
         let mut ctx = BoundaryContext::empty();
         boundary.finalise(&mut ctx, &[id_rate]).unwrap();
 
@@ -316,7 +318,7 @@ mod tests {
     #[test]
     fn end_tick_noop_when_already_clean() {
         let (env, mut boundary) = make_boundary();
-        // No sets — nothing to drain.
+        // No sets - nothing to drain.
         let mut ctx = BoundaryContext::empty();
         boundary.end_tick(&mut ctx).unwrap();
         assert!(env.dirty_channel_ids().unwrap().is_empty());
@@ -339,11 +341,48 @@ mod tests {
         assert!(env.dirty_channel_ids().unwrap().is_empty());
         let _ = id_width; // used only implicitly via end_tick
     }
+
+    #[test]
+    fn finalise_propagates_poisoned_dirty_channel_error() {
+        use std::thread;
+
+        let (env, mut boundary) = make_boundary();
+        let id_rate = env.channel_of("interest_rate").unwrap();
+        let env_for_thread = Arc::clone(&env);
+        let _ = thread::spawn(move || env_for_thread.poison_dirty_channels_for_test()).join();
+
+        let err = boundary
+            .finalise(&mut BoundaryContext::empty(), &[id_rate])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ECSError::Environment(EnvironmentError::LockPoisoned {
+                what: "environment dirty channels"
+            })
+        ));
+    }
+
+    #[test]
+    fn end_tick_propagates_poisoned_dirty_channel_error() {
+        use std::thread;
+
+        let (env, mut boundary) = make_boundary();
+        let env_for_thread = Arc::clone(&env);
+        let _ = thread::spawn(move || env_for_thread.poison_dirty_channels_for_test()).join();
+
+        let err = boundary.end_tick(&mut BoundaryContext::empty()).unwrap_err();
+        assert!(matches!(
+            err,
+            ECSError::Environment(EnvironmentError::LockPoisoned {
+                what: "environment dirty channels"
+            })
+        ));
+    }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // GPU-integration tests: finalise / end_tick interaction with EnvUniformBuffer
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_tests {

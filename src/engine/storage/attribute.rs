@@ -38,7 +38,7 @@
 ///   length stored in `last_chunk_length`, where:
 ///
 ///   ```text
-///   0 ≤ last_chunk_length ≤ CHUNK_CAP
+///   0 <= last_chunk_length <= CHUNK_CAP
 ///   ```
 ///
 /// - **Length rule:**

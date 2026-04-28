@@ -6,22 +6,22 @@
 //! # Architecture
 //!
 //! ```text
-//!                        ┌─────────────────────────┐
-//!                        │      ECSManager         │
-//!                        │                         │
-//!                        │  UnsafeCell<ECSData>    │  ← owns all ECS state
-//!                        │  RwLock<()> phase       │  ← read/write phase gate
-//!                        │  BorrowTracker          │  ← per-component borrows
-//!                        │  AtomicUsize iters      │  ← active iteration count
-//!                        │  Mutex<Vec<Command>>    │  ← deferred command queue
-//!                        │  Mutex<BoundaryRegistry>│  ← tick-lifecycle hooks
-//!                        │                         │    (per-resource locks)
-//!                        └─────────┬───────────────┘
-//!                                  │ .world_ref()
-//!                                  ▼
-//!                        ┌─────────────────────────┐
-//!                        │      ECSReference       │  ← shared, lightweight handle
-//!                        └─────────────────────────┘
+//!                        +-------------------------+
+//!                        |      ECSManager         |
+//!                        |                         |
+//!                        |  UnsafeCell<ECSData>    |  <- owns all ECS state
+//!                        |  RwLock<()> phase       |  <- read/write phase gate
+//!                        |  BorrowTracker          |  <- per-component borrows
+//!                        |  AtomicUsize iters      |  <- active iteration count
+//!                        |  Mutex<Vec<Command>>    |  <- deferred command queue
+//!                        |  Mutex<BoundaryRegistry>|  <- tick-lifecycle hooks
+//!                        |                         |    (per-resource locks)
+//!                        +---------+---------------+
+//!                                  | .world_ref()
+//!                                  v
+//!                        +-------------------------+
+//!                        |      ECSReference       |  <- shared, lightweight handle
+//!                        +-------------------------+
 //! ```
 //!
 //! # Boundary Resources
@@ -33,12 +33,12 @@
 //! handle that does not block other resources' access. The manager calls
 //! lifecycle hooks on each resource at the appropriate points:
 //!
-//! - [`begin_tick`](ECSManager::begin_tick) — before any stage.
-//! - [`finalise_boundaries`](ECSManager::finalise_boundaries) — at each
+//! - [`begin_tick`](ECSManager::begin_tick) - before any stage.
+//! - [`finalise_boundaries`](ECSManager::finalise_boundaries) - at each
 //!   scheduler boundary stage, after `apply_deferred_commands`. Routed only
 //!   to resources that own at least one of the channels in the boundary's
 //!   `finalised_channels` set.
-//! - [`end_tick`](ECSManager::end_tick) — after the final stage.
+//! - [`end_tick`](ECSManager::end_tick) - after the final stage.
 //!
 //! Systems access individual resources via `ECSReference::boundary::<R>(id)`.
 //!
@@ -76,7 +76,7 @@ use crate::engine::types::{BoundaryID, ChannelID};
 pub(super) type BoundarySlot = Arc<ResourceLock<dyn BoundaryResource>>;
 
 /// Internal owner of all registered boundary resources, plus the
-/// `ChannelID → BoundaryID` index used to route `finalise` calls.
+/// `ChannelID -> BoundaryID` index used to route `finalise` calls.
 pub(super) struct BoundaryRegistry {
     pub(super) slots: Vec<BoundarySlot>,
     pub(super) channel_owner: HashMap<ChannelID, BoundaryID>,
@@ -129,7 +129,7 @@ pub struct ECSManager {
     ///
     /// Hoisted out of [`ECSData`] so that callers which only need to clone
     /// the `Arc` (e.g., building a [`QueryBuilder`](crate::engine::query::QueryBuilder))
-    /// can do so without reaching through `UnsafeCell<ECSData>` — avoiding
+    /// can do so without reaching through `UnsafeCell<ECSData>` - avoiding
     /// the data race that would occur if another thread were concurrently
     /// inside [`ECSManager::data_mut_unchecked`].
     ///
@@ -142,7 +142,7 @@ pub struct ECSManager {
     /// Extension-owned boundary resources (message buffers, env boundary,
     /// future per-tick accumulators, ...).
     ///
-    /// The outer mutex protects only the slot vector itself — pushed at
+    /// The outer mutex protects only the slot vector itself - pushed at
     /// registration time. Individual resources are wrapped in their own
     /// [`parking_lot::RwLock`] inside an `Arc`, so handles obtained via
     /// [`ECSReference::boundary`](super::ecs_reference::ECSReference::boundary)
@@ -159,7 +159,7 @@ pub struct ECSManager {
 // 5. `data_ref_unchecked` requires a `PhaseRead` token.
 // 6. `boundary_resources` outer mutex serialises registration; each slot is
 //    a separately-locked `Arc<RwLock<dyn BoundaryResource>>`.
-// 7. `registry` is `Arc<RwLock<ComponentRegistry>>` — the `Arc` is `Sync`
+// 7. `registry` is `Arc<RwLock<ComponentRegistry>>` - the `Arc` is `Sync`
 //    and the `RwLock` serialises its own contents; the field is never
 //    reassigned after construction.
 unsafe impl Sync for ECSManager {}
@@ -209,7 +209,7 @@ impl ECSManager {
     /// Provides access to the registry so that callers such as
     /// [`ECSReference::query`] can build queries that resolve component IDs
     /// through the correct instance registry. Reads the top-level
-    /// `registry` field directly — no unsafe, no phase lock required.
+    /// `registry` field directly - no unsafe, no phase lock required.
     #[inline]
     pub(super) fn registry(&self) -> Arc<RwLock<ComponentRegistry>> {
         self.registry.clone()
@@ -239,7 +239,7 @@ impl ECSManager {
     ///
     /// If any step fails, the error is returned immediately and subsequent
     /// steps are skipped. `end_tick` is **not** run when an earlier step
-    /// fails — boundary resources should tolerate observing `begin_tick`
+    /// fails - boundary resources should tolerate observing `begin_tick`
     /// without a matching `end_tick` during error recovery.
     pub fn run(&self, scheduler: &mut Scheduler) -> ECSResult<()> {
         self.begin_tick()?;
@@ -319,9 +319,9 @@ impl ECSManager {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Boundary resource registry
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /// Registers a boundary resource and returns its stable [`BoundaryID`].
     ///
@@ -487,9 +487,9 @@ impl ECSManager {
         f(&mut ctx)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Phase lock helpers (unchanged from original)
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     #[inline]
     pub(crate) fn phase_read(&self) -> ECSResult<PhaseRead<'_>> {

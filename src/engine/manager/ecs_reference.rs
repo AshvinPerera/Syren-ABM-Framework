@@ -7,7 +7,7 @@
 //!
 //! [`ECSReference::boundary`] provides typed access to boundary resources
 //! registered on the `ECSManager`. The returned [`BoundaryHandle`] holds the
-//! boundary registry mutex for its lifetime — keep it short. Systems that
+//! boundary registry mutex for its lifetime - keep it short. Systems that
 //! acquire a `BoundaryHandle` must not be co-scheduled in the same parallel
 //! stage (they would deadlock on the mutex).
 //!

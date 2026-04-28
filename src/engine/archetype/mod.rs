@@ -39,8 +39,8 @@
 //!    all column locks have been released or within a scope where no column
 //!    locks are held.
 //!
-//! Acquiring `meta` while holding a column lock — or acquiring column locks
-//! out of `ComponentID` order — may produce lock-order inversion and deadlock
+//! Acquiring `meta` while holding a column lock - or acquiring column locks
+//! out of `ComponentID` order - may produce lock-order inversion and deadlock
 //! under concurrent access.
 //!
 //! ## Safety model
@@ -65,4 +65,4 @@ mod lifecycle;
 mod migration;
 
 pub use access::ChunkBorrow;
-pub use core::{Archetype, ArchetypeMatch};
+pub use core::Archetype;

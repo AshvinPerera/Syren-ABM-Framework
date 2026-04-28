@@ -53,6 +53,10 @@ name = "reduce"
 harness = false
 
 [[bench]]
+name = "review_findings"
+harness = false
+
+[[bench]]
 name = "gpu_startup"
 harness = false
 required-features = ["gpu"]

@@ -2,7 +2,7 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```text
 //! use std::sync::Arc;
 //! use abm_framework::environment::EnvironmentBuilder;
 //!
@@ -17,7 +17,7 @@
 //! the environment's channel IDs do not collide with those assigned to other
 //! subsystems:
 //!
-//! ```ignore
+//! ```text
 //! let mut alloc = ChannelAllocator::new();
 //! let env = EnvironmentBuilder::new()
 //!     .register::<f32>("interest_rate", 0.05)?
@@ -30,7 +30,7 @@
 //! The builder collects schema entries as a `Vec` in declaration order.
 //! If the same key is registered more than once with the same type, the last
 //! default value wins. Re-registering a key with a different type panics
-//! immediately — this catches configuration bugs at setup time rather than
+//! immediately - this catches configuration bugs at setup time rather than
 //! producing silent runtime type-mismatch errors later.
 //!
 //! Each key is assigned a monotonically increasing [`ChannelID`] during
@@ -131,7 +131,7 @@ impl EnvironmentBuilder {
     }
 
     /// Registers a typed key with a preassigned scheduler channel.
-    #[allow(dead_code)]
+    #[cfg(feature = "model")]
     pub(crate) fn register_with_channel<T>(
         mut self,
         key: impl Into<String>,

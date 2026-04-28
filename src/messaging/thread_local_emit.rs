@@ -2,12 +2,12 @@
 //!
 //! # Design
 //!
-//! Message **emission** happens on Rayon worker threads inside a parallel
-//! `for_each` invocation (Phase A).  Message **draining** happens in the
-//! boundary stage that immediately follows (Phase B), on the main thread.
-//! These two phases are **mutually exclusive** by scheduler design: the
-//! boundary stage cannot start until all workers from the previous parallel
-//! phase have returned.
+//! Message **emission** happens on scheduler worker threads inside a system
+//! stage (Phase A). Message **draining** happens in the boundary stage that
+//! finalises the produced message channel (Phase B), after GPU sync and
+//! deferred-command draining for that boundary. These two phases are
+//! mutually exclusive by scheduler design: the boundary stage cannot start
+//! until all systems from the previous stage have returned.
 //!
 //! This phase discipline allows us to use [`UnsafeCell`] without any locking
 //! during the emit path: a worker writes its own slot and no other thread
@@ -15,18 +15,21 @@
 //!
 //! # Worker registration
 //!
-//! When a Rayon worker first calls [`emit`] it registers itself in
-//! `GLOBAL_EMIT_REGISTRY` (protected by a `Mutex`, but only on the very first
-//! call per worker — effectively once-per-thread).  The drain path iterates
-//! this registry to collect all per-worker buffers.
+//! When a thread first calls [`emit`] for a message runtime it registers a
+//! slot container in `GLOBAL_EMIT_REGISTRY` (protected by a `Mutex`, but only
+//! on first use for that runtime/thread pair). The drain path iterates this
+//! registry to collect all registered buffers.
 //!
 //! # Memory layout
 //!
-//! Each worker has a [`WorkerEmitSlots`] containing one
+//! Each registered thread has a [`WorkerEmitSlots`] containing one
 //! `Option<AlignedBuffer>` slot per registered message type (indexed by
-//! [`MessageTypeID`]).  Slots are populated lazily on first emit; the drain
+//! [`MessageTypeID`]). Slots are populated lazily on first emit; the drain
 //! path calls [`AlignedBuffer::extend_from`] to merge them into the central
 //! per-type buffer owned by a [`MessageBufferSet`](crate::messaging::MessageBufferSet).
+//! The drain step does not clear worker slots. [`clear_for_tick`] runs from
+//! `MessageBufferSet::begin_tick` before the next stage can emit, clearing
+//! buffers in place so capacity can be reused safely.
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -50,11 +53,11 @@ pub(crate) fn alloc_runtime_id() -> MessageRuntimeID {
     MessageRuntimeID(NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-worker slot container
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Per-thread slot container
+// -----------------------------------------------------------------------------
 
-/// One set of emit buffers per Rayon worker thread.
+/// One set of emit buffers per registered emitting thread.
 ///
 /// `slots[i]` is the pending buffer for message type with index `i`.
 pub(crate) struct WorkerEmitSlots {
@@ -78,12 +81,12 @@ impl WorkerEmitSlots {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Global registry of all workers
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Global registry of all registered emitting threads
+// -----------------------------------------------------------------------------
 
-/// All workers that have registered themselves.  Guarded by a `Mutex` but
-/// only written to once per worker (first emit call on that thread).
+/// All threads that have registered emit slots. Guarded by a `Mutex` but only
+/// written once per runtime/thread pair.
 static GLOBAL_EMIT_REGISTRY: LazyLock<Mutex<HashMap<MessageRuntimeID, Vec<Arc<WorkerEmitSlots>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -93,9 +96,9 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Initialises the thread-local worker slots for the current thread.
+/// Initialises the thread-local emit slots for the current thread.
 ///
-/// Must be called once before the first `emit` on each worker thread.  In
+/// Must be called once before the first `emit` on each thread/runtime pair. In
 /// practice this is handled automatically by [`emit`]'s lazy initialisation.
 fn ensure_worker_registered_fallible(
     runtime_id: MessageRuntimeID,
@@ -117,15 +120,14 @@ fn ensure_worker_registered_fallible(
         Ok(slots)
     })
 }
-// ─────────────────────────────────────────────────────────────────────────────
-// Emit (Phase A — called from worker threads)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Emit (Phase A - called from worker threads)
+// -----------------------------------------------------------------------------
 
 /// Emits a message into the calling thread's local buffer.
 ///
-/// This function acquires **no locks** after the first call per thread
-/// (worker registration happens once).  It is intended to be called inside
-/// Rayon parallel sections.
+/// This function acquires **no locks** after the first call per runtime/thread
+/// pair. It is intended to be called from systems scheduled by the engine.
 ///
 /// # Panics
 ///
@@ -158,20 +160,20 @@ pub(crate) fn emit<M: Message>(
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Drain (Phase B — called from boundary stage, main thread only)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Drain (Phase B - called from boundary stage, main thread only)
+// -----------------------------------------------------------------------------
 
 /// Drains all per-worker buffers for `mtid` into `out`.
 ///
-/// Called once per message type per tick boundary, after all parallel emit
-/// phases have completed.  Resets each worker's slot to `None` so workers
-/// reallocate fresh buffers for the next tick (we keep capacity for reuse
-/// if we do `clear` instead — see [`drain_reuse`] below for that variant).
+/// Called once per message type per tick boundary, after all emit phases for
+/// that boundary have completed. It copies each registered thread's buffer
+/// into `out` and leaves the thread-local buffer intact; [`clear_for_tick`]
+/// clears those buffers before the next tick so allocation capacity is reused.
 ///
 /// # Safety contract
 ///
-/// No worker is actively emitting when this is called (Phase A is finished).
+/// No thread is actively emitting when this is called (Phase A is finished).
 pub(crate) fn drain_into(
     runtime_id: MessageRuntimeID,
     mtid: MessageTypeID,
@@ -195,14 +197,14 @@ pub(crate) fn drain_into(
     Ok(())
 }
 
-/// Clears all per-worker emit buffers for `mtid` without deallocating.
+/// Clears all per-thread emit buffers for `mtid` without deallocating.
 ///
 /// Called at the start of each tick (before workers begin emitting) so that
 /// stale messages from the previous tick are discarded.
 ///
 /// # Safety contract
 ///
-/// No worker is actively emitting when this is called.
+/// No thread is actively emitting when this is called.
 pub(crate) fn clear_for_tick(runtime_id: MessageRuntimeID, mtid: MessageTypeID) -> ECSResult<()> {
     let registry = GLOBAL_EMIT_REGISTRY
         .lock()
@@ -222,12 +224,3 @@ pub(crate) fn clear_for_tick(runtime_id: MessageRuntimeID, mtid: MessageTypeID) 
     Ok(())
 }
 
-/// Returns a snapshot of how many workers are currently registered.  Useful
-/// for diagnostics and tests.
-#[allow(dead_code)]
-pub(crate) fn registered_worker_count() -> usize {
-    GLOBAL_EMIT_REGISTRY
-        .lock()
-        .map(|g| g.values().map(Vec::len).sum())
-        .unwrap_or(0)
-}

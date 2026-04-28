@@ -5,7 +5,8 @@ use std::sync::{Arc, RwLock};
 
 use abm_framework::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentID, ComponentRegistry, ECSError,
-    ECSManager, ECSReference, ECSResult, GpuSystem, Signature, System, SystemBackend, SystemID,
+    ECSManager, ECSReference, ECSResult, GPUPod, GpuSystem, Signature, System, SystemBackend,
+    SystemID,
 };
 
 pub const AGENTS: usize = 1_000_000;
@@ -16,13 +17,15 @@ pub struct Energy {
     pub v: f32,
 }
 
+unsafe impl GPUPod for Energy {}
+
 /// Creates a shared, frozen component registry with Energy registered.
 /// Returns the registry handle and the Energy component ID.
 pub fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, ComponentID) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let energy_id = {
         let mut reg = registry.write().unwrap();
-        let id = reg.register::<Energy>().unwrap();
+        let id = reg.register_gpu::<Energy>().unwrap();
         reg.freeze();
         id
     };

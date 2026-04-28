@@ -139,7 +139,6 @@ pub unsafe trait GpuTargetedMessage: GpuMessage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum GpuKeyMetadata {
     None,
     Bucket {
@@ -215,7 +214,6 @@ pub struct GpuMessageHandle<M: GpuMessage> {
 }
 
 impl<M: GpuMessage> GpuMessageHandle<M> {
-    #[allow(dead_code)]
     pub(crate) fn new(
         cpu: MessageHandle<M>,
         specialisation: Specialisation,
@@ -807,7 +805,6 @@ pub struct GpuMessageResource {
 
 impl GpuMessageResource {
     /// Creates a resource shell for a registered GPU message.
-    #[allow(dead_code)]
     pub(crate) fn new(
         type_name: &'static str,
         item_size: usize,
@@ -1329,7 +1326,6 @@ fn emission_mode_code(mode: GpuEmissionMode) -> u32 {
     }
 }
 
-#[allow(dead_code)]
 fn validate_gpu_layout(
     type_name: &'static str,
     item_size: usize,

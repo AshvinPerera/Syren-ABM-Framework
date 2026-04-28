@@ -104,7 +104,7 @@ impl fmt::Display for AttributeInvariantViolation {
 /// prefer `Debug` which includes full structure.
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// fn push_component<T: 'static>(col: &mut Column, value: T) -> Result<(), AttributeError> {
 ///     // may become AttributeError::TypeMismatch via From<TypeMismatchError>
 ///     check_type::<T>(col)?;

@@ -6,10 +6,10 @@
 //!
 //! `QueryBuilder` supports two construction modes:
 //!
-//! 1. **Global registry** (default) — `QueryBuilder::new()` resolves component
+//! 1. **Global registry** (default) - `QueryBuilder::new()` resolves component
 //!    IDs through the global convenience functions.
 //!
-//! 2. **Instance-owned registry** — `QueryBuilder::with_registry(registry)`
+//! 2. **Instance-owned registry** - `QueryBuilder::with_registry(registry)`
 //!    accepts an `Arc<RwLock<ComponentRegistry>>` and resolves all component IDs
 //!    through that instance.
 
@@ -221,7 +221,7 @@ impl From<AccessKindForQuery> for crate::engine::error::AccessKind {
 // Registry source abstraction
 // ---------------------------------------------------------------------------
 
-/// Encapsulates the registry used to resolve `TypeId` → `ComponentID`.
+/// Encapsulates the registry used to resolve `TypeId` -> `ComponentID`.
 ///
 /// `Global` delegates to the process-wide convenience functions (original
 /// behaviour).  `Instance` holds an `Arc<RwLock<ComponentRegistry>>` for
@@ -273,7 +273,7 @@ pub struct QueryBuilder {
     /// Component IDs written by the query (in declaration order).
     writes: Vec<QueryComponent>,
 
-    /// Where to resolve `TypeId` → `ComponentID`.
+    /// Where to resolve `TypeId` -> `ComponentID`.
     registry_source: RegistrySource,
 }
 

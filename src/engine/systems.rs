@@ -84,7 +84,7 @@ use smallvec::SmallVec;
 ///
 /// Compact, deterministic, and cheap to intersect. Storage grows in 64-bit
 /// words as needed; empty sets allocate nothing inline beyond the `SmallVec`
-/// header. Two words inline covers channels 0–127, which is sufficient for
+/// header. Two words inline covers channels 0-127, which is sufficient for
 /// most simulations without heap allocation.
 ///
 /// `ChannelSet` is the channel analogue of [`Signature`] for components.
@@ -158,8 +158,8 @@ impl ChannelSet {
     /// Iterates all channel IDs present in this set, in ascending order.
     ///
     /// Channel IDs are `u32`; the `w * 64 + b` combination is guaranteed to
-    /// fit in `u32` as long as word index `w < (u32::MAX / 64)` ≈ 67M words
-    /// ≈ 4B channels. In practice `w` is bounded by the allocator's issued
+    /// fit in `u32` as long as word index `w < (u32::MAX / 64)` ~= 67M words
+    /// ~= 4B channels. In practice `w` is bounded by the allocator's issued
     /// count, so overflow is impossible under any realistic simulation. The
     /// `debug_assert!` documents and enforces this invariant during testing
     /// without costing anything in release.
@@ -225,7 +225,7 @@ impl AccessSets {
     ///
     /// 1. **Component write/write**: both systems write the same component.
     /// 2. **Component write/read**: one writes a component the other reads.
-    /// 3. **Channel ordering**: one system produces a channel the other consumes —
+    /// 3. **Channel ordering**: one system produces a channel the other consumes -
     ///    they must be in strictly ordered stages, so same-stage placement is
     ///    forbidden.
     ///
@@ -247,7 +247,7 @@ impl AccessSets {
         false
     }
 
-    /// Component-only conflict check (W∩W, W∩R, R∩W).
+    /// Component-only conflict check (W intersection W, W intersection R, R intersection W).
     ///
     /// Extracted so `conflicts_with` can chain channel checks without
     /// duplicating the bitset loop.
@@ -268,13 +268,13 @@ impl AccessSets {
         {
             if (a_w & b_w) != 0 {
                 return true;
-            } // W∩W
+            } // W intersection W
             if (a_w & b_r) != 0 {
                 return true;
-            } // W∩R
+            } // W intersection R
             if (a_r & b_w) != 0 {
                 return true;
-            } // R∩W
+            } // R intersection W
         }
         false
     }
@@ -299,10 +299,10 @@ impl AccessSets {
     /// A system's own access set must not alias itself. Two self-aliases
     /// would cause the scheduler to silently mis-pack the system:
     ///
-    /// 1. **Component read/write self-alias** — the same component appearing
+    /// 1. **Component read/write self-alias** - the same component appearing
     ///    in both `read` and `write`. Declaring this weakens the write lock
     ///    contract at iteration time and conflates conflict semantics.
-    /// 2. **Channel produce/consume self-alias** — the same channel in both
+    /// 2. **Channel produce/consume self-alias** - the same channel in both
     ///    `produces` and `consumes`. The stage packer would place the system
     ///    in a stage where it both produces and consumes the channel, so the
     ///    consume would observe the channel before its own produce had been

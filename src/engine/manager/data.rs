@@ -13,17 +13,17 @@
 //!
 //! # Responsibilities
 //!
-//! - **Archetype management** — archetypes are created lazily and looked up by
+//! - **Archetype management** - archetypes are created lazily and looked up by
 //!   component signature via `signature_map`. Each archetype is created with an
 //!   explicit `&ComponentRegistry` rather than calling global registry functions,
 //!   which enables multi-world support.
-//! - **Entity placement** — entity locations `(archetype, chunk, row)` are tracked
+//! - **Entity placement** - entity locations `(archetype, chunk, row)` are tracked
 //!   through [`EntityShards`] and kept consistent with archetype storage.
-//! - **Structural mutations** — adding or removing a component migrates the entity's
+//! - **Structural mutations** - adding or removing a component migrates the entity's
 //!   row to a new archetype whose signature reflects the change.
-//! - **Deferred commands** — [`ECSData::apply_deferred_commands`] flushes a batch of
+//! - **Deferred commands** - [`ECSData::apply_deferred_commands`] flushes a batch of
 //!   [`Command`]s (spawn, despawn, add, remove) as a single synchronisation point.
-//! - **Parallel iteration** — [`ECSData::for_each_abstraction_unchecked`] and
+//! - **Parallel iteration** - [`ECSData::for_each_abstraction_unchecked`] and
 //!   [`ECSData::reduce_abstraction_unchecked`] execute chunk-oriented queries across
 //!   matching archetypes using Rayon, with per-column RwLock guards enforcing
 //!   read/write separation. Column locks are acquired in ascending [`ComponentID`]
@@ -34,7 +34,7 @@
 //!
 //! When the `gpu` feature is enabled, `ECSData` additionally maintains:
 //! - A [`DirtyChunks`] tracker that records which component chunks were written
-//!   during a query, enabling selective CPU→GPU uploads.
+//!   during a query, enabling selective CPU->GPU uploads.
 //! - A [`GPUResourceRegistry`] for world-owned GPU buffers and bind-group resources.
 //!
 //! # Safety contract
@@ -74,6 +74,8 @@ use crate::gpu::{GPUResource, GPUResourceRegistry, GpuWorldState};
 pub struct ECSData {
     archetypes: Vec<Archetype>,
     signature_map: HashMap<[u64; SIGNATURE_SIZE], ArchetypeID>,
+    archetype_generation: u64,
+    query_match_cache: RwLock<HashMap<QueryMatchKey, QueryMatchEntry>>,
     shards: EntityShards,
     next_spawn_shard: ShardID,
     registry: Arc<RwLock<ComponentRegistry>>,
@@ -86,6 +88,29 @@ pub struct ECSData {
 
     #[cfg(feature = "gpu")]
     gpu_world_state: GpuWorldState,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct QueryMatchKey {
+    read: [u64; SIGNATURE_SIZE],
+    write: [u64; SIGNATURE_SIZE],
+    without: [u64; SIGNATURE_SIZE],
+}
+
+impl QueryMatchKey {
+    fn from_signature(signature: &crate::engine::query::QuerySignature) -> Self {
+        Self {
+            read: signature.read.components,
+            write: signature.write.components,
+            without: signature.without.components,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QueryMatchEntry {
+    generation: u64,
+    archetype_ids: Vec<ArchetypeID>,
 }
 
 /// Result of a deferred command drain that stopped before applying the whole batch.
@@ -109,6 +134,8 @@ impl ECSData {
         Self {
             archetypes: Vec::new(),
             signature_map: HashMap::new(),
+            archetype_generation: 0,
+            query_match_cache: RwLock::new(HashMap::new()),
             shards,
             next_spawn_shard: 0,
             registry,
@@ -145,7 +172,7 @@ impl ECSData {
     /// Returns a reference to the dirty chunks tracker.
     ///
     /// The dirty chunks tracker records which component chunks were modified
-    /// during query execution, enabling selective CPU→GPU uploads. This is
+    /// during query execution, enabling selective CPU->GPU uploads. This is
     /// used by the GPU synchronisation layer to minimise data transfer
     /// between host and device.
     pub fn gpu_dirty_chunks(&self) -> &DirtyChunks {
@@ -203,8 +230,61 @@ impl ECSData {
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
         let arch = Archetype::new(id, *signature, &registry)?;
         self.archetypes.push(arch);
+        drop(registry);
+        self.invalidate_query_match_cache();
 
         Ok(id)
+    }
+
+    fn invalidate_query_match_cache(&mut self) {
+        self.archetype_generation = self.archetype_generation.wrapping_add(1);
+        if let Ok(cache) = self.query_match_cache.get_mut() {
+            cache.clear();
+        }
+    }
+
+    fn matching_archetype_ids(
+        &self,
+        query: &crate::engine::query::QuerySignature,
+    ) -> Result<Vec<ArchetypeID>, ExecutionError> {
+        let key = QueryMatchKey::from_signature(query);
+        let generation = self.archetype_generation;
+
+        {
+            let cache = self
+                .query_match_cache
+                .read()
+                .map_err(|_| ExecutionError::LockPoisoned {
+                    what: "query match cache",
+                })?;
+            if let Some(entry) = cache.get(&key) {
+                if entry.generation == generation {
+                    return Ok(entry.archetype_ids.clone());
+                }
+            }
+        }
+
+        let mut archetype_ids = Vec::new();
+        for archetype in &self.archetypes {
+            if query.requires_all(archetype.signature()) {
+                archetype_ids.push(archetype.archetype_id());
+            }
+        }
+
+        let mut cache =
+            self.query_match_cache
+                .write()
+                .map_err(|_| ExecutionError::LockPoisoned {
+                    what: "query match cache",
+                })?;
+        cache.insert(
+            key,
+            QueryMatchEntry {
+                generation,
+                archetype_ids: archetype_ids.clone(),
+            },
+        );
+        Ok(archetype_ids)
     }
 
     #[inline]
@@ -396,13 +476,13 @@ impl ECSData {
     ///
     /// ## Errors
     ///
-    /// - [`ExecutionError::MissingComponent`] — the entity's archetype does not
+    /// - [`ExecutionError::MissingComponent`] - the entity's archetype does not
     ///   contain `component_id`.
-    /// - [`ExecutionError::InternalExecutionError`] — the dynamic `TypeId` of
+    /// - [`ExecutionError::InternalExecutionError`] - the dynamic `TypeId` of
     ///   `value` does not match the column's registered element type, or the
     ///   entity's row is out of range.
-    /// - [`SpawnError::StaleEntity`] — the entity no longer exists.
-    /// - [`ExecutionError::LockPoisoned`] — the component column lock is poisoned.
+    /// - [`SpawnError::StaleEntity`] - the entity no longer exists.
+    /// - [`ExecutionError::LockPoisoned`] - the component column lock is poisoned.
     ///
     /// ## Safety / exclusivity
     ///
@@ -728,10 +808,12 @@ impl ECSData {
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
     ) -> Result<(), ExecutionError> {
+        let matches = self.matching_archetype_ids(query.signature())?;
         #[cfg(feature = "gpu")]
         {
             super::query_executor::for_each_unchecked(
                 &self.archetypes,
+                matches,
                 query,
                 &self.gpu_dirty_chunks,
                 crate::engine::activation::current_activation_context(),
@@ -743,6 +825,7 @@ impl ECSData {
         {
             super::query_executor::for_each_unchecked(
                 &self.archetypes,
+                matches,
                 query,
                 crate::engine::activation::current_activation_context(),
                 f,
@@ -764,10 +847,14 @@ impl ECSData {
         query: BuiltQuery,
         f: impl Fn(&[&[u8]], &mut [&mut [u8]]) -> crate::engine::error::ECSResult<()> + Send + Sync,
     ) -> crate::engine::error::ECSResult<()> {
+        let matches = self
+            .matching_archetype_ids(query.signature())
+            .map_err(ECSError::from)?;
         #[cfg(feature = "gpu")]
         {
             super::query_executor::for_each_fallible_unchecked(
                 &self.archetypes,
+                matches,
                 query,
                 &self.gpu_dirty_chunks,
                 crate::engine::activation::current_activation_context(),
@@ -779,6 +866,7 @@ impl ECSData {
         {
             super::query_executor::for_each_fallible_unchecked(
                 &self.archetypes,
+                matches,
                 query,
                 crate::engine::activation::current_activation_context(),
                 f,
@@ -796,7 +884,15 @@ impl ECSData {
     where
         R: Send + 'static,
     {
-        super::query_executor::reduce_unchecked(&self.archetypes, query, init, fold_chunk, combine)
+        let matches = self.matching_archetype_ids(query.signature())?;
+        super::query_executor::reduce_unchecked(
+            &self.archetypes,
+            matches,
+            query,
+            init,
+            fold_chunk,
+            combine,
+        )
     }
 
     #[cfg(feature = "gpu")]
@@ -817,7 +913,7 @@ impl ECSData {
     /// GPU systems and queries.
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// let buffer = world.create_buffer(&device, &descriptor);
     /// let resource_id = ecs_data.register_gpu_resource(buffer);
     /// ```

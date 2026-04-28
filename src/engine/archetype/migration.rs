@@ -1,28 +1,27 @@
 //! Entity migration between archetypes.
 //!
-//! This module implements [`Archetype::move_row_to_archetype`], the core operation
-//! that transfers an entity's component data when its signature changes — i.e. when
-//! components are added to or removed from a live entity.
+//! This module implements [`Archetype::move_row_to_archetype`], the single
+//! production migration surface used when an entity's signature changes - i.e.
+//! when components are added to or removed from a live entity.
 //!
 //! # Overview
 //!
 //! Archetypes store component data in dense, column-oriented storage. When an
 //! entity's component set changes, its data cannot remain in the same archetype;
 //! it must be relocated to the archetype whose signature matches the new set.
-//! This module orchestrates that relocation safely and atomically across four
-//! ordered phases:
+//! This module orchestrates that relocation through one transactional path:
 //!
-//! 1. **Signature analysis** — bit-level intersection of source and destination
+//! 1. **Signature analysis** - bit-level intersection of source and destination
 //!    signatures to classify each component as shared, source-only, or
 //!    destination-only.
-//! 2. **Shared component transfer** — component values present in both archetypes
-//!    are moved into the destination row via [`Archetype::move_row_across_shared_components`].
-//! 3. **Destination-only insertion** — caller-supplied values for newly added
-//!    components are written into the same destination row via
-//!    [`Archetype::add_row_in_components_at_destination`].
-//! 4. **Source-only removal** — components dropped from the entity are
-//!    swap-removed from the source archetype via
-//!    [`Archetype::remove_row_in_components_at_source`].
+//! 2. **Preflight** - validate source metadata, destination append position,
+//!    expected swap-remove position, and all required component columns before
+//!    any storage is mutated.
+//! 3. **Storage movement** - move shared values, append destination-only
+//!    values, and remove source-only values while recording enough undo data
+//!    to roll back any storage-phase failure.
+//! 4. **Metadata commit** - after all column locks are dropped, publish the new
+//!    entity locations and update archetype lengths.
 //!
 //! Entity metadata and global location tracking ([`EntityShards`]) are reconciled
 //! after all component data has moved, including any entity displaced by a
@@ -32,8 +31,12 @@
 //!
 //! - All component columns remain row-aligned throughout and after a migration.
 //! - Both source and destination archetypes remain densely packed at all times.
-//! - [`EntityShards`] location data is always consistent with component storage
-//!   on success; a returned error leaves the caller responsible for recovery.
+//! - [`EntityShards`] location data is consistent with component storage after
+//!   a successful migration.
+//! - Storage-phase errors are rolled back before returning. Metadata commit
+//!   errors can only occur after storage has moved; preflight validates the
+//!   metadata shape up front to make that path an internal failure case rather
+//!   than a recoverable migration branch.
 //!
 //! # Locking
 //!
@@ -100,7 +103,7 @@ impl Archetype {
     /// (a) The caller provides `&mut self` (source) and `&mut destination`,
     ///     which are guaranteed to be distinct by `get_archetype_pair_mut`.
     ///     Therefore, the two `LockedAttribute` references always point to
-    ///     different `RwLock` instances — there is no self-deadlock risk.
+    ///     different `RwLock` instances - there is no self-deadlock risk.
     ///
     /// (b) Structural mutations are serialized by phase discipline: this
     ///     function is only reachable during the exclusive write phase.
@@ -111,6 +114,7 @@ impl Archetype {
     ///     ensures ascending `ComponentID` order when iterated, matching
     ///     the global lock-ordering contract.
 
+    #[cfg(test)]
     pub fn move_row_across_shared_components(
         &mut self,
         destination: &mut Archetype,
@@ -186,6 +190,7 @@ impl Archetype {
     /// - `PushFailed` if backend storage insertion fails.
     /// - `RowMisalignment` if component columns disagree on row placement.
 
+    #[cfg(test)]
     pub fn add_row_in_components_at_destination(
         &mut self,
         destination: &mut Archetype,
@@ -241,6 +246,7 @@ impl Archetype {
     /// - `SwapRemoveError` if storage removal fails.
     /// - `InconsistentSwapInfo` if component columns disagree on swap behavior.
 
+    #[cfg(test)]
     pub fn remove_row_in_components_at_source(
         &mut self,
         source_position: (ChunkID, RowID),

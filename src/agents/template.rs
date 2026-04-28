@@ -128,7 +128,7 @@ impl AgentTemplate {
     }
 }
 
-// Manual Debug — DefaultFactory is not Debug.
+// Manual Debug - DefaultFactory is not Debug.
 impl std::fmt::Debug for AgentTemplate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentTemplate")
@@ -138,7 +138,7 @@ impl std::fmt::Debug for AgentTemplate {
     }
 }
 
-// ── Builder ──────────────────────────────────────────────────────────────────
+// -- Builder ------------------------------------------------------------------
 
 /// Fluent constructor for [`AgentTemplate`].
 ///
@@ -238,9 +238,10 @@ mod tests {
     #[derive(Default, Clone)]
     struct Health(f32);
 
-    #[allow(dead_code)]
     #[derive(Default, Clone)]
-    struct Wealth(f32);
+    struct Wealth {
+        _value: f32,
+    }
 
     #[test]
     fn builder_registers_components() {

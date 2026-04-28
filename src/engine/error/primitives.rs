@@ -31,7 +31,7 @@ use crate::engine::types::{ChunkID, RowID, ShardID};
 /// * `capacity` - The current upper bound that prevented the operation.
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// if requested > shard.capacity() {
 ///     return Err(CapacityError { entities_needed: requested as u64, capacity: shard.capacity() as u64 }.into());
 /// }
@@ -66,7 +66,7 @@ impl std::error::Error for CapacityError {}
 /// * `max_index` - The maximum valid shard index (inclusive).
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// let max = shards.len().saturating_sub(1) as u32;
 /// if idx > max {
 ///     return Err(ShardBoundsError { index: idx, max_index: max }.into());
@@ -94,13 +94,13 @@ impl fmt::Display for ShardBoundsError {
 
 impl std::error::Error for ShardBoundsError {}
 
-/// Returned when an `Entity` handle is no longer valid — typically because it
+/// Returned when an `Entity` handle is no longer valid - typically because it
 /// was despawned or its generation/version no longer matches live storage.
 ///
 /// Use this to prevent use-after-free style logic errors at the API boundary.
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// if !entities.is_live(entity) {
 ///     return Err(StaleEntityError.into());
 /// }
@@ -173,7 +173,7 @@ impl std::error::Error for PositionOutOfBoundsError {}
 ///   [`std::any::type_name`].
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// if actual_type != expected_type {
 ///     return Err(TypeMismatchError {
 ///         expected: expected_type,

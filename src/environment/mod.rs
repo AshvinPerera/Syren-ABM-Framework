@@ -18,7 +18,7 @@
 //!
 //! ## Quick-start
 //!
-//! ```ignore
+//! ```text
 //! use std::sync::Arc;
 //! use abm_framework::environment::{Environment, EnvironmentBuilder, EnvironmentSystem};
 //! use abm_framework::{AccessSets, Scheduler, Stage};
@@ -51,7 +51,7 @@
 //! When `--features gpu` is also active, any subset of `Pod` parameters can be
 //! packed into a `wgpu` uniform buffer:
 //!
-//! ```ignore
+//! ```text
 //! use abm_framework::environment::uniform::EnvUniformBuffer;
 //!
 //! let ubuf = EnvUniformBuffer::builder(Arc::clone(&env))
@@ -62,7 +62,7 @@
 //!
 //! ## Design notes
 //!
-//! * Schema is **frozen** after `EnvironmentBuilder::build()` — no new keys.
+//! * Schema is **frozen** after `EnvironmentBuilder::build()` - no new keys.
 //! * Values can be updated at any point via `Environment::set`.
 //! * Thread-safe: each key has its own `RwLock`.
 //! * Dirty tracking powers GPU upload without full buffer re-scan.

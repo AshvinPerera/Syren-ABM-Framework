@@ -9,7 +9,7 @@
 //! [`Scheduler`](crate::engine::scheduler::Scheduler) as a normal system.
 //!
 //! The environment handle is captured inside the struct (as `Arc<Environment>`)
-//! and passed by value to the closure on each tick. This is cheap — `Arc::clone`
+//! and passed by value to the closure on each tick. This is cheap - `Arc::clone`
 //! bumps an atomic counter.
 //!
 //! ## System names
@@ -17,7 +17,7 @@
 //! The [`System`] trait declares `fn name(&self) -> &str`, allowing
 //! implementors to return a borrow from `&self`. [`EnvironmentSystem`] stores
 //! its name as an owned [`String`] and returns it by reference. Dynamic names
-//! generated from configuration are supported with no leak — every system
+//! generated from configuration are supported with no leak - every system
 //! drops its name when the system itself is dropped.
 
 use std::sync::Arc;
@@ -29,9 +29,9 @@ use crate::engine::types::SystemID;
 
 use super::store::Environment;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // EnvironmentSystem
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A [`System`] backed by a closure that receives the shared [`Environment`].
 ///
@@ -40,7 +40,7 @@ use super::store::Environment;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// let sys = EnvironmentSystem::new(
 ///     0,
 ///     "UpdateTaxRate",
@@ -165,7 +165,7 @@ mod tests {
     ///
     /// Note: `System::run` requires a live `ECSReference`, which is not
     /// available in unit tests. This test validates that the `Arc` is
-    /// correctly shared — end-to-end closure execution is verified by
+    /// correctly shared - end-to-end closure execution is verified by
     /// integration tests that run through a full `ECSManager` tick.
     #[test]
     fn system_captures_shared_env() {
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(env.get::<i32>("val").unwrap(), 99);
     }
 
-    /// Verify that two systems with the same name don't conflict —
+    /// Verify that two systems with the same name don't conflict -
     /// each owns its own name allocation.
     #[test]
     fn duplicate_names_are_independent() {
@@ -235,7 +235,7 @@ mod tests {
 
         assert_eq!(a.name(), "SharedName");
         assert_eq!(b.name(), "SharedName");
-        // Each system holds its own owned String — pointers are distinct.
+        // Each system holds its own owned String - pointers are distinct.
         assert!(!std::ptr::eq(a.name().as_ptr(), b.name().as_ptr()));
     }
 }

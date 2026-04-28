@@ -15,7 +15,7 @@
 //!
 //! `Sequential` is the default and incurs no cost. The shuffle variants use
 //! [`tl_rand_u64`](crate::engine::random::tl_rand_u64) so that each worker
-//! thread has an independent, deterministically seeded RNG — results are
+//! thread has an independent, deterministically seeded RNG - results are
 //! reproducible given a fixed global seed set via
 //! [`Scheduler::seed`](crate::engine::scheduler::Scheduler::seed).
 //!

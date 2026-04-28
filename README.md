@@ -1,6 +1,6 @@
 # Syren ABM Framework
 
-Syren is a high-performance, data-oriented Agent-Based Modeling (ABM) framework built on a custom archetype-based Entity–Component System (ECS) in Rust. It is designed for large-scale agent-based economic models with millions of agents, employing archetype-based Structure-of-Arrays storage for cache-efficient data layout, deterministic phase-based scheduling for reproducible simulation runs, and an optional GPU compute backend via `wgpu`.
+Syren is a high-performance, data-oriented Agent-Based Modeling (ABM) framework built on a custom archetype-based Entity-Component System (ECS) in Rust. It is designed for large-scale agent-based economic models with millions of agents, employing archetype-based Structure-of-Arrays storage for cache-efficient data layout, deterministic phase-based scheduling for reproducible simulation runs, and an optional GPU compute backend via `wgpu`.
 
 The library targets economists, social scientists, and researchers who need a scalable simulation toolkit for agent-based modeling (especially economic systems). The crate builds as an `rlib`.
 
@@ -25,9 +25,15 @@ The framework has no additional OS requirements beyond standard Rust support. It
 
 | Flag | Description |
 |---|---|
-| `gpu` | Enables the GPU compute backend via `wgpu` (Vulkan, Metal, DX12, WebGPU) |
-| `profiling` | Enables the Chrome Trace flame-graph profiler (zero overhead when disabled) |
-| `gpu_profiling` | Enables both `gpu` and `profiling` together |
+| `model` | Enables the high-level model composition API, agent registry integration, environments, sub-schedulers, and isolated nested models |
+| `environment` | Enables typed simulation-wide parameter stores and environment boundary dirty-channel housekeeping |
+| `messaging` | Enables typed per-tick message channels with brute-force, bucket, spatial, and targeted finalisation |
+| `gpu` | Enables the GPU compute backend via `wgpu` with per-archetype dispatch and explicit CPU/GPU synchronization |
+| `messaging_gpu` | Enables GPU-backed message resources and GPU finalisation paths; also enables `messaging` and `gpu` |
+| `agents` | Enables agent templates, spawning helpers, lifecycle hooks, and single-agent handles |
+| `profiling` | Enables the Chrome Trace profiler |
+| `gpu_profiling` | Enables both `gpu` and `profiling` |
+| `all` | Enables every optional subsystem above |
 
 ---
 
@@ -35,9 +41,9 @@ The framework has no additional OS requirements beyond standard Rust support. It
 
 Basic usage involves creating a `ComponentRegistry`, registering your component types, building an `ECSManager`, spawning entities, and running systems through a `Scheduler`. The repository includes two example simulations.
 
-**`toy_economy_test.rs`** – a simple toy economy with households and firms demonstrating core ECS workflow.
+**`toy_economy_test.rs`** - a simple toy economy with households and firms demonstrating core ECS workflow.
 
-**`sugarscape_basic.rs`** – a full Sugarscape model with a 600×600 grid, supporting both a CPU path and an optional GPU path (enabled with `--features gpu`).
+**`sugarscape_basic.rs`** - a full Sugarscape model with a 600x600 grid, supporting both a CPU path and an optional GPU path (enabled with `--features gpu`).
 
 Both examples are implemented as integration tests and can be run via `cargo test`.
 
@@ -107,7 +113,7 @@ impl GpuSystem for MetabolismSystem {
 }
 ```
 
-GPU execution follows a four-stage pipeline: upload component columns to GPU buffers, dispatch compute shaders per archetype, synchronize, then download mutated data back to ECS storage. All GPU execution occurs inside an exclusive ECS phase, preventing concurrent CPU iteration or structural mutation.
+GPU execution follows explicit sync points: upload dirty component/resource data, dispatch compute shaders per matching archetype, wait for the submitted work at the GPU boundary, then download mutated data back to ECS storage before CPU consumers run. All GPU execution occurs inside an exclusive ECS phase, preventing concurrent CPU iteration or structural mutation.
 
 ### Profiling
 
@@ -130,9 +136,12 @@ abm_framework::shutdown();
 - Explicit read/write access declarations enforced at runtime
 - Non-overlapping write guarantees
 - Deferred structural mutations (spawn, despawn, component moves)
+- Typed environments with dirty-channel finalisation
+- Typed per-tick messaging with channel-aware scheduler boundaries
+- High-level model composition with sub-schedulers and nested child model bridges
 - Optional GPU compute backend via `wgpu` (Vulkan, Metal, DX12, WebGPU)
 - Optional Chrome Trace profiler (zero overhead when disabled)
-- Per-archetype GPU dispatch with explicit CPU↔GPU data mirroring
+- Per-archetype GPU dispatch with explicit CPU<->GPU data mirroring
 - GPU resource registry for shared grid/buffer data across GPU systems
 - Instance-owned component registries (multiple independent ECS worlds supported)
 
@@ -143,7 +152,7 @@ abm_framework::shutdown();
 | Simulation | File | Description |
 |---|---|---|
 | Toy Economy | `tests/toy_economy_test.rs` | Households and firms; demonstrates core ECS API |
-| Sugarscape | `tests/sugarscape_basic.rs` | 600×600 grid; CPU and GPU execution paths |
+| Sugarscape | `tests/sugarscape_basic.rs` | 600x600 grid; CPU and GPU execution paths |
 
 Run with:
 
@@ -163,11 +172,17 @@ cargo test --features gpu_profiling --test sugarscape_basic -- --nocapture
 
 ---
 
-## Future Development
+## Validation And Benchmarks
 
-- Scripting language for quick simulation design
-- Message passing
-- Social networks
+The current validation work focuses on keeping documentation, doctests, GPU behavior, and hot-path measurements in sync with the implemented architecture.
+
+```bash
+cargo test --doc --features all
+cargo bench --no-run --features all
+cargo bench --features all
+```
+
+Benchmark coverage includes query matching, scheduler packing, environment dirty tracking, messaging finalisation, GPU readback, GPU bind-group creation, and GPU dispatch polling. Recorded machine-specific results live in `BENCHMARKS.md`.
 
 ---
 

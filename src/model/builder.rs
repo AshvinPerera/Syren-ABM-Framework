@@ -39,8 +39,16 @@ use super::nested::NestedModel;
 use super::sub_scheduler::SubScheduler;
 
 /// Fluent builder for top-level models.
+///
+/// Model-owned boundary resources are registered in a private deterministic
+/// order. Public pre-build helpers such as
+/// [`environment_boundary_id`](Self::environment_boundary_id) and
+/// [`message_boundary_id`](Self::message_boundary_id) are derived from that
+/// registry, and `build` asserts that the IDs returned by `ECSManager` match
+/// the planned order.
 pub struct ModelBuilder {
     channel_allocator: ChannelAllocator,
+    model_boundaries: ModelBoundaryRegistry,
     component_registry: Option<Arc<RwLock<ComponentRegistry>>>,
     shards: Option<EntityShards>,
     scheduler: Scheduler,
@@ -54,6 +62,35 @@ pub struct ModelBuilder {
     gpu_message_resources: Vec<PendingGpuMessageResource>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelBoundaryKind {
+    Environment,
+    #[cfg(feature = "messaging")]
+    Messages,
+}
+
+#[derive(Clone, Debug)]
+struct ModelBoundaryRegistry {
+    order: Vec<ModelBoundaryKind>,
+}
+
+impl ModelBoundaryRegistry {
+    fn new() -> Self {
+        #[cfg(feature = "messaging")]
+        let order = vec![ModelBoundaryKind::Environment, ModelBoundaryKind::Messages];
+        #[cfg(not(feature = "messaging"))]
+        let order = vec![ModelBoundaryKind::Environment];
+        Self { order }
+    }
+
+    fn id_of(&self, kind: ModelBoundaryKind) -> BoundaryID {
+        self.order
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .expect("model boundary kind must be registered") as BoundaryID
+    }
+}
+
 #[cfg(feature = "messaging_gpu")]
 struct PendingGpuMessageResource {
     resource_id: GPUResourceID,
@@ -65,6 +102,7 @@ impl ModelBuilder {
     pub fn new() -> Self {
         Self {
             channel_allocator: ChannelAllocator::new(),
+            model_boundaries: ModelBoundaryRegistry::new(),
             component_registry: None,
             shards: None,
             scheduler: Scheduler::new(),
@@ -99,7 +137,7 @@ impl ModelBuilder {
 
     /// Boundary ID that will hold the model environment after build.
     pub fn environment_boundary_id(&self) -> BoundaryID {
-        0
+        self.model_boundaries.id_of(ModelBoundaryKind::Environment)
     }
 
     /// Registers an environment key and returns its typed scheduler handle.
@@ -145,7 +183,7 @@ impl ModelBuilder {
     /// Boundary ID that will hold model messages after build.
     #[cfg(feature = "messaging")]
     pub fn message_boundary_id(&self) -> BoundaryID {
-        1
+        self.model_boundaries.id_of(ModelBoundaryKind::Messages)
     }
 
     /// Registers a brute-force message.
@@ -452,6 +490,10 @@ impl ModelBuilder {
 
         let environment_boundary_id =
             ecs.register_boundary(EnvironmentBoundary::new(Arc::clone(&environment)))?;
+        debug_assert_eq!(
+            environment_boundary_id,
+            self.model_boundaries.id_of(ModelBoundaryKind::Environment)
+        );
 
         #[cfg(feature = "messaging")]
         let (message_boundary_id, message_registry) = {
@@ -459,6 +501,10 @@ impl ModelBuilder {
             let message_registry = Arc::new(self.message_registry);
             let message_boundary_id =
                 ecs.register_boundary(MessageBufferSet::new(Arc::clone(&message_registry))?)?;
+            debug_assert_eq!(
+                message_boundary_id,
+                self.model_boundaries.id_of(ModelBoundaryKind::Messages)
+            );
             (message_boundary_id, message_registry)
         };
 
@@ -587,6 +633,27 @@ mod tests {
     }
 
     #[test]
+    fn environment_boundary_id_is_registry_derived_and_matches_model() {
+        let builder = ModelBuilder::new();
+        let expected = builder.environment_boundary_id();
+        let model = builder.build().unwrap();
+        assert_eq!(expected, 0);
+        assert_eq!(model.environment_boundary_id(), expected);
+    }
+
+    #[cfg(feature = "messaging")]
+    #[test]
+    fn message_boundary_id_is_registry_derived_and_matches_model() {
+        let builder = ModelBuilder::new();
+        let env_id = builder.environment_boundary_id();
+        let message_id = builder.message_boundary_id();
+        assert_ne!(env_id, message_id);
+        let model = builder.build().unwrap();
+        assert_eq!(model.environment_boundary_id(), env_id);
+        assert_eq!(model.message_boundary_id(), message_id);
+    }
+
+    #[test]
     fn sub_scheduler_runs_before_root() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut sub = SubScheduler::new("sub");
@@ -635,8 +702,9 @@ mod tests {
     #[test]
     fn tagged_agent_spawn_hooks_fire_at_scheduler_boundary() {
         #[derive(Default)]
-        #[allow(dead_code)]
-        struct Marker(u8);
+        struct Marker {
+            _value: u8,
+        }
         let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
         let marker_id = registry.write().unwrap().register::<Marker>().unwrap();
 
@@ -674,8 +742,9 @@ mod tests {
     #[test]
     fn tagged_agent_despawn_hooks_fire_at_scheduler_boundary() {
         #[derive(Default)]
-        #[allow(dead_code)]
-        struct Marker(u8);
+        struct Marker {
+            _value: u8,
+        }
         let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
         let marker_id = registry.write().unwrap().register::<Marker>().unwrap();
 

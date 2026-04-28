@@ -34,11 +34,11 @@ pub(crate) struct AlignedBuffer {
     align: usize,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Safety: AlignedBuffer owns its allocation.  No aliased access is created
 // internally; callers in the messaging subsystem ensure read/write phases are
 // exclusive (see `thread_local_emit` phase-discipline notes).
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 unsafe impl Send for AlignedBuffer {}
 // SAFETY: The buffer is only read via shared references during the consumption
 // phase, when no writers are active (scheduler enforces phase ordering).
@@ -150,7 +150,7 @@ impl AlignedBuffer {
     #[inline]
     pub(crate) unsafe fn as_ptr_at(&self, index: usize) -> *const u8 {
         debug_assert!(index < self.len);
-        // SAFETY: index < len ≤ cap, so this offset is within the allocation.
+        // SAFETY: index < len <= cap, so this offset is within the allocation.
         unsafe { self.ptr.as_ptr().add(index * self.item_size) }
     }
 
@@ -232,9 +232,9 @@ impl AlignedBuffer {
         self.len += items;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // Allocation helpers
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
 
     /// Doubles capacity (or sets to 4 if currently 0).
     fn grow(&mut self) {

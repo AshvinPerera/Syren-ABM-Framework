@@ -1,7 +1,7 @@
 //! Error types for ECS storage, spawning, migration, and execution.
 //!
 //! This module defines **focused, composable error types** used across the
-//! entity–component system, covering both **structural failures** (such as
+//! entity-component system, covering both **structural failures** (such as
 //! storage bounds or capacity limits) and **runtime execution violations**
 //! (such as borrow conflicts or invalid query access).
 //!
@@ -60,15 +60,15 @@
 //! ## Examples
 //!
 //! Converting a low-level storage failure into a spawn-level error:
-//! ```ignore
+//! ```text
 //! fn spawn_one(world: &mut World, components: Components) -> Result<Entity, SpawnError> {
-//!     world.storage.push_components(components)?; // AttributeError → SpawnError
+//!     world.storage.push_components(components)?; // AttributeError -> SpawnError
 //!     Ok(world.entities.alloc())
 //! }
 //! ```
 //!
 //! Handling execution-time safety violations:
-//! ```ignore
+//! ```text
 //! match world.run_systems() {
 //!     Ok(()) => {}
 //!     Err(ExecutionError::BorrowConflict { component_id, .. }) => {

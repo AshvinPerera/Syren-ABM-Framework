@@ -1,4 +1,4 @@
-//! [`BucketBuffer`] — a counting-sort index over integer bucket keys.
+//! [`BucketBuffer`] - a counting-sort index over integer bucket keys.
 //!
 //! Messages are sorted by their `bucket_key()` into contiguous slices within
 //! a single [`AlignedBuffer`], allowing O(1) per-bucket access after an
@@ -21,9 +21,9 @@ use crate::messaging::message::Message;
 use crate::messaging::registry::ErasedFns;
 use crate::ECSResult;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Buffer
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Stores all messages for a `Bucket`-specialised type, sorted by bucket key.
 pub(crate) struct BucketBuffer {
@@ -76,10 +76,15 @@ impl BucketBuffer {
             return Ok(());
         }
 
-        let bucket_key_fn = fns.bucket_key.expect("BucketBuffer: missing bucket_key_fn");
+        let bucket_key_fn =
+            fns.bucket_key
+                .ok_or(MessagingError::MissingErasedFunction {
+                    specialisation: "Bucket",
+                    function: "bucket_key",
+                })?;
         let max = self.max_buckets as usize;
 
-        // ── 1. Count ─────────────────────────────────────────────────────────
+        // -- 1. Count ---------------------------------------------------------
         let mut counts: Vec<u32> = vec![0u32; max];
         for i in 0..n {
             // SAFETY: i < raw.len(); ptr points to a valid item.
@@ -95,13 +100,13 @@ impl BucketBuffer {
             counts[key] += 1;
         }
 
-        // ── 2. Prefix-sum into bucket_starts ─────────────────────────────────
+        // -- 2. Prefix-sum into bucket_starts ---------------------------------
         self.bucket_starts[0] = 0;
         for k in 0..max {
             self.bucket_starts[k + 1] = self.bucket_starts[k] + counts[k];
         }
 
-        // ── 3. Scatter ────────────────────────────────────────────────────────
+        // -- 3. Scatter --------------------------------------------------------
         self.data.reserve(n);
         // SAFETY: we just reserved n items; set_len after scatter.
         unsafe { self.data.set_len(n) };
@@ -121,9 +126,9 @@ impl BucketBuffer {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Iterator
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// An iterator over all messages in a single bucket of a [`BucketBuffer`].
 pub struct BucketIter<'a, M> {
@@ -192,3 +197,44 @@ impl<'a, M: Copy> Iterator for BucketIter<'a, M> {
 }
 
 impl<'a, M: Copy> ExactSizeIterator for BucketIter<'a, M> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::error::ECSError;
+
+    #[derive(Clone, Copy)]
+    struct TestMsg {
+        _value: u32,
+    }
+
+    #[test]
+    fn missing_bucket_accessor_returns_error() {
+        let mut raw = AlignedBuffer::with_capacity(
+            std::mem::size_of::<TestMsg>(),
+            std::mem::align_of::<TestMsg>(),
+            1,
+        );
+        unsafe { raw.push(TestMsg { _value: 1 }) };
+        let mut buf = BucketBuffer::new(
+            std::mem::size_of::<TestMsg>(),
+            std::mem::align_of::<TestMsg>(),
+            2,
+            1,
+        );
+        let fns = ErasedFns {
+            bucket_key: None,
+            position: None,
+            recipient: None,
+        };
+
+        let err = unsafe { buf.finalise(&raw, &fns) }.unwrap_err();
+        assert!(matches!(
+            err,
+            ECSError::Messaging(MessagingError::MissingErasedFunction {
+                specialisation: "Bucket",
+                function: "bucket_key"
+            })
+        ));
+    }
+}

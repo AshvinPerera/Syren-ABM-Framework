@@ -2,19 +2,19 @@
 //!
 //! A [`BoundaryResource`] is an object that participates in the per-tick
 //! execution lifecycle managed by the engine. The engine knows only the
-//! trait — it has no knowledge of what the resource contains or how it
+//! trait - it has no knowledge of what the resource contains or how it
 //! works internally.
 //!
 //! # Lifecycle methods and access
 //!
 //! Every resource implements three lifecycle hooks called by the engine:
 //!
-//! - [`begin_tick`](BoundaryResource::begin_tick) — before any system runs
+//! - [`begin_tick`](BoundaryResource::begin_tick) - before any system runs
 //!   in a tick.
-//! - [`finalise`](BoundaryResource::finalise) — at each scheduler boundary
+//! - [`finalise`](BoundaryResource::finalise) - at each scheduler boundary
 //!   stage, after `clear_borrows`, GPU sync, and `apply_deferred_commands`,
 //!   for the channels whose last producer just completed.
-//! - [`end_tick`](BoundaryResource::end_tick) — after the final stage and
+//! - [`end_tick`](BoundaryResource::end_tick) - after the final stage and
 //!   the final `apply_deferred_commands`.
 //!
 //! All three take `&mut self` and a [`BoundaryContext`]. The context carries
@@ -35,7 +35,7 @@
 //!
 //! A resource declares which channel IDs it owns by overriding
 //! [`channels`](BoundaryResource::channels). The engine builds an inverted
-//! `ChannelID → BoundaryID` index at registration time and routes
+//! `ChannelID -> BoundaryID` index at registration time and routes
 //! `finalise` only to resources that own at least one of the channels in
 //! the boundary stage. Channel IDs must be unique across all registered
 //! resources; a collision causes
@@ -47,7 +47,7 @@
 //!
 //! Lifecycle hooks must not call
 //! [`ECSReference::boundary`](crate::engine::manager::ECSReference::boundary)
-//! to acquire a handle on any other boundary resource — including
+//! to acquire a handle on any other boundary resource - including
 //! themselves. The engine holds the boundary registry mutex while
 //! dispatching lifecycle calls; re-entering would deadlock. Cross-resource
 //! coordination must go through ECS components or channel dependencies.
@@ -80,8 +80,8 @@ pub struct BoundaryChannelProfile {
 /// lifecycle hook.
 ///
 /// The context exists so resources can perform work that touches other
-/// world-owned state — most commonly marking GPU buffers dirty after a
-/// CPU-side acceleration index is rebuilt — without re-entering the
+/// world-owned state - most commonly marking GPU buffers dirty after a
+/// CPU-side acceleration index is rebuilt - without re-entering the
 /// boundary registry.
 pub struct BoundaryContext<'a> {
     #[cfg(feature = "gpu")]
@@ -180,8 +180,8 @@ impl<'a> BoundaryContext<'a> {
 /// Trait for tick-lifecycle resources owned by
 /// [`ECSManager`](crate::engine::manager::ECSManager).
 ///
-/// Implementors hook into three lifecycle events per tick — `begin_tick`,
-/// `finalise`, and `end_tick` — and declare the set of channel IDs they
+/// Implementors hook into three lifecycle events per tick - `begin_tick`,
+/// `finalise`, and `end_tick` - and declare the set of channel IDs they
 /// own so the scheduler can route `finalise` calls to the relevant
 /// resources only.
 pub trait BoundaryResource: Any + Send + Sync {
@@ -217,7 +217,7 @@ pub trait BoundaryResource: Any + Send + Sync {
     /// `channels` is the full slice of channel IDs being finalised at the
     /// boundary; the resource may further filter against its own owned
     /// IDs. The engine guarantees that at least one of the listed IDs is
-    /// owned by this resource — resources never receive an unrelated
+    /// owned by this resource - resources never receive an unrelated
     /// finalise call.
     fn finalise(&mut self, ctx: &mut BoundaryContext<'_>, channels: &[ChannelID]) -> ECSResult<()>;
 

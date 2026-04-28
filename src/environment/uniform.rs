@@ -74,16 +74,16 @@ use crate::gpu::{GPUBindingDesc, GPUContext, GPUResource};
 
 use super::store::Environment;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // GPUPod marker
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Marker trait for environment parameter types that are safe to transmute into
 /// GPU uniform bytes.
 ///
 /// # Safety
 ///
-/// Implementors must be `bytemuck::Pod` — no padding bytes, no interior
+/// Implementors must be `bytemuck::Pod` - no padding bytes, no interior
 /// mutability, no pointers. Implementing this for a type that is not `Pod`
 /// is undefined behaviour.
 ///
@@ -107,9 +107,9 @@ unsafe impl EnvPod for i16 {}
 unsafe impl EnvPod for u8 {}
 unsafe impl EnvPod for i8 {}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Erased packer — per-key closure that knows how to pack bytes from Environment
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Erased packer - per-key closure that knows how to pack bytes from Environment
+// -----------------------------------------------------------------------------
 
 /// A type-erased closure that reads one environment key and appends its raw
 /// bytes to a `Vec<u8>`.
@@ -138,9 +138,9 @@ impl Packer {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // EnvUniformBuffer
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Packs a declared subset of environment parameters into a `wgpu` uniform
 /// buffer.
@@ -154,7 +154,7 @@ impl Packer {
 ///
 /// # Usage
 ///
-/// ```ignore
+/// ```text
 /// let buf = EnvUniformBuffer::builder(Arc::clone(&env))
 ///     .include::<f32>("interest_rate")
 ///     .include::<u32>("world_width")
@@ -163,7 +163,7 @@ impl Packer {
 /// ```
 pub struct EnvUniformBuffer {
     env: Arc<Environment>,
-    /// Ordered packers — one per tracked key, in declaration order.
+    /// Ordered packers - one per tracked key, in declaration order.
     packers: Vec<Packer>,
     /// Packed CPU-side buffer (matches WGSL uniform struct layout).
     cpu_buf: Vec<u8>,
@@ -252,7 +252,7 @@ impl GPUResource for EnvUniformBuffer {
     /// # Errors
     ///
     /// Returns an error if any tracked key cannot be read from the environment
-    /// (e.g. type mismatch — should not happen if the buffer was built correctly).
+    /// (e.g. type mismatch - should not happen if the buffer was built correctly).
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()> {
         self.repack()?;
         let buf = ctx
@@ -347,7 +347,7 @@ impl EnvUniformBuffer {
     /// call [`GPUResourceRegistry::mark_cpu_dirty`] to bridge the two when
     /// integrating the uniform buffer into a registry-based upload pipeline:
     ///
-    /// ```ignore
+    /// ```text
     /// if env_uniform.is_cpu_dirty() {
     ///     gpu_registry.mark_cpu_dirty(env_uniform_resource_id);
     /// }
@@ -357,9 +357,9 @@ impl EnvUniformBuffer {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Builder
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Builder for [`EnvUniformBuffer`].
 ///
@@ -408,7 +408,7 @@ impl EnvUniformBufferBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```text
     /// let buf = EnvUniformBuffer::builder(env)
     ///     .include::<f32>("rate")   // 4 bytes
     ///     .include::<u32>("width")  // 4 bytes

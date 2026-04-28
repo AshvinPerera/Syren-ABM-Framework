@@ -9,15 +9,15 @@
 //! [`Write<T>`], as well as for tuples of those markers. Each implementation
 //! knows how to:
 //!
-//! 1. **Validate** — confirm that a [`BuiltQuery`] has the correct number of
+//! 1. **Validate** - confirm that a [`BuiltQuery`] has the correct number of
 //!    read and write columns for this parameter shape.
-//! 2. **Iterate** — reinterpret raw byte slices as typed component slices and
+//! 2. **Iterate** - reinterpret raw byte slices as typed component slices and
 //!    invoke a caller-provided closure once per entity.
 //!
 //! Together these enable [`ECSReference::for_each`] to accept a single type
 //! parameter that encodes the full read/write signature of the iteration:
 //!
-//! ```ignore
+//! ```text
 //! ecs.for_each::<(Read<Position>, Read<Velocity>, Write<Acceleration>)>(
 //!     query,
 //!     |(pos, vel, acc)| { /* ... */ },
@@ -64,8 +64,8 @@ pub unsafe trait QueryParam: Send + Sync {
     ///
     /// Each implementation defines this as a concrete `Fn` signature matching
     /// the typed references for the parameter tuple. For example:
-    /// - `Read<A>` → `Fn(&A)`
-    /// - `(Read<A>, Write<B>)` → `Fn((&A, &mut B))`
+    /// - `Read<A>` -> `Fn(&A)`
+    /// - `(Read<A>, Write<B>)` -> `Fn((&A, &mut B))`
     type Closure: ?Sized;
 
     /// Validates that the query shape (read/write counts) matches this param tuple.

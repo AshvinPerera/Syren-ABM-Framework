@@ -155,16 +155,9 @@ struct OrderingEdge {
     dependent: SystemID,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EdgeKind {
-    Ordered,
-    Boundary,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct DependencyEdge {
     to: usize,
-    kind: EdgeKind,
 }
 
 struct DependencyGraph {
@@ -371,7 +364,6 @@ impl Scheduler {
         let mut edges = vec![Vec::new(); n];
         let mut in_degree = vec![0usize; n];
         let mut boundary_predecessors = vec![Vec::new(); n];
-        let mut component_conflicts = Vec::new();
 
         let id_to_pos: HashMap<SystemID, usize> = sorted_indices
             .iter()
@@ -392,7 +384,6 @@ impl Scheduler {
                         &mut boundary_predecessors,
                         a,
                         b,
-                        EdgeKind::Boundary,
                     );
                 }
                 if access[b].produces.intersects(&access[a].consumes) {
@@ -402,11 +393,7 @@ impl Scheduler {
                         &mut boundary_predecessors,
                         b,
                         a,
-                        EdgeKind::Boundary,
                     );
-                }
-                if access[a].component_conflict(access[b]) {
-                    component_conflicts.push((a, b));
                 }
             }
         }
@@ -435,21 +422,6 @@ impl Scheduler {
                 &mut boundary_predecessors,
                 dependency,
                 dependent,
-                EdgeKind::Boundary,
-            );
-        }
-
-        for (a, b) in component_conflicts {
-            if Self::has_path(&edges, a, b) || Self::has_path(&edges, b, a) {
-                continue;
-            }
-            Self::add_edge(
-                &mut edges,
-                &mut in_degree,
-                &mut boundary_predecessors,
-                a,
-                b,
-                EdgeKind::Ordered,
             );
         }
 
@@ -467,52 +439,18 @@ impl Scheduler {
         boundary_predecessors: &mut [Vec<usize>],
         from: usize,
         to: usize,
-        kind: EdgeKind,
     ) {
         if from == to {
             return;
         }
 
-        if let Some(existing) = edges[from].iter_mut().find(|edge| edge.to == to) {
-            if existing.kind == EdgeKind::Ordered && kind == EdgeKind::Boundary {
-                existing.kind = EdgeKind::Boundary;
-                if !boundary_predecessors[to].contains(&from) {
-                    boundary_predecessors[to].push(from);
-                }
-            }
+        if edges[from].iter().any(|edge| edge.to == to) {
             return;
         }
 
-        edges[from].push(DependencyEdge { to, kind });
+        edges[from].push(DependencyEdge { to });
         in_degree[to] += 1;
-        if kind == EdgeKind::Boundary {
-            boundary_predecessors[to].push(from);
-        }
-    }
-
-    fn has_path(edges: &[Vec<DependencyEdge>], from: usize, to: usize) -> bool {
-        if from == to {
-            return true;
-        }
-
-        let mut stack = vec![from];
-        let mut visited = vec![false; edges.len()];
-        while let Some(current) = stack.pop() {
-            if visited[current] {
-                continue;
-            }
-            visited[current] = true;
-
-            for edge in &edges[current] {
-                if edge.to == to {
-                    return true;
-                }
-                if !visited[edge.to] {
-                    stack.push(edge.to);
-                }
-            }
-        }
-        false
+        boundary_predecessors[to].push(from);
     }
 
     fn pack_graph(&mut self, graph: DependencyGraph) -> ECSResult<()> {

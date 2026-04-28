@@ -15,7 +15,7 @@
 //!
 //! ## Acquiring a handle
 //!
-//! ```ignore
+//! ```text
 //! let env = EnvironmentBuilder::new()
 //!     .register::<f32>("interest_rate", 0.05)
 //!     .build();
@@ -27,13 +27,13 @@
 //!
 //! ## Using the handle in a system
 //!
-//! ```ignore
+//! ```text
 //! struct RateWriterSystem {
 //!     rate_key: EnvKey<f32>,
 //!     access:   AccessSets,
 //! }
 //!
-//! // During construction — declare the scheduling dependency:
+//! // During construction - declare the scheduling dependency:
 //! let mut access = AccessSets::default();
 //! access.produces.insert(rate_key.channel_id());
 //!
@@ -62,23 +62,23 @@ use crate::engine::types::ChannelID;
 /// Systems store one `EnvKey<T>` per environment key they interact with. The
 /// handle is used in two ways:
 ///
-/// 1. **Name access** — [`name`](Self::name) returns the `&'static str` to
+/// 1. **Name access** - [`name`](Self::name) returns the `&'static str` to
 ///    pass to [`Environment::get`](crate::environment::Environment::get) /
 ///    [`Environment::set`](crate::environment::Environment::set).
 ///
-/// 2. **Scheduling** — [`channel_id`](Self::channel_id) returns the
+/// 2. **Scheduling** - [`channel_id`](Self::channel_id) returns the
 ///    [`ChannelID`] to insert into
 ///    [`AccessSets::produces`](crate::AccessSets::produces) (for writing
 ///    systems) or [`AccessSets::consumes`](crate::AccessSets::consumes) (for
 ///    reading systems), so the scheduler places every writer of this key in an
 ///    earlier stage than every reader.
 ///
-/// `EnvKey<T>` is [`Copy`] — duplicate it freely. The type parameter `T`
+/// `EnvKey<T>` is [`Copy`] - duplicate it freely. The type parameter `T`
 /// is a compile-time marker only; no `T` is stored or accessed at runtime.
 ///
 /// ## Example
 ///
-/// ```ignore
+/// ```text
 /// let key: EnvKey<f32> = env.env_key::<f32>("tax_rate").unwrap();
 ///
 /// // Writer system access declaration:
@@ -96,7 +96,7 @@ pub struct EnvKey<T> {
     pub(crate) name: &'static str,
     pub(crate) channel_id: ChannelID,
     // `fn() -> T` makes PhantomData covariant in T while keeping EnvKey
-    // unconditionally Send + Sync — no T is stored at runtime.
+    // unconditionally Send + Sync - no T is stored at runtime.
     _marker: PhantomData<fn() -> T>,
 }
 

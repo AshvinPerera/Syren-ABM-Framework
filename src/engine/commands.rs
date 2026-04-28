@@ -211,13 +211,13 @@ pub enum Command {
     ///
     /// ## Visibility
     /// A `Set` emitted in stage N is only visible to systems in stage N+1 or
-    /// later — identical to the visibility rules for `Add` / `Remove`. There
+    /// later - identical to the visibility rules for `Add` / `Remove`. There
     /// is no mid-stage visibility.
     ///
     /// ## Use case
     /// Rare, low-frequency targeted writes (bankruptcy declarations,
     /// administrative fiat, one-off resets) where emitting a message would be
-    /// overkill. **Not** a substitute for messaging in hot paths — the boxing
+    /// overkill. **Not** a substitute for messaging in hot paths - the boxing
     /// cost dominates above a few thousand calls per tick.
     Set {
         /// Target entity whose component value is being overwritten.

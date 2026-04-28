@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::SmallVec;
 
 use crate::engine::activation::{ActivationContext, ActivationOrder};
-use crate::engine::archetype::{Archetype, ArchetypeMatch};
+use crate::engine::archetype::Archetype;
 use crate::engine::error::{ECSError, ECSResult, ExecutionError};
-use crate::engine::query::{BuiltQuery, QuerySignature};
+use crate::engine::query::BuiltQuery;
 use crate::engine::storage::TypeErasedAttribute;
-use crate::engine::types::{ChunkID, ComponentID};
+use crate::engine::types::{ArchetypeID, ChunkID, ComponentID};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::{DirtyChunks, Entry};
@@ -32,18 +32,18 @@ type WriteGuard<'a> = (
 
 pub(super) fn for_each_unchecked(
     archetypes: &[Archetype],
+    matches: Vec<ArchetypeID>,
     query: BuiltQuery,
     #[cfg(feature = "gpu")] dirty_chunks: &DirtyChunks,
     activation: ActivationContext,
     f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
 ) -> Result<(), ExecutionError> {
-    let matches = matching_archetypes(archetypes, query.signature())?;
     let f = Arc::new(f);
     let abort = Arc::new(AtomicBool::new(false));
     let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
 
-    for matched_archetype in matches {
-        let archetype = &archetypes[matched_archetype.archetype_id as usize];
+    for archetype_id in matches {
+        let archetype = &archetypes[archetype_id as usize];
         let (read_guards, mut write_guards) = lock_columns(archetype, &query)?;
         let views = build_chunk_view(archetype, &query, &read_guards, &mut write_guards)?;
         #[cfg(feature = "gpu")]
@@ -54,7 +54,7 @@ pub(super) fn for_each_unchecked(
         run_chunks(
             &views,
             &query,
-            matched_archetype.archetype_id,
+            archetype_id,
             activation,
             &*f,
             &abort,
@@ -65,7 +65,7 @@ pub(super) fn for_each_unchecked(
         run_chunks(
             &views,
             &query,
-            matched_archetype.archetype_id,
+            archetype_id,
             activation,
             &*f,
             &abort,
@@ -89,18 +89,18 @@ pub(super) fn for_each_unchecked(
 
 pub(super) fn for_each_fallible_unchecked(
     archetypes: &[Archetype],
+    matches: Vec<ArchetypeID>,
     query: BuiltQuery,
     #[cfg(feature = "gpu")] dirty_chunks: &DirtyChunks,
     activation: ActivationContext,
     f: impl Fn(&[&[u8]], &mut [&mut [u8]]) -> ECSResult<()> + Send + Sync,
 ) -> ECSResult<()> {
-    let matches = matching_archetypes(archetypes, query.signature()).map_err(ECSError::from)?;
     let f = Arc::new(f);
     let abort = Arc::new(AtomicBool::new(false));
     let err: Arc<Mutex<Option<(usize, ECSError)>>> = Arc::new(Mutex::new(None));
 
-    for matched_archetype in matches {
-        let archetype = &archetypes[matched_archetype.archetype_id as usize];
+    for archetype_id in matches {
+        let archetype = &archetypes[archetype_id as usize];
         let (read_guards, mut write_guards) =
             lock_columns(archetype, &query).map_err(ECSError::from)?;
         let views = build_chunk_view(archetype, &query, &read_guards, &mut write_guards)
@@ -113,7 +113,7 @@ pub(super) fn for_each_fallible_unchecked(
         run_chunks_fallible(
             &views,
             &query,
-            matched_archetype.archetype_id,
+            archetype_id,
             activation,
             &*f,
             &abort,
@@ -125,7 +125,7 @@ pub(super) fn for_each_fallible_unchecked(
         run_chunks_fallible(
             &views,
             &query,
-            matched_archetype.archetype_id,
+            archetype_id,
             activation,
             &*f,
             &abort,
@@ -153,6 +153,7 @@ pub(super) fn for_each_fallible_unchecked(
 
 pub(super) fn reduce_unchecked<R>(
     archetypes: &[Archetype],
+    matches: Vec<ArchetypeID>,
     query: BuiltQuery,
     init: impl Fn() -> R + Send + Sync,
     fold_chunk: impl Fn(&mut R, &[&[u8]], usize) + Send + Sync,
@@ -161,14 +162,13 @@ pub(super) fn reduce_unchecked<R>(
 where
     R: Send + 'static,
 {
-    let matches = matching_archetypes(archetypes, query.signature())?;
     let init = Arc::new(init);
     let fold_chunk = Arc::new(fold_chunk);
     let combine = Arc::new(combine);
     let partials: Arc<Mutex<Vec<(usize, usize, R)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    for (archetype_order, matched) in matches.into_iter().enumerate() {
-        let archetype = &archetypes[matched.archetype_id as usize];
+    for (archetype_order, archetype_id) in matches.into_iter().enumerate() {
+        let archetype = &archetypes[archetype_id as usize];
 
         let mut sorted_reads: Vec<ComponentID> = query.read_ids().to_vec();
         sorted_reads.sort_unstable();
@@ -712,22 +712,3 @@ fn fill_row_slices<'a>(
     }
 }
 
-fn matching_archetypes(
-    archetypes: &[Archetype],
-    query: &QuerySignature,
-) -> Result<Vec<ArchetypeMatch>, ExecutionError> {
-    let mut out = Vec::new();
-    for a in archetypes {
-        if !query.requires_all(a.signature()) {
-            continue;
-        }
-        let chunks = a
-            .chunk_count()
-            .map_err(|_| ExecutionError::InternalExecutionError)?;
-        out.push(ArchetypeMatch {
-            archetype_id: a.archetype_id(),
-            chunks,
-        });
-    }
-    Ok(out)
-}

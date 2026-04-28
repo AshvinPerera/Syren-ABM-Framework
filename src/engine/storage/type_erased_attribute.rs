@@ -39,7 +39,7 @@
 /// attempt a `downcast::<Attribute<T>>()` when necessary.
 ///
 /// ## Example
-/// ```ignore
+/// ```text
 /// if let Some(attr) = erased.as_any().downcast_ref::<Attribute<f32>>() {
 ///     println!("attribute stores {} f32 values", attr.length());
 /// }
@@ -170,8 +170,8 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// drops the old value, so components do not need to be `Copy`.
     ///
     /// # Errors
-    /// - [`AttributeError::TypeMismatch`] — `value`'s type does not match `T`.
-    /// - [`AttributeError::Position`] — `(chunk, row)` is not an initialised
+    /// - [`AttributeError::TypeMismatch`] - `value`'s type does not match `T`.
+    /// - [`AttributeError::Position`] - `(chunk, row)` is not an initialised
     ///   slot in this attribute.
     fn replace_slot_dyn(
         &mut self,
@@ -450,7 +450,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
             }));
         }
 
-        // Bounds check — the caller promises the slot is live, but verify.
+        // Bounds check - the caller promises the slot is live, but verify.
         if !self.valid_position(chunk, row) {
             return Err(AttributeError::Position(
                 crate::engine::error::PositionOutOfBoundsError {

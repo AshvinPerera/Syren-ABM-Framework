@@ -4,8 +4,8 @@
 //! logic when transferring component rows between archetypes during add/remove
 //! component operations.
 //!
-//! These errors typically reflect internal invariant violations — storage
-//! misalignment, inconsistent swap metadata, or failed component transfers —
+//! These errors typically reflect internal invariant violations - storage
+//! misalignment, inconsistent swap metadata, or failed component transfers -
 //! rather than recoverable user-facing conditions.
 
 use std::fmt;

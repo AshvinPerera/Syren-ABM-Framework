@@ -8,9 +8,9 @@ use abm_framework::{
 
 use abm_framework::{init, shutdown, span, thread_name, Arg};
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Components
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
@@ -41,9 +41,9 @@ struct TargetInventory(pub f32);
 #[derive(Clone, Copy)]
 struct Price(pub f32);
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Systems
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 struct ProductionSystem {
     access: AccessSets,
@@ -250,17 +250,17 @@ impl System for HungerSystem {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Simulation
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 #[test]
 fn toy_economy_ecs_abm() -> ECSResult<()> {
-    // ─── PROFILER SETUP ───────────────────────────────────────────────────────
+    // --- PROFILER SETUP -------------------------------------------------------
     init("profile/toy_economy_trace.json");
     thread_name("Main");
 
-    // ─── COMPONENT REGISTRATION ──────────────────────────────────────────────
+    // --- COMPONENT REGISTRATION ----------------------------------------------
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
 
     {
@@ -277,7 +277,7 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
         reg.freeze();
     }
 
-    // ─── WORLD SETUP ──────────────────────────────────────────────────────────
+    // --- WORLD SETUP ----------------------------------------------------------
     let _setup = span("setup::spawn_entities");
 
     let shards = EntityShards::new(4)?;
@@ -325,7 +325,7 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
     ecs.apply_deferred_commands()?;
     drop(_setup);
 
-    // ─── SCHEDULER ────────────────────────────────────────────────────────────
+    // --- SCHEDULER ------------------------------------------------------------
     let mut scheduler = Scheduler::new();
     scheduler.add_system(ProductionSystem::new(&reg));
     scheduler.add_system(WagePaymentSystem::new(&reg));
@@ -335,7 +335,7 @@ fn toy_economy_ecs_abm() -> ECSResult<()> {
 
     drop(reg);
 
-    // ─── SIMULATION LOOP ──────────────────────────────────────────────────────
+    // --- SIMULATION LOOP ------------------------------------------------------
     for step in 0..1000 {
         let _tick = span("tick").arg("step", Arg::U64(step as u64));
 

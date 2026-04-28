@@ -2,7 +2,7 @@
 //!
 //! This module provides [`LockedAttribute`], a thin wrapper that combines
 //! `Arc` and `RwLock` to allow multiple owners to safely share a single
-//! [`TypeErasedAttribute`] across threads — typically the component columns
+//! [`TypeErasedAttribute`] across threads - typically the component columns
 //! stored inside an [`Archetype`].
 //!
 //! # Design
@@ -30,8 +30,8 @@
 //!
 //! # Errors
 //!
-//! Lock-poisoning — caused by a thread panicking while holding the write lock
-//! — is treated as an unrecoverable internal invariant violation and surfaces
+//! Lock-poisoning - caused by a thread panicking while holding the write lock
+//! - is treated as an unrecoverable internal invariant violation and surfaces
 //! as [`AttributeError::InternalInvariant`].
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};

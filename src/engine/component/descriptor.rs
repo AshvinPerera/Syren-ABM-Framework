@@ -1,7 +1,7 @@
 //! Metadata descriptor for ECS component types.
 //!
 //! This module defines [`ComponentDesc`], a lightweight, copyable struct that captures
-//! static type information about a registered component — including its runtime [`TypeId`],
+//! static type information about a registered component - including its runtime [`TypeId`],
 //! Rust type name, memory layout (size and alignment), assigned [`ComponentID`], and
 //! whether it is marked as GPU-safe.
 //!
@@ -29,7 +29,7 @@
 //! - The `component_id` field is `None` until the descriptor is registered via
 //!   [`ComponentDesc::with_id`]. Consumers must handle the `None` case explicitly
 //!   rather than relying on a sentinel value.
-//! - GPU safety is opt-in and carries no automatic enforcement — it is a hint for
+//! - GPU safety is opt-in and carries no automatic enforcement - it is a hint for
 //!   systems that need to distinguish GPU-uploadable components.
 
 use std::any::{type_name, TypeId};

@@ -345,7 +345,7 @@ impl MessageBufferSet {
                 }
                 Specialisation::Spatial(_) => {
                     if let Some(buf) = self.inner.spatial[idx].as_mut() {
-                        unsafe { buf.finalise(&raw, &desc.erased_fns) };
+                        unsafe { buf.finalise(&raw, &desc.erased_fns)? };
                         #[cfg(feature = "messaging_gpu")]
                         Self::publish_gpu_finalised(
                             ctx,
@@ -357,7 +357,7 @@ impl MessageBufferSet {
                 }
                 Specialisation::Targeted => {
                     if let Some(buf) = self.inner.targeted[idx].as_mut() {
-                        unsafe { buf.finalise(&raw, &desc.erased_fns) };
+                        unsafe { buf.finalise(&raw, &desc.erased_fns)? };
                         #[cfg(feature = "messaging_gpu")]
                         {
                             let mut rows: Vec<_> = buf

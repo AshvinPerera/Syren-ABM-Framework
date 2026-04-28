@@ -65,8 +65,8 @@ impl AgentRegistry {
     ///
     /// # Errors
     ///
-    /// * [`AgentError::RegistrySealed`] — called after [`AgentRegistry::seal`].
-    /// * [`AgentError::TemplateNotFound`] (repurposed as "already exists") — a
+    /// * [`AgentError::RegistrySealed`] - called after [`AgentRegistry::seal`].
+    /// * [`AgentError::TemplateNotFound`] (repurposed as "already exists") - a
     ///   template with the same name is already present. The error message
     ///   clarifies this.
     pub fn register(&mut self, template: AgentTemplate) -> AgentResult<()> {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn flush_spawn_hooks_clears_queue() {
         let mut reg = AgentRegistry::new();
-        // Template without a hook — flush should complete without panic.
+        // Template without a hook - flush should complete without panic.
         reg.register(make_template("Rabbit")).unwrap();
         let entity: Entity = unsafe { std::mem::transmute(0u64) };
         reg.enqueue_spawn_hook("Rabbit", entity);

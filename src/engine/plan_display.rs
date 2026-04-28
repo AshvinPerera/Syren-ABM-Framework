@@ -4,7 +4,7 @@
 //! [`std::fmt::Display`], allowing the compiled execution plan to be rendered
 //! directly with `println!`, `write!`, or [`ToString::to_string`]:
 //!
-//! ```ignore
+//! ```text
 //! use abm_framework::engine::plan_display::PlanDisplay;
 //! println!("{}", PlanDisplay(&scheduler));
 //! ```
@@ -18,7 +18,7 @@
 //! finalised channel IDs; CPU and GPU stages list their member systems along
 //! with any `produces` / `consumes` channel declarations. The format is
 //! stable enough for human reading and test assertions but is **not** a
-//! machine-parseable interchange format — use [`DotExport`](crate::engine::dot_export::DotExport)
+//! machine-parseable interchange format - use [`DotExport`](crate::engine::dot_export::DotExport)
 //! for programmatic consumption.
 
 use std::fmt;
@@ -30,7 +30,7 @@ use crate::engine::scheduler::Scheduler;
 /// The wrapper borrows the scheduler for the duration of the formatting call
 /// only; it adds no state of its own. Construct it inline at the call site:
 ///
-/// ```ignore
+/// ```text
 /// let plan_text = PlanDisplay(&scheduler).to_string();
 /// ```
 ///

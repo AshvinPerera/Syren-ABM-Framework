@@ -11,12 +11,12 @@
 //!
 //! ```text
 //! SpawnError
-//! ├── Capacity(CapacityError)                — storage full
-//! ├── ShardBounds(ShardBoundsError)          — shard index out of range
-//! ├── Registry(RegistryError)               — component registration failure
-//! ├── StaleEntity(StaleEntityError)         — entity handle no longer valid
-//! ├── StoragePushFailedWith(AttributeError)
-//! └── StorageSwapRemoveFailed(AttributeError)
+//! +-- Capacity(CapacityError)                - storage full
+//! +-- ShardBounds(ShardBoundsError)          - shard index out of range
+//! +-- Registry(RegistryError)               - component registration failure
+//! +-- StaleEntity(StaleEntityError)         - entity handle no longer valid
+//! +-- StoragePushFailedWith(AttributeError)
+//! +-- StorageSwapRemoveFailed(AttributeError)
 //! ```
 //!
 //! Variants without a source error (e.g. [`SpawnError::MisalignedStorage`])
@@ -29,7 +29,7 @@
 //! fail. The `From` conversions let all low-level errors propagate with `?`
 //! without manual wrapping:
 //!
-//! ```ignore
+//! ```text
 //! use crate::errors::spawn::SpawnError;
 //!
 //! fn spawn(world: &mut World) -> Result<Entity, SpawnError> {
@@ -64,7 +64,7 @@ use super::registry::RegistryError;
 ///
 /// ### Usage
 /// `From<T>` conversions allow `?` from low-level operations:
-/// ```ignore
+/// ```text
 /// fn spawn_batch(world: &mut World, batch: Batch) -> Result<Vec<Entity>, SpawnError> {
 ///     ensure_capacity(world, batch.len())?;     // -> Capacity -> SpawnError
 ///     let shard = world.shards.get_mut(batch.shard_index)?; // -> ShardBounds -> SpawnError

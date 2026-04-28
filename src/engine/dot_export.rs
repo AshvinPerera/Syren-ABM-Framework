@@ -4,7 +4,7 @@
 //! [`std::fmt::Display`], producing a Graphviz DOT graph that can be piped
 //! directly to `dot`, `neato`, or any DOT-aware renderer:
 //!
-//! ```ignore
+//! ```text
 //! use abm_framework::engine::dot_export::DotExport;
 //! std::fs::write("plan.dot", DotExport(&scheduler).to_string())?;
 //! // $ dot -Tsvg plan.dot -o plan.svg
@@ -30,7 +30,7 @@ use crate::engine::scheduler::Scheduler;
 /// The wrapper borrows the scheduler for the duration of the formatting call
 /// only; it adds no state of its own. Construct it inline at the call site:
 ///
-/// ```ignore
+/// ```text
 /// let dot = DotExport(&scheduler).to_string();
 /// ```
 ///

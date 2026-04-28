@@ -1,4 +1,4 @@
-//! [`BruteForceBuffer`] — a flat, unsorted message store.
+//! [`BruteForceBuffer`] - a flat, unsorted message store.
 //!
 //! Every consumer iterates all messages in arrival order.  This is the
 //! simplest specialisation and has the best cache behaviour when the
@@ -7,9 +7,9 @@
 use crate::messaging::aligned_buffer::AlignedBuffer;
 use crate::messaging::message::Message;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Buffer
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Stores all messages for a `BruteForce`-specialised type.
 pub(crate) struct BruteForceBuffer {
@@ -43,9 +43,9 @@ impl BruteForceBuffer {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Iterator
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// An iterator over all messages in a [`BruteForceBuffer`].
 ///

@@ -93,7 +93,7 @@ const N_AGENTS: u32 = 1_000_000;
 
 #[test]
 fn sugarscape_basic_abm() -> ECSResult<()> {
-    // ─── PROFILER SETUP ───────────────────────────────────────────────────────
+    // --- PROFILER SETUP -------------------------------------------------------
     #[cfg(all(feature = "profiling", not(feature = "gpu")))]
     {
         init("profile/sugarscape_cpu_trace.json");
@@ -116,7 +116,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
     let ecs = ECSManager::new(ECSData::new(shards, registry.clone()));
     let world = ecs.world_ref();
 
-    // ─── GRID SETUP ───────────────────────────────────────────────────────────
+    // --- GRID SETUP -----------------------------------------------------------
     #[cfg(not(feature = "gpu"))]
     let grid = {
         let _g = span("setup::cpu_grid");
@@ -149,7 +149,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
         (sugar_grid_id, intent_id)
     };
 
-    // ─── SPAWN AGENTS ─────────────────────────────────────────────────────────
+    // --- SPAWN AGENTS ---------------------------------------------------------
     {
         let _g = span("setup::spawn_agents");
 
@@ -184,7 +184,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
 
     ecs.apply_deferred_commands()?;
 
-    // ─── SCHEDULER ────────────────────────────────────────────────────────────
+    // --- SCHEDULER ------------------------------------------------------------
     let mut scheduler = Scheduler::new();
 
     #[cfg(not(feature = "gpu"))]
@@ -208,7 +208,7 @@ fn sugarscape_basic_abm() -> ECSResult<()> {
 
     drop(reg);
 
-    // ─── SIMULATION LOOP ──────────────────────────────────────────────────────
+    // --- SIMULATION LOOP ------------------------------------------------------
     for step in 0..20 {
         let _tick = span("tick").arg("step", Arg::U64(step as u64));
 

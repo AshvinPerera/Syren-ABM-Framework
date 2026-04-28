@@ -9,7 +9,7 @@
 //! When results must cross into scheduler or manager APIs that require
 //! [`ECSResult`], callers can use the provided [`From<AgentError> for ECSError`]
 //! implementation, which maps agent errors into
-//! `ECSError::Execute(ExecutionError::SchedulerInvariantViolation)` — the
+//! `ECSError::Execute(ExecutionError::SchedulerInvariantViolation)` - the
 //! closest existing unit-variant that signals a module-level invariant
 //! violation at runtime.
 //!
