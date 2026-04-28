@@ -1,7 +1,9 @@
+#![allow(dead_code)]
+
 use std::hint::black_box;
 use std::sync::{Arc, RwLock};
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion};
 
 use abm_framework::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry, ECSManager, FnSystem,
@@ -97,7 +99,7 @@ fn query_matching_world() -> (ECSManager, Arc<RwLock<ComponentRegistry>>) {
     (world, registry)
 }
 
-fn query_matching_benchmark(c: &mut Criterion) {
+pub fn query_matching_benchmark(c: &mut Criterion) {
     let (world, registry) = query_matching_world();
     let query = abm_framework::QueryBuilder::with_registry(registry)
         .read::<QueryValue>()
@@ -137,7 +139,7 @@ fn make_scheduler_for_packing() -> Scheduler {
     scheduler
 }
 
-fn scheduler_packing_benchmark(c: &mut Criterion) {
+pub fn scheduler_packing_benchmark(c: &mut Criterion) {
     c.bench_function(
         "scheduler_packing/rebuild_1000_system_realistic_graph",
         |b| {
@@ -153,7 +155,7 @@ fn scheduler_packing_benchmark(c: &mut Criterion) {
     );
 }
 
-fn environment_dirty_tracking_benchmark(c: &mut Criterion) {
+pub fn environment_dirty_tracking_benchmark(c: &mut Criterion) {
     #[cfg(feature = "environment")]
     {
         use abm_framework::environment::{EnvironmentBoundary, EnvironmentBuilder};
@@ -195,7 +197,7 @@ fn environment_dirty_tracking_benchmark(c: &mut Criterion) {
     }
 }
 
-fn messaging_finalisation_benchmark(c: &mut Criterion) {
+pub fn messaging_finalisation_benchmark(c: &mut Criterion) {
     #[cfg(feature = "messaging")]
     {
         use abm_framework::advanced::ChannelAllocator;
@@ -436,44 +438,52 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    pub fn register(c: &mut Criterion) {
-        let (small_world, mut small_scheduler) = make_gpu_world(1, 1024);
-        if !maybe_warm_gpu(&small_world, &mut small_scheduler) {
+    pub fn dispatch_poll(c: &mut Criterion) {
+        let (world, mut scheduler) = make_gpu_world(1, 1024);
+        if !maybe_warm_gpu(&world, &mut scheduler) {
             return;
         }
 
         c.bench_function("gpu_dispatch_poll/single_archetype_1024", |b| {
             b.iter(|| {
-                small_world.run(&mut small_scheduler).unwrap();
-                black_box(&small_world);
+                world.run(&mut scheduler).unwrap();
+                black_box(&world);
             });
         });
+    }
 
-        let (readback_world, mut readback_scheduler) = make_gpu_world(1, 65_536);
-        if maybe_warm_gpu(&readback_world, &mut readback_scheduler) {
-            c.bench_function("gpu_readback/single_archetype_65536", |b| {
-                b.iter(|| {
-                    readback_world.run(&mut readback_scheduler).unwrap();
-                    black_box(&readback_world);
-                });
-            });
+    pub fn readback(c: &mut Criterion) {
+        let (world, mut scheduler) = make_gpu_world(1, 65_536);
+        if !maybe_warm_gpu(&world, &mut scheduler) {
+            return;
         }
 
-        let (many_world, mut many_scheduler) = make_gpu_world(32, 64);
-        if maybe_warm_gpu(&many_world, &mut many_scheduler) {
-            c.bench_function("gpu_bind_group_creation/32_archetypes", |b| {
-                b.iter(|| {
-                    many_world.run(&mut many_scheduler).unwrap();
-                    black_box(&many_world);
-                });
+        c.bench_function("gpu_readback/single_archetype_65536", |b| {
+            b.iter(|| {
+                world.run(&mut scheduler).unwrap();
+                black_box(&world);
             });
+        });
+    }
+
+    pub fn bind_group_creation(c: &mut Criterion) {
+        let (world, mut scheduler) = make_gpu_world(32, 64);
+        if !maybe_warm_gpu(&world, &mut scheduler) {
+            return;
         }
+
+        c.bench_function("gpu_bind_group_creation/32_archetypes", |b| {
+            b.iter(|| {
+                world.run(&mut scheduler).unwrap();
+                black_box(&world);
+            });
+        });
     }
 }
 
-fn gpu_benchmarks(c: &mut Criterion) {
+pub fn gpu_dispatch_poll_benchmark(c: &mut Criterion) {
     #[cfg(feature = "gpu")]
-    gpu_bench::register(c);
+    gpu_bench::dispatch_poll(c);
 
     #[cfg(not(feature = "gpu"))]
     {
@@ -481,12 +491,22 @@ fn gpu_benchmarks(c: &mut Criterion) {
     }
 }
 
-criterion_group!(
-    benches,
-    query_matching_benchmark,
-    scheduler_packing_benchmark,
-    environment_dirty_tracking_benchmark,
-    messaging_finalisation_benchmark,
-    gpu_benchmarks
-);
-criterion_main!(benches);
+pub fn gpu_readback_benchmark(c: &mut Criterion) {
+    #[cfg(feature = "gpu")]
+    gpu_bench::readback(c);
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = c;
+    }
+}
+
+pub fn gpu_bind_group_creation_benchmark(c: &mut Criterion) {
+    #[cfg(feature = "gpu")]
+    gpu_bench::bind_group_creation(c);
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = c;
+    }
+}

@@ -1204,7 +1204,7 @@ impl GpuMessageResource {
 
     fn index_capacity_bytes(&self) -> usize {
         match self.specialisation {
-            Specialisation::BruteForce => 4,
+            Specialisation::BruteForce => 2 * std::mem::size_of::<u32>(),
             Specialisation::Bucket { max_buckets } => (max_buckets as usize + 1) * 4,
             Specialisation::Spatial(cfg) => (cfg.total_cells() + 1) * 4,
             Specialisation::Targeted => self.capacity * 4 * 4,

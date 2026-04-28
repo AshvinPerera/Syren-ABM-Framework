@@ -53,8 +53,40 @@ name = "reduce"
 harness = false
 
 [[bench]]
-name = "review_findings"
+name = "query_matching"
 harness = false
+
+[[bench]]
+name = "scheduler_packing"
+harness = false
+
+[[bench]]
+name = "environment_dirty_tracking"
+harness = false
+required-features = ["environment"]
+
+[[bench]]
+name = "messaging_finalisation"
+harness = false
+required-features = ["messaging"]
+
+[[bench]]
+name = "structural_mutation"
+harness = false
+
+[[bench]]
+name = "model_agent"
+harness = false
+required-features = ["model"]
+
+[[bench]]
+name = "scheduler_execution"
+harness = false
+
+[[bench]]
+name = "message_specialisations"
+harness = false
+required-features = ["messaging"]
 
 [[bench]]
 name = "gpu_startup"
@@ -70,3 +102,23 @@ required-features = ["gpu"]
 name = "gpu_tick"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_dispatch_poll"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_readback"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_bind_group_creation"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_message_finalisation"
+harness = false
+required-features = ["model", "messaging_gpu"]

@@ -1,191 +1,167 @@
 # Syren ABM Framework
 
-Syren is a high-performance, data-oriented Agent-Based Modeling (ABM) framework built on a custom archetype-based Entity-Component System (ECS) in Rust. It is designed for large-scale agent-based economic models with millions of agents, employing archetype-based Structure-of-Arrays storage for cache-efficient data layout, deterministic phase-based scheduling for reproducible simulation runs, and an optional GPU compute backend via `wgpu`.
+Syren is an experimental Rust framework for agent-based models. It combines a
+custom archetype ECS, declared system access sets, optional model-level
+composition, typed environments, typed per-tick messaging, and an optional
+`wgpu` compute backend.
 
-The library targets economists, social scientists, and researchers who need a scalable simulation toolkit for agent-based modeling (especially economic systems). The crate builds as an `rlib`.
+This project is still a hobby and learning project. It is useful for exploring
+the internals of scalable ABM runtimes and for building early economic model
+experiments, but it should be treated as evolving infrastructure rather than a
+finished research platform.
 
-**Note:**
-- This is currently a hobby project to both 1. learn the internals of a scalable agent-based modeling framework, and 2. develop my own economic agent-based models.
-- Determinism is guaranteed at the scheduling and data-access level; numerical determinism depends on system logic and RNG usage.
+## Status
 
----
+- Crate name: `abm_framework`
+- Rust edition: 2021
+- MSRV: 1.76
+- Library artifact: `rlib`
+- API stability: not guaranteed yet
+- Current focus: ECS storage, scheduler behavior, model composition,
+  messaging, GPU dispatch, and correctness-oriented model tests
 
-## Installation
+Determinism is provided by explicit scheduling and access declarations. Model
+determinism still depends on the systems you write, especially RNG and floating
+point behavior.
 
-Syren targets Rust 2021 (MSRV 1.76) and later. Add the crate to your project via your `Cargo.toml`:
+## Feature Flags
+
+| Flag | Enables |
+| --- | --- |
+| `agents` | Agent templates, spawners, lifecycle hooks, and agent handles |
+| `environment` | Typed model environment values and dirty-channel boundary tracking |
+| `messaging` | Typed brute-force, bucket, spatial, and targeted per-tick messages |
+| `gpu` | `wgpu` compute systems, GPU-safe components, and CPU/GPU mirroring |
+| `messaging_gpu` | GPU-backed message resources and GPU finalisation; includes `messaging` and `gpu` |
+| `model` | High-level `ModelBuilder`, agent registry integration, environments, sub-schedulers, and nested models; includes `agents` and `environment` |
+| `profiling` | Chrome Trace output for scheduler and ECS spans |
+| `gpu_profiling` | `gpu` plus `profiling` |
+| `all` | Every optional subsystem |
+
+## Quickstart
+
+Add the crate from this repository:
 
 ```toml
 [dependencies]
 abm_framework = { git = "https://github.com/AshvinPerera/ABM-Framework.git" }
 ```
 
-The framework has no additional OS requirements beyond standard Rust support. It uses Rayon internally for parallel CPU execution.
-
-### Feature Flags
-
-| Flag | Description |
-|---|---|
-| `model` | Enables the high-level model composition API, agent registry integration, environments, sub-schedulers, and isolated nested models |
-| `environment` | Enables typed simulation-wide parameter stores and environment boundary dirty-channel housekeeping |
-| `messaging` | Enables typed per-tick message channels with brute-force, bucket, spatial, and targeted finalisation |
-| `gpu` | Enables the GPU compute backend via `wgpu` with per-archetype dispatch and explicit CPU/GPU synchronization |
-| `messaging_gpu` | Enables GPU-backed message resources and GPU finalisation paths; also enables `messaging` and `gpu` |
-| `agents` | Enables agent templates, spawning helpers, lifecycle hooks, and single-agent handles |
-| `profiling` | Enables the Chrome Trace profiler |
-| `gpu_profiling` | Enables both `gpu` and `profiling` |
-| `all` | Enables every optional subsystem above |
-
----
-
-## Usage
-
-Basic usage involves creating a `ComponentRegistry`, registering your component types, building an `ECSManager`, spawning entities, and running systems through a `Scheduler`. The repository includes two example simulations.
-
-**`toy_economy_test.rs`** - a simple toy economy with households and firms demonstrating core ECS workflow.
-
-**`sugarscape_basic.rs`** - a full Sugarscape model with a 600x600 grid, supporting both a CPU path and an optional GPU path (enabled with `--features gpu`).
-
-Both examples are implemented as integration tests and can be run via `cargo test`.
-
-### Example Workflow
-
-The following steps outline the ECS workflow.
-
-**1. Create a Component Registry.** Define your component types and register each one before building the world. The registry must be frozen before use.
+At the ECS level, simulations register component types, spawn bundles through
+deferred commands, and run systems through a scheduler:
 
 ```rust
-let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
-{
-    let mut reg = registry.write().unwrap();
-    reg.register::<Position>().unwrap();
-    reg.register::<Wealth>().unwrap();
-    // ... register other components ...
-    reg.freeze();
+use std::sync::{Arc, RwLock};
+use abm_framework::{
+    advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry,
+    ECSManager, ECSResult, FnSystem, Read, Scheduler,
+};
+
+#[derive(Clone, Copy)]
+struct Wealth {
+    value: f64,
 }
-```
 
-**2. Initialize the ECS.** Create the ECS manager with a chosen number of shards (worker threads) and the shared registry.
+fn main() -> ECSResult<()> {
+    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+    let wealth_id = registry.write().unwrap().register::<Wealth>().unwrap();
+    registry.write().unwrap().freeze();
 
-```rust
-let shards = EntityShards::new(4)?;
-let ecs = ECSManager::with_registry(shards, registry);
-```
+    let ecs = ECSManager::with_registry(EntityShards::new(1)?, registry);
+    let world = ecs.world_ref();
 
-**3. Spawn Entities.** Build component bundles and defer spawn commands to add entities.
-
-```rust
-let world = ecs.world_ref();
-world.with_exclusive(|_| {
     let mut bundle = Bundle::new();
-    bundle.insert(pos_id, Position { x: 0.0, y: 0.0 });
-    bundle.insert(wealth_id, Wealth { value: 100.0 });
+    bundle.insert(wealth_id, Wealth { value: 10.0 });
     world.defer(Command::Spawn { bundle })?;
-    Ok(())
-})?;
-ecs.apply_deferred_commands()?;
-```
+    ecs.apply_deferred_commands()?;
 
-**4. Define Systems and a Scheduler.** Implement your logic as structs implementing the `System` trait, then add them to a `Scheduler`. The scheduler automatically groups systems into parallel stages respecting declared read/write access sets.
+    let mut access = AccessSets::default();
+    access.read.set(wealth_id);
+    let mut scheduler = Scheduler::new();
+    scheduler.add_system(FnSystem::new(0, "observe_wealth", access, move |ecs| {
+        let q = ecs.query()?.read::<Wealth>()?.build()?;
+        ecs.for_each::<(Read<Wealth>,)>(q, &|wealth| {
+            let _ = wealth.0.value;
+        })
+    }));
 
-```rust
-let mut scheduler = Scheduler::new();
-scheduler.add_system(ProductionSystem::new(&reg));
-scheduler.add_system(WagePaymentSystem::new(&reg));
-```
-
-**5. Run the Simulation Loop.** Call `ecs.run(&mut scheduler)` each tick to execute all systems.
-
-```rust
-for _step in 0..1000 {
-    ecs.run(&mut scheduler)?;
+    ecs.run(&mut scheduler)
 }
 ```
 
-### GPU Systems
+For higher-level model tests, prefer `ModelBuilder` and `AgentTemplate` when the
+feature set includes `model`.
 
-Systems can be executed on the GPU by implementing both `System` and the `GpuSystem` trait. A GPU system provides a WGSL compute shader, an entry point, and a workgroup size. The scheduler automatically dispatches GPU systems to the GPU backend when the `gpu` feature is enabled.
+## Current Examples And Tests
 
-```rust
-impl GpuSystem for MetabolismSystem {
-    fn shader(&self) -> &'static str { include_str!("shaders/metabolism.wgsl") }
-    fn entry_point(&self) -> &'static str { "main" }
-    fn workgroup_size(&self) -> u32 { 256 }
-}
+The repository uses integration tests as executable examples:
+
+| Test | Features | What it covers |
+| --- | --- | --- |
+| `tests/closed_market_economy.rs` | `model messaging` | A small closed labor/goods market with household agents, firm agents, wage payments, goods orders, receipts, and accounting invariants |
+| `tests/economy_messaging_gpu.rs` | `model messaging_gpu` | GPU household order emission, CPU market clearing, CPU receipt emission, and GPU receipt consumption |
+| `tests/sugarscape_axtell.rs` | `model` or `gpu` | Epstein-Axtell Chapter 2 style Sugarscape fixtures with toroidal terrain, vision, metabolism, death/replacement, and CPU/GPU equality checks |
+
+Useful targeted commands:
+
+```bash
+cargo test --features "model messaging" --test closed_market_economy
+cargo test --features "model messaging_gpu" --test economy_messaging_gpu
+cargo test --features model --test sugarscape_axtell
+cargo test --features gpu --test sugarscape_axtell
 ```
 
-GPU execution follows explicit sync points: upload dirty component/resource data, dispatch compute shaders per matching archetype, wait for the submitted work at the GPU boundary, then download mutated data back to ECS storage before CPU consumers run. All GPU execution occurs inside an exclusive ECS phase, preventing concurrent CPU iteration or structural mutation.
+Broader validation commands:
 
-### Profiling
+```bash
+cargo test --no-default-features
+cargo test --features all --lib
+cargo test --features all --tests
+cargo bench --no-run --features all
+```
 
-Enable the `profiling` feature to emit a Chrome Trace JSON file inspectable in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev). The profiler is zero-overhead when the feature is disabled.
+## Benchmarks
+
+Criterion benchmarks live under `benches/`. Machine-specific notes and recorded
+review measurements are in `benches/BENCHMARKS.md`.
+
+Representative split benchmark targets:
+
+```bash
+cargo bench --features all --bench query_matching
+cargo bench --features all --bench scheduler_packing
+cargo bench --features all --bench environment_dirty_tracking
+cargo bench --features all --bench messaging_finalisation
+cargo bench --features all --bench structural_mutation
+cargo bench --features all --bench model_agent
+cargo bench --features all --bench message_specialisations
+cargo bench --features all --bench gpu_message_finalisation
+```
+
+## Profiling
+
+Enable `profiling` to emit Chrome Trace JSON that can be inspected in
+`chrome://tracing` or Perfetto.
 
 ```rust
 abm_framework::init("profile/trace.json");
-// ... run simulation ...
+// run simulation work
 abm_framework::shutdown();
 ```
 
----
+## Current Limitations
 
-## Key Features
-
-- Archetype-based Structure-of-Arrays (SoA) storage
-- Cache-friendly chunk iteration
-- Parallel CPU execution via Rayon
-- Phase-based scheduling with automatic system grouping
-- Explicit read/write access declarations enforced at runtime
-- Non-overlapping write guarantees
-- Deferred structural mutations (spawn, despawn, component moves)
-- Typed environments with dirty-channel finalisation
-- Typed per-tick messaging with channel-aware scheduler boundaries
-- High-level model composition with sub-schedulers and nested child model bridges
-- Optional GPU compute backend via `wgpu` (Vulkan, Metal, DX12, WebGPU)
-- Optional Chrome Trace profiler (zero overhead when disabled)
-- Per-archetype GPU dispatch with explicit CPU<->GPU data mirroring
-- GPU resource registry for shared grid/buffer data across GPU systems
-- Instance-owned component registries (multiple independent ECS worlds supported)
-
----
-
-## Example Simulations
-
-| Simulation | File | Description |
-|---|---|---|
-| Toy Economy | `tests/toy_economy_test.rs` | Households and firms; demonstrates core ECS API |
-| Sugarscape | `tests/sugarscape_basic.rs` | 600x600 grid; CPU and GPU execution paths |
-
-Run with:
-
-```bash
-# CPU only
-cargo test --test sugarscape_basic -- --nocapture
-
-# With GPU backend
-cargo test --features gpu --test sugarscape_basic -- --nocapture
-
-# With profiling
-cargo test --features profiling --test sugarscape_basic -- --nocapture
-
-# GPU + profiling
-cargo test --features gpu_profiling --test sugarscape_basic -- --nocapture
-```
-
----
-
-## Validation And Benchmarks
-
-The current validation work focuses on keeping documentation, doctests, GPU behavior, and hot-path measurements in sync with the implemented architecture.
-
-```bash
-cargo test --doc --features all
-cargo bench --no-run --features all
-cargo bench --features all
-```
-
-Benchmark coverage includes query matching, scheduler packing, environment dirty tracking, messaging finalisation, GPU readback, GPU bind-group creation, and GPU dispatch polling. Recorded machine-specific results live in `BENCHMARKS.md`.
-
----
+- The public API is still changing.
+- The GPU backend is optional and depends on local adapter/driver support.
+- GPU and CPU paths are intended to be rule-equivalent where tests assert it,
+  but arbitrary user systems must still manage deterministic ordering carefully.
+- The example economy is deliberately small and closed. It is a correctness
+  fixture, not a macroeconomic model with credit, bankruptcy, unemployment
+  dynamics, or policy behavior.
+- Sugarscape coverage targets the Epstein-Axtell Chapter 2 wealth-distribution
+  mechanics used by the tests, not every later extension of the Sugarscape
+  family.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE)
+This project is licensed under the [MIT License](LICENSE).

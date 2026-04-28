@@ -86,7 +86,7 @@
 /// - `chunks` - The chunked backing storage.
 /// - `last_chunk_length` - The number of initialized elements in the final chunk.
 /// - `length` - Total number of initialized elements across all chunks.
-use std::{array, convert::TryInto, fmt, mem::MaybeUninit, ptr};
+use std::{convert::TryInto, fmt, mem::MaybeUninit, ptr};
 
 use crate::engine::error::{AttributeError, AttributeInvariantViolation, PositionOutOfBoundsError};
 use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
@@ -131,8 +131,14 @@ impl<T> Attribute<T> {
     #[inline]
     fn ensure_last_chunk(&mut self) {
         if self.chunks.is_empty() || self.last_chunk_length == CHUNK_CAP {
-            self.chunks
-                .push(Box::new(array::from_fn(|_| MaybeUninit::<T>::uninit())));
+            let mut chunk = Vec::with_capacity(CHUNK_CAP);
+            chunk.resize_with(CHUNK_CAP, MaybeUninit::<T>::uninit);
+            let chunk: Box<[MaybeUninit<T>; CHUNK_CAP]> = chunk
+                .into_boxed_slice()
+                .try_into()
+                .ok()
+                .expect("chunk length is fixed to CHUNK_CAP");
+            self.chunks.push(chunk);
             self.last_chunk_length = 0;
         }
     }
