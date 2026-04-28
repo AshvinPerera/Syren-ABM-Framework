@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use crate::engine::types::{ShardID, ChunkID, RowID};
+use crate::engine::types::{ChunkID, RowID, ShardID};
 
 /// Returned when the system cannot satisfy a request to create or place
 /// additional entities because the target container has insufficient capacity.
@@ -31,7 +31,7 @@ use crate::engine::types::{ShardID, ChunkID, RowID};
 /// * `capacity` - The current upper bound that prevented the operation.
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// if requested > shard.capacity() {
 ///     return Err(CapacityError { entities_needed: requested as u64, capacity: shard.capacity() as u64 }.into());
 /// }
@@ -39,7 +39,6 @@ use crate::engine::types::{ShardID, ChunkID, RowID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
-
     /// Total entities the operation attempted to allocate.
     pub entities_needed: u64,
 
@@ -67,7 +66,7 @@ impl std::error::Error for CapacityError {}
 /// * `max_index` - The maximum valid shard index (inclusive).
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// let max = shards.len().saturating_sub(1) as u32;
 /// if idx > max {
 ///     return Err(ShardBoundsError { index: idx, max_index: max }.into());
@@ -76,7 +75,6 @@ impl std::error::Error for CapacityError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardBoundsError {
-
     /// Offending shard index that was requested.
     pub index: ShardID,
 
@@ -96,13 +94,13 @@ impl fmt::Display for ShardBoundsError {
 
 impl std::error::Error for ShardBoundsError {}
 
-/// Returned when an `Entity` handle is no longer valid — typically because it
+/// Returned when an `Entity` handle is no longer valid - typically because it
 /// was despawned or its generation/version no longer matches live storage.
 ///
 /// Use this to prevent use-after-free style logic errors at the API boundary.
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// if !entities.is_live(entity) {
 ///     return Err(StaleEntityError.into());
 /// }
@@ -132,7 +130,6 @@ impl std::error::Error for StaleEntityError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionOutOfBoundsError {
-
     /// Chunk index that was addressed.
     pub chunk: ChunkID,
 
@@ -176,7 +173,7 @@ impl std::error::Error for PositionOutOfBoundsError {}
 ///   [`std::any::type_name`].
 ///
 /// ### Example
-/// ```ignore
+/// ```text
 /// if actual_type != expected_type {
 ///     return Err(TypeMismatchError {
 ///         expected: expected_type,
@@ -189,7 +186,6 @@ impl std::error::Error for PositionOutOfBoundsError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeMismatchError {
-
     /// Destination storage's declared element type.
     pub expected: std::any::TypeId,
 
@@ -208,8 +204,7 @@ impl fmt::Display for TypeMismatchError {
         write!(
             f,
             "type mismatch: expected {} ({:?}), actual {} ({:?})",
-            self.expected_name, self.expected,
-            self.actual_name, self.actual
+            self.expected_name, self.expected, self.actual_name, self.actual
         )
     }
 }

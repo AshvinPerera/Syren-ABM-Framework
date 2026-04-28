@@ -1,7 +1,7 @@
 //! Error types for ECS storage, spawning, migration, and execution.
 //!
 //! This module defines **focused, composable error types** used across the
-//! entity–component system, covering both **structural failures** (such as
+//! entity-component system, covering both **structural failures** (such as
 //! storage bounds or capacity limits) and **runtime execution violations**
 //! (such as borrow conflicts or invalid query access).
 //!
@@ -60,15 +60,15 @@
 //! ## Examples
 //!
 //! Converting a low-level storage failure into a spawn-level error:
-//! ```ignore
+//! ```text
 //! fn spawn_one(world: &mut World, components: Components) -> Result<Entity, SpawnError> {
-//!     world.storage.push_components(components)?; // AttributeError → SpawnError
+//!     world.storage.push_components(components)?; // AttributeError -> SpawnError
 //!     Ok(world.entities.alloc())
 //! }
 //! ```
 //!
 //! Handling execution-time safety violations:
-//! ```ignore
+//! ```text
 //! match world.run_systems() {
 //!     Ok(()) => {}
 //!     Err(ExecutionError::BorrowConflict { component_id, .. }) => {
@@ -86,20 +86,16 @@
 //!   user-facing diagnostics.
 //! * [`fmt::Debug`] retains full structural detail for debugging and telemetry.
 
-mod primitives;
 mod attribute;
-mod registry;
-mod spawn;
-mod move_error;
 mod execution;
 mod internal;
+mod move_error;
+mod primitives;
+mod registry;
+mod spawn;
 
 pub use primitives::{
-    CapacityError,
-    ShardBoundsError,
-    StaleEntityError,
-    PositionOutOfBoundsError,
-    TypeMismatchError,
+    CapacityError, PositionOutOfBoundsError, ShardBoundsError, StaleEntityError, TypeMismatchError,
 };
 
 pub use attribute::{AttributeError, AttributeInvariantViolation};
@@ -110,13 +106,13 @@ pub use spawn::SpawnError;
 
 pub use move_error::MoveError;
 
-pub use execution::{AccessKind, InvalidAccessReason, ExecutionError};
+pub use execution::{AccessKind, BoundaryAccessFailure, ExecutionError, InvalidAccessReason};
 
 pub use internal::InternalViolation;
 
 /// Unified error type for the public ECS API.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ECSError {
     /// Entity spawning error
     Spawn(SpawnError),
@@ -137,6 +133,26 @@ pub enum ECSError {
     /// conditions. Each variant of [`InternalViolation`] maps to a specific
     /// invariant that was broken.
     Internal(InternalViolation),
+
+    /// Environment parameter store error.
+    ///
+    /// Wraps [`EnvironmentError`](crate::environment::error::EnvironmentError)
+    /// so that environment failures propagate with full diagnostic context
+    /// through scheduler and system boundaries.
+    #[cfg(feature = "environment")]
+    Environment(crate::environment::error::EnvironmentError),
+
+    /// Messaging module error.
+    ///
+    /// Wraps [`MessagingError`](crate::messaging::error::MessagingError)
+    /// so that messaging failures propagate through scheduler and system
+    /// boundaries with full diagnostic context.
+    #[cfg(feature = "messaging")]
+    Messaging(crate::messaging::error::MessagingError),
+
+    /// Agent module error.
+    #[cfg(feature = "agents")]
+    Agent(crate::agents::error::AgentError),
 }
 
 impl std::fmt::Display for ECSError {
@@ -148,6 +164,12 @@ impl std::fmt::Display for ECSError {
             ECSError::Registry(e) => write!(f, "registry error: {e}"),
             ECSError::Attribute(e) => write!(f, "attribute error: {e}"),
             ECSError::Internal(v) => write!(f, "internal error: {v}"),
+            #[cfg(feature = "environment")]
+            ECSError::Environment(e) => write!(f, "environment error: {e}"),
+            #[cfg(feature = "messaging")]
+            ECSError::Messaging(e) => write!(f, "messaging error: {e}"),
+            #[cfg(feature = "agents")]
+            ECSError::Agent(e) => write!(f, "agent error: {e}"),
         }
     }
 }
@@ -161,27 +183,57 @@ impl std::error::Error for ECSError {
             ECSError::Registry(e) => Some(e),
             ECSError::Attribute(e) => Some(e),
             ECSError::Internal(v) => Some(v),
+            #[cfg(feature = "environment")]
+            ECSError::Environment(e) => Some(e),
+            #[cfg(feature = "messaging")]
+            ECSError::Messaging(e) => Some(e),
+            #[cfg(feature = "agents")]
+            ECSError::Agent(e) => Some(e),
         }
     }
 }
 
 impl From<SpawnError> for ECSError {
-    fn from(e: SpawnError) -> Self { ECSError::Spawn(e) }
+    fn from(e: SpawnError) -> Self {
+        ECSError::Spawn(e)
+    }
 }
 impl From<ExecutionError> for ECSError {
-    fn from(e: ExecutionError) -> Self { ECSError::Execute(e) }
+    fn from(e: ExecutionError) -> Self {
+        ECSError::Execute(e)
+    }
 }
 impl From<MoveError> for ECSError {
-    fn from(e: MoveError) -> Self { ECSError::Move(e) }
+    fn from(e: MoveError) -> Self {
+        ECSError::Move(e)
+    }
 }
 impl From<RegistryError> for ECSError {
-    fn from(e: RegistryError) -> Self { ECSError::Registry(e) }
+    fn from(e: RegistryError) -> Self {
+        ECSError::Registry(e)
+    }
 }
 impl From<AttributeError> for ECSError {
-    fn from(e: AttributeError) -> Self { ECSError::Attribute(e) }
+    fn from(e: AttributeError) -> Self {
+        ECSError::Attribute(e)
+    }
 }
 impl From<InternalViolation> for ECSError {
-    fn from(v: InternalViolation) -> Self { ECSError::Internal(v) }
+    fn from(v: InternalViolation) -> Self {
+        ECSError::Internal(v)
+    }
+}
+#[cfg(feature = "environment")]
+impl From<crate::environment::error::EnvironmentError> for ECSError {
+    fn from(e: crate::environment::error::EnvironmentError) -> Self {
+        ECSError::Environment(e)
+    }
+}
+#[cfg(feature = "messaging")]
+impl From<crate::messaging::error::MessagingError> for ECSError {
+    fn from(e: crate::messaging::error::MessagingError) -> Self {
+        ECSError::Messaging(e)
+    }
 }
 
 /// Result type used by the ECS engine.

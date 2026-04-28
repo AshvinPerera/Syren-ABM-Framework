@@ -9,8 +9,8 @@
 //!
 //! During system execution, components are accessed in bulk across a contiguous
 //! chunk of archetype storage. [`ChunkBorrow`] captures this access pattern by
-//! holding [`RwLock`] guards for every requested component column — read guards
-//! for shared access, write guards for exclusive access — and exposing the
+//! holding [`RwLock`] guards for every requested component column - read guards
+//! for shared access, write guards for exclusive access - and exposing the
 //! underlying data as raw pointers for zero-cost iteration.
 //!
 //! Borrows are constructed via [`Archetype::borrow_chunk_for`], which validates
@@ -31,21 +31,13 @@ use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
 
-use crate::engine::types::{
-    ChunkID,
-    ComponentID,
-};
+use crate::engine::types::{ChunkID, ComponentID};
 
 use crate::engine::storage::TypeErasedAttribute;
 
-use crate::engine::error::{
-    ExecutionError,
-    ECSError,
-    ECSResult,
-};
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 
 use super::core::Archetype;
-
 
 /// Represents a temporary borrow of a single archetype chunk for system execution.
 ///
@@ -74,14 +66,22 @@ pub struct ChunkBorrow<'a> {
     pub writes: SmallVec<[*mut u8; 8]>,
 
     /// Holds the read locks alive for the lifetime of this borrow.
-    _read_guards: SmallVec<[(ComponentID, RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>); 8]>,
+    _read_guards: SmallVec<
+        [(
+            ComponentID,
+            RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>,
+        ); 8],
+    >,
     /// Holds the write locks alive for the lifetime of this borrow.
-    _write_guards: SmallVec<[(ComponentID, RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>); 8]>,
+    _write_guards: SmallVec<
+        [(
+            ComponentID,
+            RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>,
+        ); 8],
+    >,
 }
 
-
 impl Archetype {
-
     /// Borrows a chunk of component data for system execution.
     ///
     /// ## Purpose
@@ -118,17 +118,16 @@ impl Archetype {
         read_ids: &[ComponentID],
         write_ids: &[ComponentID],
     ) -> ECSResult<ChunkBorrow<'a>> {
-        let length = self.chunk_valid_length(chunk as usize)
+        let length = self
+            .chunk_valid_length(chunk as usize)
             .map_err(|_| ExecutionError::InternalExecutionError)?;
 
         for &id in read_ids {
             if write_ids.contains(&id) {
-                return Err(ECSError::Execute(
-                    ExecutionError::InvalidQueryAccess {
-                        component_id: id,
-                        reason: crate::engine::error::InvalidAccessReason::ReadAndWrite,
-                    }
-                ));
+                return Err(ECSError::Execute(ExecutionError::InvalidQueryAccess {
+                    component_id: id,
+                    reason: crate::engine::error::InvalidAccessReason::ReadAndWrite,
+                }));
             }
         }
 
@@ -146,21 +145,34 @@ impl Archetype {
         all.sort_unstable_by_key(|(cid, _)| *cid);
 
         // Guard storage.
-        let mut read_guards: SmallVec<[(ComponentID, RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>); 8]> =
-            SmallVec::with_capacity(read_ids.len());
-        let mut write_guards: SmallVec<[(ComponentID, RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>); 8]> =
-            SmallVec::with_capacity(write_ids.len());
+        let mut read_guards: SmallVec<
+            [(
+                ComponentID,
+                RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>,
+            ); 8],
+        > = SmallVec::with_capacity(read_ids.len());
+        let mut write_guards: SmallVec<
+            [(
+                ComponentID,
+                RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>,
+            ); 8],
+        > = SmallVec::with_capacity(write_ids.len());
 
         for (cid, is_write) in all {
             // Use find_component for sparse lookup.
-            let attr = self.find_component(cid)
+            let attr = self
+                .find_component(cid)
                 .ok_or(ExecutionError::MissingComponent { component_id: cid })?;
 
             if is_write {
-                let g = attr.write().map_err(|_| ExecutionError::InternalExecutionError)?;
+                let g = attr
+                    .write()
+                    .map_err(|_| ExecutionError::InternalExecutionError)?;
                 write_guards.push((cid, g));
             } else {
-                let g = attr.read().map_err(|_| ExecutionError::InternalExecutionError)?;
+                let g = attr
+                    .read()
+                    .map_err(|_| ExecutionError::InternalExecutionError)?;
                 read_guards.push((cid, g));
             }
         }

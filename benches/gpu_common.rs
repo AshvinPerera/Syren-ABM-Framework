@@ -4,21 +4,9 @@
 use std::sync::{Arc, RwLock};
 
 use abm_framework::{
-    Bundle,
-    Command,
-    ComponentID,
-    ComponentRegistry,
-    ECSManager,
-    ECSReference,
-    ECSResult,
-    ECSError,
-    EntityShards,
-    Signature,
-    System,
-    SystemBackend,
+    advanced::EntityShards, AccessSets, Bundle, Command, ComponentID, ComponentRegistry, ECSError,
+    ECSManager, ECSReference, ECSResult, GPUPod, GpuSystem, Signature, System, SystemBackend,
     SystemID,
-    AccessSets,
-    GpuSystem,
 };
 
 pub const AGENTS: usize = 1_000_000;
@@ -29,13 +17,15 @@ pub struct Energy {
     pub v: f32,
 }
 
+unsafe impl GPUPod for Energy {}
+
 /// Creates a shared, frozen component registry with Energy registered.
 /// Returns the registry handle and the Energy component ID.
 pub fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, ComponentID) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let energy_id = {
         let mut reg = registry.write().unwrap();
-        let id = reg.register::<Energy>().unwrap();
+        let id = reg.register_gpu::<Energy>().unwrap();
         reg.freeze();
         id
     };
@@ -49,11 +39,7 @@ pub fn make_world(shards: usize, registry: Arc<RwLock<ComponentRegistry>>) -> EC
 }
 
 /// Spawns `n` entities each carrying an Energy component.
-pub fn populate_energy(
-    ecs: &ECSManager,
-    n: usize,
-    energy_id: ComponentID,
-) -> ECSResult<()> {
+pub fn populate_energy(ecs: &ECSManager, n: usize, energy_id: ComponentID) -> ECSResult<()> {
     let world = ecs.world_ref();
 
     world.with_exclusive(|_| {
@@ -83,18 +69,25 @@ impl EnergyDecayGpu {
             access: AccessSets {
                 read: Signature::default(),
                 write,
+                ..AccessSets::default()
             },
         }
     }
 }
 
 impl System for EnergyDecayGpu {
-    fn id(&self) -> SystemID { self.id }
+    fn id(&self) -> SystemID {
+        self.id
+    }
 
-    fn access(&self) -> &AccessSets { &self.access }
+    fn access(&self) -> &AccessSets {
+        &self.access
+    }
 
     #[inline]
-    fn backend(&self) -> SystemBackend { SystemBackend::GPU }
+    fn backend(&self) -> SystemBackend {
+        SystemBackend::GPU
+    }
 
     fn run(&self, _world: ECSReference<'_>) -> ECSResult<()> {
         Ok(())
@@ -123,7 +116,11 @@ impl GpuSystem for EnergyDecayGpu {
         "#
     }
 
-    fn entry_point(&self) -> &'static str { "main" }
+    fn entry_point(&self) -> &'static str {
+        "main"
+    }
 
-    fn workgroup_size(&self) -> u32 { 256 }
+    fn workgroup_size(&self) -> u32 {
+        256
+    }
 }

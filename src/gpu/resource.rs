@@ -9,9 +9,9 @@
 //! Resources are registered once and assigned a stable [`GPUResourceID`]. The registry tracks
 //! three independent dirty flags per resource:
 //!
-//! - **`created`** — GPU buffers have been allocated via [`GPUResource::create_gpu`].
-//! - **`cpu_dirty`** — CPU-side data has changed and needs to be uploaded to the GPU.
-//! - **`pending_download`** — GPU-side data has been written and needs to be read back to the CPU.
+//! - **`created`** - GPU buffers have been allocated via [`GPUResource::create_gpu`].
+//! - **`cpu_dirty`** - CPU-side data has changed and needs to be uploaded to the GPU.
+//! - **`pending_download`** - GPU-side data has been written and needs to be read back to the CPU.
 //!
 //! Synchronization is **explicit**: callers must call [`GPUResourceRegistry::mark_cpu_dirty`] or
 //! [`GPUResourceRegistry::mark_pending_download`] to schedule transfers, then drive them with
@@ -34,8 +34,8 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::types::GPUResourceID;
-use crate::engine::error::{ECSResult, ECSError, ExecutionError};
 
 use crate::gpu::GPUContext;
 
@@ -50,7 +50,11 @@ impl GPUBindingDesc {
     /// Compact key for pipeline-cache hashing.
     #[inline]
     pub fn key(self) -> u8 {
-        if self.read_only { 1 } else { 2 }
+        if self.read_only {
+            1
+        } else {
+            2
+        }
     }
 }
 
@@ -62,7 +66,11 @@ impl GPUBindingDesc {
 /// - `download` is called when CPU needs GPU-written data (explicitly marked pending).
 pub trait GPUResource: Send + Sync {
     /// Human-readable name for diagnostics.
-    fn name(&self) -> &'static str;
+    ///
+    /// Returning a borrow from `&self` is permitted, so implementations that
+    /// need dynamic names can store an owned `String` and return `&self.name`
+    /// without leaking memory.
+    fn name(&self) -> &str;
 
     /// Called once when the GPU runtime is initialized for this world.
     fn create_gpu(&mut self, ctx: &GPUContext) -> ECSResult<()>;
@@ -72,6 +80,16 @@ pub trait GPUResource: Send + Sync {
 
     /// Called when GPU-side data must be read back for CPU usage.
     fn download(&mut self, ctx: &GPUContext) -> ECSResult<()>;
+
+    /// Whether the generic GPU synchronization step should automatically call
+    /// [`GPUResource::download`] when this resource is marked pending.
+    ///
+    /// Most resources use the default. Some framework-owned resources, such as
+    /// GPU message buffers, need boundary-specific synchronization so they can
+    /// avoid unnecessary GPU-to-CPU transfers for GPU-only consumers.
+    fn automatic_download(&self) -> bool {
+        true
+    }
 
     /// Returns the binding contract for this resource.
     ///
@@ -95,15 +113,6 @@ pub trait GPUResource: Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-#[allow(dead_code)]
-/// Common helper for mapping a string error into the ECS error type.
-#[inline]
-pub fn gpu_resource_err(what: &'static str, detail: impl Into<String>) -> ECSError {
-    ECSError::from(ExecutionError::GpuDispatchFailed {
-        message: format!("{what}: {}", detail.into()).into(),
-    })
-}
-
 #[cfg(feature = "gpu")]
 struct GPUResourceEntry {
     resource: Box<dyn GPUResource>,
@@ -125,6 +134,7 @@ struct GPUResourceEntry {
 pub struct GPUResourceRegistry {
     entries: Vec<GPUResourceEntry>,
     next_id: GPUResourceID,
+    binding_generation: u64,
 }
 
 #[cfg(feature = "gpu")]
@@ -136,9 +146,13 @@ impl GPUResourceRegistry {
     }
 
     /// Registers a new world-owned GPU resource and returns its ID.
-    pub fn register<R: GPUResource + 'static>(&mut self, r: R) -> GPUResourceID {
+    pub fn register<R: GPUResource + 'static>(&mut self, r: R) -> ECSResult<GPUResourceID> {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+        self.next_id = self.next_id.checked_add(1).ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: "GPU resource id space exhausted".into(),
+            })
+        })?;
 
         self.entries.push(GPUResourceEntry {
             resource: Box::new(r),
@@ -147,23 +161,37 @@ impl GPUResourceRegistry {
             pending_download: false,
         });
 
-        id
+        Ok(id)
+    }
+
+    /// Monotonic generation for bindable buffers owned by registered resources.
+    #[inline]
+    pub(crate) fn binding_generation(&self) -> u64 {
+        self.binding_generation
     }
 
     /// Marks a resource as modified on the CPU.
     #[inline]
-    pub fn mark_cpu_dirty(&mut self, id: GPUResourceID) {
-        if let Some(e) = self.entries.get_mut(id as usize) {
-            e.cpu_dirty = true;
-        }
+    pub fn mark_cpu_dirty(&mut self, id: GPUResourceID) -> ECSResult<()> {
+        let e = self.entries.get_mut(id as usize).ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: format!("missing gpu resource id {id}").into(),
+            })
+        })?;
+        e.cpu_dirty = true;
+        Ok(())
     }
 
     /// Marks a resource as requiring GPU to CPU synchronization.
     #[inline]
-    pub fn mark_pending_download(&mut self, id: GPUResourceID) {
-        if let Some(e) = self.entries.get_mut(id as usize) {
-            e.pending_download = true;
-        }
+    pub fn mark_pending_download(&mut self, id: GPUResourceID) -> ECSResult<()> {
+        let e = self.entries.get_mut(id as usize).ok_or_else(|| {
+            ECSError::from(ExecutionError::GpuDispatchFailed {
+                message: format!("missing gpu resource id {id}").into(),
+            })
+        })?;
+        e.pending_download = true;
+        Ok(())
     }
 
     /// Ensures GPU buffers exist for every registered resource.
@@ -172,6 +200,7 @@ impl GPUResourceRegistry {
             if !e.created {
                 e.resource.create_gpu(context)?;
                 e.created = true;
+                self.binding_generation = self.binding_generation.wrapping_add(1);
             }
         }
         Ok(())
@@ -183,6 +212,7 @@ impl GPUResourceRegistry {
             if e.cpu_dirty {
                 e.resource.upload(context)?;
                 e.cpu_dirty = false;
+                self.binding_generation = self.binding_generation.wrapping_add(1);
             }
         }
         Ok(())
@@ -192,7 +222,9 @@ impl GPUResourceRegistry {
     pub fn download_pending(&mut self, context: &GPUContext) -> ECSResult<()> {
         for e in &mut self.entries {
             if e.pending_download {
-                e.resource.download(context)?;
+                if e.resource.automatic_download() {
+                    e.resource.download(context)?;
+                }
                 e.pending_download = false;
             }
         }
@@ -208,7 +240,9 @@ impl GPUResourceRegistry {
         for &id in ids {
             if let Some(e) = self.entries.get_mut(id as usize) {
                 if e.pending_download {
-                    e.resource.download(context)?;
+                    if e.resource.automatic_download() {
+                        e.resource.download(context)?;
+                    }
                     e.pending_download = false;
                 }
             }

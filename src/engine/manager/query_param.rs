@@ -9,15 +9,15 @@
 //! [`Write<T>`], as well as for tuples of those markers. Each implementation
 //! knows how to:
 //!
-//! 1. **Validate** — confirm that a [`BuiltQuery`] has the correct number of
+//! 1. **Validate** - confirm that a [`BuiltQuery`] has the correct number of
 //!    read and write columns for this parameter shape.
-//! 2. **Iterate** — reinterpret raw byte slices as typed component slices and
+//! 2. **Iterate** - reinterpret raw byte slices as typed component slices and
 //!    invoke a caller-provided closure once per entity.
 //!
 //! Together these enable [`ECSReference::for_each`] to accept a single type
 //! parameter that encodes the full read/write signature of the iteration:
 //!
-//! ```ignore
+//! ```text
 //! ecs.for_each::<(Read<Position>, Read<Velocity>, Write<Acceleration>)>(
 //!     query,
 //!     |(pos, vel, acc)| { /* ... */ },
@@ -41,9 +41,9 @@
 //! - uphold the aliasing guarantees required by `cast_slice` /
 //!   `cast_slice_mut`.
 
+use crate::engine::error::{ECSError, ECSResult, InternalViolation};
 use crate::engine::query::BuiltQuery;
 use crate::engine::storage::{cast_slice, cast_slice_mut};
-use crate::engine::error::InternalViolation;
 
 /// Marker for a read-only component parameter in a tuple-based query.
 pub struct Read<T>(std::marker::PhantomData<T>);
@@ -64,12 +64,12 @@ pub unsafe trait QueryParam: Send + Sync {
     ///
     /// Each implementation defines this as a concrete `Fn` signature matching
     /// the typed references for the parameter tuple. For example:
-    /// - `Read<A>` → `Fn(&A)`
-    /// - `(Read<A>, Write<B>)` → `Fn((&A, &mut B))`
+    /// - `Read<A>` -> `Fn(&A)`
+    /// - `(Read<A>, Write<B>)` -> `Fn((&A, &mut B))`
     type Closure: ?Sized;
 
     /// Validates that the query shape (read/write counts) matches this param tuple.
-    fn validate(query: &BuiltQuery) -> Result<(), InternalViolation>;
+    fn validate(query: &BuiltQuery) -> ECSResult<()>;
 
     /// Iterates over a single chunk, reinterpreting the raw byte slices as
     /// typed component slices and invoking `f` once per entity.
@@ -81,11 +81,7 @@ pub unsafe trait QueryParam: Send + Sync {
     ///   for the corresponding component,
     /// - all byte slices represent the same number of entities,
     /// - read/write aliasing rules are upheld by the borrow tracker.
-    unsafe fn for_each_chunk(
-        reads: &[&[u8]],
-        writes: &mut [&mut [u8]],
-        f: &Self::Closure,
-    );
+    unsafe fn for_each_chunk(reads: &[&[u8]], writes: &mut [&mut [u8]], f: &Self::Closure);
 }
 
 // --- Implementations for single Read/Write ---
@@ -93,22 +89,19 @@ pub unsafe trait QueryParam: Send + Sync {
 unsafe impl<A: 'static + Send + Sync> QueryParam for Read<A> {
     type Closure = dyn Fn(&A) + Send + Sync;
 
-    fn validate(query: &BuiltQuery) -> Result<(), InternalViolation> {
-        if query.reads.len() != 1 || !query.writes.is_empty() {
-            return Err(InternalViolation::QueryShapeMismatch {
+    fn validate(query: &BuiltQuery) -> ECSResult<()> {
+        if query.reads().len() != 1 || !query.writes().is_empty() {
+            return Err(ECSError::from(InternalViolation::QueryShapeMismatch {
                 method: "for_each<Read<A>>",
                 expected_reads: 1,
                 expected_writes: 0,
-            });
+            }));
         }
+        query.validate_read_type::<A>(0, "for_each<Read<A>>")?;
         Ok(())
     }
 
-    unsafe fn for_each_chunk(
-        reads: &[&[u8]],
-        _writes: &mut [&mut [u8]],
-        f: &Self::Closure,
-    ) {
+    unsafe fn for_each_chunk(reads: &[&[u8]], _writes: &mut [&mut [u8]], f: &Self::Closure) {
         // SAFETY: Caller guarantees the byte slice is correctly typed for A.
         let a = unsafe { cast_slice::<A>(reads[0].as_ptr(), reads[0].len()) };
         for v in a {
@@ -120,22 +113,19 @@ unsafe impl<A: 'static + Send + Sync> QueryParam for Read<A> {
 unsafe impl<A: 'static + Send + Sync> QueryParam for Write<A> {
     type Closure = dyn Fn(&mut A) + Send + Sync;
 
-    fn validate(query: &BuiltQuery) -> Result<(), InternalViolation> {
-        if !query.reads.is_empty() || query.writes.len() != 1 {
-            return Err(InternalViolation::QueryShapeMismatch {
+    fn validate(query: &BuiltQuery) -> ECSResult<()> {
+        if !query.reads().is_empty() || query.writes().len() != 1 {
+            return Err(ECSError::from(InternalViolation::QueryShapeMismatch {
                 method: "for_each<Write<A>>",
                 expected_reads: 0,
                 expected_writes: 1,
-            });
+            }));
         }
+        query.validate_write_type::<A>(0, "for_each<Write<A>>")?;
         Ok(())
     }
 
-    unsafe fn for_each_chunk(
-        _reads: &[&[u8]],
-        writes: &mut [&mut [u8]],
-        f: &Self::Closure,
-    ) {
+    unsafe fn for_each_chunk(_reads: &[&[u8]], writes: &mut [&mut [u8]], f: &Self::Closure) {
         // SAFETY: Caller guarantees the byte slice is correctly typed for A.
         let a = unsafe { cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len()) };
         for v in a {
@@ -155,16 +145,22 @@ macro_rules! impl_query_param_tuple {
         {
             type Closure = dyn Fn(($(&$R,)* $(&mut $W,)*)) + Send + Sync;
 
-            fn validate(query: &BuiltQuery) -> Result<(), InternalViolation> {
+            fn validate(query: &BuiltQuery) -> ECSResult<()> {
                 let expected_reads = impl_query_param_tuple!(@count $($R)*);
                 let expected_writes = impl_query_param_tuple!(@count $($W)*);
-                if query.reads.len() != expected_reads || query.writes.len() != expected_writes {
-                    return Err(InternalViolation::QueryShapeMismatch {
+                if query.reads().len() != expected_reads || query.writes().len() != expected_writes {
+                    return Err(ECSError::from(InternalViolation::QueryShapeMismatch {
                         method: $method,
                         expected_reads,
                         expected_writes,
-                    });
+                    }));
                 }
+                $(
+                    query.validate_read_type::<$R>($ri, $method)?;
+                )*
+                $(
+                    query.validate_write_type::<$W>($wi, $method)?;
+                )*
                 Ok(())
             }
 

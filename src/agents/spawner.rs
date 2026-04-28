@@ -5,7 +5,7 @@
 //! [`AgentSpawner`] is a short-lived builder scoped to one spawn operation.
 //! It starts from the defaults defined in an [`AgentTemplate`], lets the
 //! caller override individual component values via [`AgentSpawner::set`], and
-//! then emits a single deferred `Command::Spawn` via
+//! then emits a single tagged deferred spawn command via
 //! [`AgentSpawner::spawn`].
 //!
 //! ## Bundle construction
@@ -29,22 +29,22 @@
 
 use std::any::Any;
 
-use crate::engine::types::ComponentID;
-use crate::engine::component::Bundle;
 use crate::engine::commands::Command;
-use crate::engine::manager::ECSReference;
+use crate::engine::component::Bundle;
 use crate::engine::error::ECSResult;
+use crate::engine::manager::ECSReference;
+use crate::engine::types::ComponentID;
 
 use super::error::{AgentError, AgentResult};
 use super::template::AgentTemplate;
 
-// ── AgentSpawner ─────────────────────────────────────────────────────────────
+// -- AgentSpawner -------------------------------------------------------------
 
 /// Builder for spawning one agent from a template with per-field overrides.
 ///
 /// Created via [`AgentTemplate::spawner`]. Override specific component values
 /// with [`AgentSpawner::set`], then call [`AgentSpawner::spawn`] to enqueue a
-/// deferred `Command::Spawn`.
+/// deferred tagged spawn.
 pub struct AgentSpawner<'t> {
     template: &'t AgentTemplate,
     overrides: Vec<(ComponentID, Box<dyn Any + Send>)>,
@@ -53,18 +53,17 @@ pub struct AgentSpawner<'t> {
 impl<'t> AgentSpawner<'t> {
     /// Creates a spawner seeded with `template`'s defaults.
     pub fn new(template: &'t AgentTemplate) -> Self {
-        Self { template, overrides: Vec::new() }
+        Self {
+            template,
+            overrides: Vec::new(),
+        }
     }
 
     /// Overrides the value for component `id` in this spawn instance.
     ///
     /// If `set` is called multiple times with the same `id`, the last value
     /// wins.
-    pub fn set<T: Any + Send + 'static>(
-        mut self,
-        id: ComponentID,
-        value: T,
-    ) -> AgentResult<Self> {
+    pub fn set<T: Any + Send + 'static>(mut self, id: ComponentID, value: T) -> AgentResult<Self> {
         if !self.template.signature.has(id) {
             return Err(AgentError::MissingComponent(id));
         }
@@ -73,14 +72,14 @@ impl<'t> AgentSpawner<'t> {
         Ok(self)
     }
 
-    /// Enqueues a `Command::Spawn` that materialises the agent.
+    /// Enqueues a tagged spawn command that materialises the agent.
     ///
     /// # Algorithm
     ///
     /// 1. Build a [`Bundle`] from the template's default factories using
     ///    [`Bundle::insert_boxed`] to avoid double-boxing.
     /// 2. Apply per-instance overrides (last write wins).
-    /// 3. Defer a `Command::Spawn { bundle }` via [`ECSReference::defer`].
+    /// 3. Defer a tagged spawn via [`ECSReference::defer`].
     ///
     /// The entity is not created immediately. It is materialised when
     /// `apply_deferred_commands` processes the command queue at the next
@@ -105,19 +104,23 @@ impl<'t> AgentSpawner<'t> {
             bundle.insert_boxed(cid, value);
         }
 
-        // 3. Enqueue deferred spawn.
-        ecs.defer(Command::Spawn { bundle })
+        // 3. Enqueue deferred tagged spawn.
+        ecs.defer(Command::SpawnTagged {
+            bundle,
+            tag: self.template.name().to_owned(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::agents::template::AgentTemplate;
     use crate::agents::error::AgentError;
+    use crate::agents::template::AgentTemplate;
 
-    #[allow(dead_code)]
     #[derive(Default, Clone)]
-    struct Wealth(f64);
+    struct Wealth {
+        _value: f64,
+    }
 
     #[test]
     fn spawner_set_overrides_are_stored() {
@@ -125,7 +128,10 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let spawner = tmpl.spawner().set::<Wealth>(0, Wealth(99.0)).unwrap();
+        let spawner = tmpl
+            .spawner()
+            .set::<Wealth>(0, Wealth { _value: 99.0 })
+            .unwrap();
         assert_eq!(spawner.overrides.len(), 1);
         let (cid, _) = &spawner.overrides[0];
         assert_eq!(*cid, 0);
@@ -137,10 +143,11 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let spawner = tmpl.spawner()
-            .set::<Wealth>(0, Wealth(1.0))
+        let spawner = tmpl
+            .spawner()
+            .set::<Wealth>(0, Wealth { _value: 1.0 })
             .unwrap()
-            .set::<Wealth>(0, Wealth(2.0))
+            .set::<Wealth>(0, Wealth { _value: 2.0 })
             .unwrap();
         assert_eq!(spawner.overrides.len(), 1);
     }
@@ -151,7 +158,7 @@ mod tests {
             .with_component::<Wealth>(0)
             .unwrap()
             .build();
-        let result = tmpl.spawner().set::<Wealth>(99, Wealth(1.0));
+        let result = tmpl.spawner().set::<Wealth>(99, Wealth { _value: 1.0 });
         assert!(matches!(result, Err(AgentError::MissingComponent(99))));
     }
 }

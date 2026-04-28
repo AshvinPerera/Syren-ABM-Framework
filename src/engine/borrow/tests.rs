@@ -2,24 +2,24 @@
 //!
 //! Coverage includes:
 //!
-//! - **BorrowTracker** — initial state, single and multiple readers, write
+//! - **BorrowTracker** - initial state, single and multiple readers, write
 //!   acquisition and release, conflict detection (read-write, write-read,
 //!   write-write), dirty-tracked [`BorrowTracker::clear`], and the atomicity
-//!   guarantee that the last reader transitions directly `2 → 0` without
+//!   guarantee that the last reader transitions directly `2 -> 0` without
 //!   passing through the transient write-lock state `1`.
 //!
-//! - **BorrowGuard** — RAII acquisition and release on drop, rejection of
+//! - **BorrowGuard** - RAII acquisition and release on drop, rejection of
 //!   overlapping read/write component sets, deduplication of repeated
 //!   component IDs, and rollback of partially-acquired locks on failure.
 //!
-//! - **Concurrency** — multithreaded readers holding locks simultaneously,
+//! - **Concurrency** - multithreaded readers holding locks simultaneously,
 //!   and a stress test asserting that state `1` is never transiently
 //!   observable during concurrent read-only access.
 
-use std::sync::atomic::Ordering;
-use crate::engine::types::ComponentID;
-use crate::engine::error::{AccessKind, ExecutionError, InvalidAccessReason};
 use super::*;
+use crate::engine::error::{AccessKind, ExecutionError, InvalidAccessReason};
+use crate::engine::types::ComponentID;
+use std::sync::atomic::Ordering;
 
 // Helpers
 
@@ -27,7 +27,11 @@ use super::*;
 macro_rules! assert_borrow_conflict {
     ($result:expr, $id:expr, $held:expr, $requested:expr) => {
         match $result.unwrap_err() {
-            ExecutionError::BorrowConflict { component_id, held, requested } => {
+            ExecutionError::BorrowConflict {
+                component_id,
+                held,
+                requested,
+            } => {
                 assert_eq!(component_id, $id);
                 assert_eq!(held, $held);
                 assert_eq!(requested, $requested);
@@ -68,19 +72,19 @@ fn multiple_readers() {
     tracker.acquire_read(id).unwrap();
     tracker.acquire_read(id).unwrap();
     tracker.acquire_read(id).unwrap();
-    // 3 readers → state = 4
+    // 3 readers -> state = 4
     assert_eq!(tracker.states[id as usize].load(Ordering::Relaxed), 4);
 
     tracker.release_read(id);
-    // 2 readers → state = 3
+    // 2 readers -> state = 3
     assert_eq!(tracker.states[id as usize].load(Ordering::Relaxed), 3);
 
     tracker.release_read(id);
-    // 1 reader → state = 2
+    // 1 reader -> state = 2
     assert_eq!(tracker.states[id as usize].load(Ordering::Relaxed), 2);
 
     tracker.release_read(id);
-    // 0 readers → state = 0 (unlocked, not 1)
+    // 0 readers -> state = 0 (unlocked, not 1)
     assert_eq!(tracker.states[id as usize].load(Ordering::Relaxed), 0);
 }
 
@@ -192,7 +196,7 @@ fn clear_only_touches_dirty_components() {
 #[test]
 fn release_read_last_reader_goes_to_zero_not_one() {
     // This test verifies the fix for the race condition in the original
-    // release_read. The last reader must transition 2 → 0 atomically
+    // release_read. The last reader must transition 2 -> 0 atomically
     // (via compare_exchange), never passing through the transient state
     // 1 which is indistinguishable from a write lock.
     let tracker = BorrowTracker::new();
@@ -265,7 +269,10 @@ fn guard_rejects_read_write_overlap() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        ExecutionError::InvalidQueryAccess { component_id, reason } => {
+        ExecutionError::InvalidQueryAccess {
+            component_id,
+            reason,
+        } => {
             assert_eq!(component_id, 5);
             assert_eq!(reason, InvalidAccessReason::ReadAndWrite);
         }
@@ -293,7 +300,7 @@ fn guard_rollback_on_partial_failure() {
 
     // Try to acquire reads on [0, 1] and writes on [2].
     // Write on 2 should succeed, read on 0 should succeed,
-    // read on 1 should fail — and then 0 and 2 should be released.
+    // read on 1 should fail - and then 0 and 2 should be released.
     let result = BorrowGuard::new(&tracker, &[0, 1], &[2]);
     assert!(result.is_err());
 
@@ -344,8 +351,8 @@ fn concurrent_release_read_never_produces_state_one() {
     // Stress test: many readers acquire and release concurrently.
     // At no point should the state ever be observed as 1 (write-locked),
     // which was possible with the old fetch_sub + store implementation.
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     let tracker = Arc::new(BorrowTracker::new());
     let id: ComponentID = 99;

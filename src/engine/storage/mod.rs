@@ -81,9 +81,9 @@
 
 mod attribute;
 mod locked_attribute;
-mod type_erased_attribute;
 mod slice;
 mod tests;
+mod type_erased_attribute;
 
 pub use attribute::Attribute;
 pub use locked_attribute::LockedAttribute;

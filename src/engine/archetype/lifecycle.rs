@@ -7,12 +7,12 @@
 //!
 //! Both operations uphold the following invariants:
 //!
-//! - **Column density** — component storage is always kept dense. Removal uses
+//! - **Column density** - component storage is always kept dense. Removal uses
 //!   `swap_remove` to fill gaps left by departed rows.
-//! - **Attribute alignment** — every column for a given archetype must agree on
+//! - **Attribute alignment** - every column for a given archetype must agree on
 //!   the `(chunk, row)` position of each entity. Any disagreement is treated as
 //!   an [`InternalViolation`] and the operation is aborted.
-//! - **Metadata consistency** — `entity_positions` and per-entity [`EntityLocation`]
+//! - **Metadata consistency** - `entity_positions` and per-entity [`EntityLocation`]
 //!   records are updated atomically with respect to the metadata lock, and only
 //!   after all column operations have completed.
 //!
@@ -20,9 +20,9 @@
 //!
 //! To prevent deadlocks, a strict acquisition order is observed throughout:
 //!
-//! 1. **Column locks** — acquired and released one at a time during the component
+//! 1. **Column locks** - acquired and released one at a time during the component
 //!    read/write loop.
-//! 2. **Metadata lock** (`self.meta`) — acquired only *after* all column locks
+//! 2. **Metadata lock** (`self.meta`) - acquired only *after* all column locks
 //!    have been released and, in the case of despawn, after the entity handle
 //!    has been returned to [`EntityShards`].
 //!
@@ -33,32 +33,24 @@
 //! `despawn_on` leave the entity handle intact so that the archetype state
 //! remains recoverable.
 
-use crate::engine::types::{
-    ComponentID,
-    ShardID,
-    ChunkID,
-    RowID,
-};
+use crate::engine::types::{ChunkID, ComponentID, RowID, ShardID};
+
+use std::any::Any;
 
 use crate::engine::component::DynamicBundle;
 
-use crate::engine::entity::{
-    Entity,
-    EntityLocation,
-    EntityShards,
+use crate::engine::entity::{Entity, EntityLocation, EntityShards};
+
+use crate::engine::error::{
+    AttributeError, ECSError, ECSResult, InternalViolation, SpawnError, StaleEntityError,
+    TypeMismatchError,
 };
 
-use crate::engine::error::{SpawnError, ECSError, ECSResult, InternalViolation, StaleEntityError};
-
-use crate::engine::storage::{
-    LockedAttribute
-};
+use crate::engine::storage::LockedAttribute;
 
 use super::core::Archetype;
 
-
 impl Archetype {
-
     /// Spawns a new entity into this archetype using the provided component bundle.
     ///
     /// ## Purpose
@@ -89,52 +81,70 @@ impl Archetype {
         shard_id: ShardID,
         mut bundle: impl DynamicBundle,
     ) -> ECSResult<Entity> {
-        let mut written_indices: Vec<usize> = Vec::new();
-        let mut reference_position: Option<(ChunkID, RowID)> = None;
+        let mut pending_values: Vec<(usize, Box<dyn Any>)> =
+            Vec::with_capacity(self.components.len());
 
         for idx in 0..self.components.len() {
             let (component_id, ref attr) = self.components[idx];
-
-            // Lock column mutably for the push.
-            let mut guard = Self::lock_write_spawn(attr)?;
-
-            // Identify expected type for errors.
+            let guard = Self::lock_write_spawn(attr)?;
             let type_id = guard.as_ref().element_type_id();
             let name = guard.as_ref().element_type_name();
 
             let Some(value) = bundle.take(component_id) else {
-                // Clean up already-written components
-                if let Some((c, r)) = reference_position {
-                    Self::rollback_written(&self.components, &written_indices, c, r);
-                }
                 return Err(SpawnError::MissingComponent { type_id, name }.into());
             };
+
+            let actual = value.as_ref().type_id();
+            if actual != type_id {
+                return Err(
+                    SpawnError::StoragePushFailedWith(AttributeError::TypeMismatch(
+                        TypeMismatchError {
+                            expected: type_id,
+                            actual,
+                            expected_name: name,
+                            actual_name: "",
+                        },
+                    ))
+                    .into(),
+                );
+            }
+
+            let value: Box<dyn Any> = value;
+            pending_values.push((idx, value));
+        }
+
+        let mut written_positions: Vec<(usize, ChunkID, RowID)> = Vec::new();
+        let mut reference_position: Option<(ChunkID, RowID)> = None;
+
+        for (idx, value) in pending_values {
+            let (_component_id, ref attr) = self.components[idx];
+
+            // Lock column mutably for the push.
+            let mut guard = Self::lock_write_spawn(attr)?;
 
             let position = match guard.as_mut().push_dyn(value) {
                 Ok(p) => p,
                 Err(e) => {
-                    if let Some((c, r)) = reference_position {
-                        Self::rollback_written(&self.components, &written_indices, c, r);
-                    }
+                    Self::rollback_written_positions(&self.components, &written_positions);
                     return Err(SpawnError::StoragePushFailedWith(e).into());
                 }
             };
 
             if let Some(rp) = reference_position {
                 if position != rp {
-                    for &j in &written_indices {
-                        let (_, ref a) = self.components[j];
-                        if let Ok(mut g) = Self::lock_write_spawn(a) {
-                            let _ = g.as_mut().swap_remove_dyn(rp.0, rp.1);
-                        }
+                    written_positions.push((idx, position.0, position.1));
+                    Self::rollback_written_positions(&self.components, &written_positions);
+                    return Err(SpawnError::MisalignedStorage {
+                        expected: rp,
+                        got: position,
                     }
-                    return Err(SpawnError::MisalignedStorage { expected: rp, got: position }.into());
+                    .into());
                 }
             } else {
                 reference_position = Some(position);
             }
 
-            written_indices.push(idx);
+            written_positions.push((idx, position.0, position.1));
         }
 
         let Some((chunk, row)) = reference_position else {
@@ -143,31 +153,38 @@ impl Archetype {
 
         // Metadata lock acquired only after all column locks are released.
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut meta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
 
             if meta.entity_positions[chunk as usize][row as usize].is_some() {
+                drop(meta);
+                Self::rollback_written_positions(&self.components, &written_positions);
                 return Err(InternalViolation::SpawnSlotOccupied.into());
             }
         }
 
-        let location = EntityLocation { archetype: self.archetype_id, chunk, row };
+        let location = EntityLocation {
+            archetype: self.archetype_id,
+            chunk,
+            row,
+        };
 
         // Allocate entity handle
         let entity = shards.spawn_on(shard_id, location).map_err(|e| {
-            for &j in &written_indices {
-                let (_, ref a) = self.components[j];
-                if let Ok(mut g) = Self::lock_write_spawn(a) {
-                    let _ = g.as_mut().swap_remove_dyn(chunk, row);
-                }
-            }
+            Self::rollback_written_positions(&self.components, &written_positions);
             ECSError::from(e)
         })?;
 
         // Write entity into metadata
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut meta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
             meta.entity_positions[chunk as usize][row as usize] = Some(entity);
             meta.length += 1;
         }
@@ -246,24 +263,32 @@ impl Archetype {
 
         // Update metadata (acquired after all column locks).
         {
-            let mut meta = self.meta.write().map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+            let mut meta = self
+                .meta
+                .write()
+                .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
             Self::ensure_capacity(&mut meta, entity_chunk as usize + 1);
 
             if let Some((moved_chunk, moved_row)) = moved_from {
                 Self::ensure_capacity(&mut meta, moved_chunk as usize + 1);
                 let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize]
-                    .ok_or(ECSError::from(InternalViolation::DespawnMovedSlotMissingEntity))?;
+                    .ok_or(ECSError::from(
+                        InternalViolation::DespawnMovedSlotMissingEntity,
+                    ))?;
 
-                meta.entity_positions[entity_chunk as usize][entity_row as usize] = Some(moved_entity);
+                meta.entity_positions[entity_chunk as usize][entity_row as usize] =
+                    Some(moved_entity);
 
-                shards.set_location(
-                    moved_entity,
-                    EntityLocation {
-                        archetype: self.archetype_id,
-                        chunk: entity_chunk,
-                        row: entity_row,
-                    },
-                ).map_err(ECSError::from)?;
+                shards
+                    .set_location(
+                        moved_entity,
+                        EntityLocation {
+                            archetype: self.archetype_id,
+                            chunk: entity_chunk,
+                            row: entity_row,
+                        },
+                    )
+                    .map_err(ECSError::from)?;
 
                 meta.entity_positions[moved_chunk as usize][moved_row as usize] = None;
             } else {
@@ -279,13 +304,11 @@ impl Archetype {
         Ok(())
     }
 
-    fn rollback_written(
+    fn rollback_written_positions(
         components: &[(ComponentID, LockedAttribute)],
-        indices: &[usize],
-        chunk: ChunkID,
-        row: RowID,
+        positions: &[(usize, ChunkID, RowID)],
     ) {
-        for &j in indices {
+        for &(j, chunk, row) in positions.iter().rev() {
             let (_, ref a) = components[j];
             if let Ok(mut g) = Self::lock_write_spawn(a) {
                 let _ = g.as_mut().swap_remove_dyn(chunk, row);

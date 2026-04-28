@@ -6,12 +6,10 @@
 //! one [`AgentTemplate`] per agent class, keyed by name. It is sealed before
 //! simulation start to prevent accidental runtime registration.
 //!
-//! It also maintains a **pending spawn-hook queue**: when
-//! [`AgentSpawner::spawn`] enqueues a `Command::Spawn` for a template that
-//! has an `on_spawn` hook, it adds `(template_name, entity)` to this queue.
-//! The model layer calls [`AgentRegistry::flush_spawn_hooks`] after
-//! `apply_deferred_commands` to invoke all pending hooks with the resolved
-//! entity handles.
+//! It also maintains pending lifecycle hook queues. Tagged spawn and despawn
+//! commands return their resolved entities from `apply_deferred_commands`; the
+//! model moves those events into this registry and flushes hooks before the
+//! next scheduler stage observes the world.
 //!
 //! ## Thread safety
 //!
@@ -23,8 +21,8 @@ use std::collections::HashMap;
 use crate::engine::entity::Entity;
 use crate::engine::manager::ECSReference;
 
-use super::template::AgentTemplate;
 use super::error::{AgentError, AgentResult};
+use super::template::AgentTemplate;
 
 /// World-scoped store of named [`AgentTemplate`]s.
 ///
@@ -36,8 +34,8 @@ use super::error::{AgentError, AgentResult};
 /// 3. Call [`AgentRegistry::seal`] to prevent further registrations.
 /// 4. During simulation, retrieve templates with [`AgentRegistry::get`] and
 ///    use [`AgentTemplate::spawner`] to spawn agents.
-/// 5. After each `apply_deferred_commands` call, invoke
-///    [`AgentRegistry::flush_spawn_hooks`] to trigger spawn lifecycle hooks.
+/// 5. After each `apply_deferred_commands` call, flush lifecycle hooks for
+///    any tagged agent commands produced by that drain.
 pub struct AgentRegistry {
     templates: HashMap<String, AgentTemplate>,
     sealed: bool,
@@ -47,6 +45,9 @@ pub struct AgentRegistry {
     /// Populated by the model layer (which knows the resolved entity) and
     /// drained by [`AgentRegistry::flush_spawn_hooks`].
     pending_spawn_hooks: Vec<(String, Entity)>,
+    /// Queue of `(template_name, entity)` pairs whose `on_despawn` hook is
+    /// pending invocation.
+    pending_despawn_hooks: Vec<(String, Entity)>,
 }
 
 impl AgentRegistry {
@@ -56,6 +57,7 @@ impl AgentRegistry {
             templates: HashMap::new(),
             sealed: false,
             pending_spawn_hooks: Vec::new(),
+            pending_despawn_hooks: Vec::new(),
         }
     }
 
@@ -63,8 +65,8 @@ impl AgentRegistry {
     ///
     /// # Errors
     ///
-    /// * [`AgentError::RegistrySealed`] — called after [`AgentRegistry::seal`].
-    /// * [`AgentError::TemplateNotFound`] (repurposed as "already exists") — a
+    /// * [`AgentError::RegistrySealed`] - called after [`AgentRegistry::seal`].
+    /// * [`AgentError::TemplateNotFound`] (repurposed as "already exists") - a
     ///   template with the same name is already present. The error message
     ///   clarifies this.
     pub fn register(&mut self, template: AgentTemplate) -> AgentResult<()> {
@@ -72,14 +74,7 @@ impl AgentRegistry {
             return Err(AgentError::RegistrySealed);
         }
         if self.templates.contains_key(&template.name) {
-            // AgentError has no "DuplicateName" variant (names are opaque
-            // strings, not ComponentIDs). We reuse TemplateNotFound to signal
-            // "already exists" with a descriptive message rather than adding a
-            // new variant.
-            return Err(AgentError::TemplateNotFound(format!(
-                "template '{}' is already registered",
-                template.name
-            )));
+            return Err(AgentError::DuplicateTemplate(template.name.clone()));
         }
         self.templates.insert(template.name.clone(), template);
         Ok(())
@@ -135,7 +130,17 @@ impl AgentRegistry {
     ///
     /// Flushed by [`AgentRegistry::flush_spawn_hooks`].
     pub fn enqueue_spawn_hook(&mut self, template_name: impl Into<String>, entity: Entity) {
-        self.pending_spawn_hooks.push((template_name.into(), entity));
+        self.pending_spawn_hooks
+            .push((template_name.into(), entity));
+    }
+
+    /// Enqueues a pending despawn-hook invocation.
+    ///
+    /// Called by the model after a tagged despawn command has been accepted
+    /// and applied by the ECS command drain.
+    pub fn enqueue_despawn_hook(&mut self, template_name: impl Into<String>, entity: Entity) {
+        self.pending_despawn_hooks
+            .push((template_name.into(), entity));
     }
 
     /// Invokes all pending `on_spawn` hooks and clears the queue.
@@ -151,6 +156,22 @@ impl AgentRegistry {
         for (name, entity) in pending {
             if let Some(template) = self.templates.get(&name) {
                 if let Some(hook) = template.on_spawn() {
+                    hook(ecs, entity);
+                }
+            }
+        }
+    }
+
+    /// Invokes all pending `on_despawn` hooks and clears the queue.
+    ///
+    /// The hook receives the entity handle that was removed by the tagged
+    /// despawn command. The entity may already be stale in the ECS; hooks
+    /// should use it as an identity for cleanup messages or bookkeeping.
+    pub fn flush_despawn_hooks(&mut self, ecs: ECSReference<'_>) {
+        let pending = std::mem::take(&mut self.pending_despawn_hooks);
+        for (name, entity) in pending {
+            if let Some(template) = self.templates.get(&name) {
+                if let Some(hook) = template.on_despawn() {
                     hook(ecs, entity);
                 }
             }
@@ -186,7 +207,7 @@ mod tests {
         let mut reg = AgentRegistry::new();
         reg.register(make_template("Fox")).unwrap();
         let err = reg.register(make_template("Fox")).unwrap_err();
-        assert!(matches!(err, AgentError::TemplateNotFound(_)));
+        assert!(matches!(err, AgentError::DuplicateTemplate(name) if name == "Fox"));
     }
 
     #[test]
@@ -242,9 +263,18 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_despawn_hook_tracks_pending() {
+        let mut reg = AgentRegistry::new();
+        reg.register(make_template("Sheep")).unwrap();
+        let entity: Entity = Entity::from_raw(0);
+        reg.enqueue_despawn_hook("Sheep", entity);
+        assert_eq!(reg.pending_despawn_hooks.len(), 1);
+    }
+
+    #[test]
     fn flush_spawn_hooks_clears_queue() {
         let mut reg = AgentRegistry::new();
-        // Template without a hook — flush should complete without panic.
+        // Template without a hook - flush should complete without panic.
         reg.register(make_template("Rabbit")).unwrap();
         let entity: Entity = unsafe { std::mem::transmute(0u64) };
         reg.enqueue_spawn_hook("Rabbit", entity);

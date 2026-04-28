@@ -2,7 +2,7 @@
 //!
 //! ## Warning
 //!
-//! [`AgentHandle`] is for **single-entity CPU lookups only** — for example,
+//! [`AgentHandle`] is for **single-entity CPU lookups only** - for example,
 //! a market-clearing step that needs to inspect one specific agent.
 //!
 //! ## Read implementation
@@ -16,24 +16,24 @@
 //!
 //! ## Write implementation
 //!
-//! [`AgentHandle::write`] enqueues a deferred `Command::Add` via
+//! [`AgentHandle::write`] enqueues a deferred `Command::Set` via
 //! [`ECSReference::defer`]. Write is applied at the next
-//! `apply_deferred_commands` boundary — it is not an immediate in-place
+//! `apply_deferred_commands` boundary - it is not an immediate in-place
 //! mutation.
 
-use crate::engine::entity::Entity;
-use crate::engine::types::ComponentID;
-use crate::engine::manager::ECSReference;
 use crate::engine::commands::Command;
+use crate::engine::entity::Entity;
+use crate::engine::manager::ECSReference;
+use crate::engine::types::ComponentID;
 
-use super::error::{AgentError};
+use super::error::AgentError;
 
 /// A typed wrapper around [`Entity`] for single-agent component access.
 ///
 /// # Warning
 ///
 /// This type is for **single-entity CPU lookups only** (e.g. market-clearing
-/// logic that inspects one specific agent). Never use in hot iteration paths —
+/// logic that inspects one specific agent). Never use in hot iteration paths -
 /// use `ECSReference::for_each_*` instead.
 ///
 /// For reading other agents' components *during* iteration (e.g. social
@@ -47,7 +47,7 @@ use super::error::{AgentError};
 /// resolved and the entity handle is available (returned by
 /// `apply_deferred_commands`):
 ///
-/// ```ignore
+/// ```text
 /// let ids: Vec<ComponentID> = template.signature()
 ///     .iterate_over_components()
 ///     .collect();
@@ -66,7 +66,13 @@ impl AgentHandle {
     /// `component_ids` should be the [`ComponentID`]s declared in the agent
     /// template's [`Signature`](crate::engine::component::Signature).
     pub fn new(entity: Entity, component_ids: Vec<ComponentID>) -> Self {
-        Self { entity, component_ids }
+        let mut component_ids = component_ids;
+        component_ids.sort_unstable();
+        component_ids.dedup();
+        Self {
+            entity,
+            component_ids,
+        }
     }
 
     /// Returns the underlying [`Entity`] handle.
@@ -78,7 +84,7 @@ impl AgentHandle {
     /// Returns `true` if `id` is in the template signature cached by this handle.
     #[inline]
     pub fn has_component(&self, id: ComponentID) -> bool {
-        self.component_ids.contains(&id)
+        self.component_ids.binary_search(&id).is_ok()
     }
 
     /// Reads a component value for this entity by [`ComponentID`].
@@ -88,9 +94,9 @@ impl AgentHandle {
     ///
     /// # Errors
     ///
-    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] — `id` not
+    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] - `id` not
     ///   in template signature.
-    /// * [`AgentHandleError::ECS`] — entity is stale, component is missing
+    /// * [`AgentHandleError::ECS`] - entity is stale, component is missing
     ///   from the archetype, the column is currently write-locked by the
     ///   calling system, the requested type does not match the stored type,
     ///   or a lock is poisoned.
@@ -99,7 +105,7 @@ impl AgentHandle {
         id: ComponentID,
         ecs: ECSReference<'_>,
     ) -> Result<T, AgentHandleError> {
-        if !self.component_ids.contains(&id) {
+        if !self.has_component(id) {
             return Err(AgentHandleError::Agent(AgentError::MissingComponent(id)));
         }
         ecs.read_entity_component::<T>(self.entity, id)
@@ -109,13 +115,13 @@ impl AgentHandle {
     /// Enqueues a deferred write of `value` to component `id` for this entity.
     ///
     /// The write is applied at the next `apply_deferred_commands` boundary via
-    /// `Command::Add`. This does **not** perform an immediate in-place write.
+    /// `Command::Set`. This does **not** perform an immediate in-place write.
     ///
     /// # Errors
     ///
-    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] — `id` is
+    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] - `id` is
     ///   not in the template signature cached by this handle.
-    /// * [`AgentHandleError::ECS`] — the deferred command queue lock is
+    /// * [`AgentHandleError::ECS`] - the deferred command queue lock is
     ///   poisoned.
     pub fn write<T: 'static + Send>(
         &self,
@@ -123,10 +129,10 @@ impl AgentHandle {
         value: T,
         ecs: ECSReference<'_>,
     ) -> Result<(), AgentHandleError> {
-        if !self.component_ids.contains(&id) {
+        if !self.has_component(id) {
             return Err(AgentHandleError::Agent(AgentError::MissingComponent(id)));
         }
-        ecs.defer(Command::Add {
+        ecs.defer(Command::Set {
             entity: self.entity,
             component_id: id,
             value: Box::new(value),
@@ -135,16 +141,16 @@ impl AgentHandle {
     }
 }
 
-// ── Error type ───────────────────────────────────────────────────────────────
+// -- Error type ---------------------------------------------------------------
 
 /// Combined error returned by [`AgentHandle::read`] and [`AgentHandle::write`].
 ///
 /// Both methods can fail for two orthogonal reasons:
 ///
-/// * An agent-domain invariant violation (wrong component ID, stale entity) →
+/// * An agent-domain invariant violation (wrong component ID, stale entity) ->
 ///   [`AgentHandleError::Agent`].
 /// * An ECS-level failure (lock poison, structural mutation during iteration)
-///   → [`AgentHandleError::ECS`].
+///   -> [`AgentHandleError::ECS`].
 ///
 /// Collapsing both into `AgentError` would lose ECS diagnostic detail, so
 /// they are kept as separate variants.
@@ -182,11 +188,19 @@ impl From<crate::engine::error::ECSError> for AgentHandleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::commands::Command;
+    use crate::engine::component::{Bundle, ComponentRegistry};
     use crate::engine::entity::Entity;
+    use crate::engine::entity::EntityShards;
+    use crate::engine::manager::ECSManager;
+    use std::sync::{Arc, RwLock};
 
     fn dummy_entity() -> Entity {
         Entity::from_raw(0u64)
     }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Value(u32);
 
     #[test]
     fn has_component_returns_correct_values() {
@@ -214,5 +228,29 @@ mod tests {
         let e = Entity::from_raw(42u64);
         let handle = AgentHandle::new(e, vec![]);
         assert_eq!(handle.entity().to_raw(), 42u64);
+    }
+
+    #[test]
+    fn write_overwrites_existing_component_with_set_command() {
+        let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+        let value_id = {
+            let mut registry = registry.write().unwrap();
+            let value_id = registry.register::<Value>().unwrap();
+            registry.freeze();
+            value_id
+        };
+        let ecs = ECSManager::with_registry(EntityShards::new(1).unwrap(), registry);
+        let world = ecs.world_ref();
+
+        let mut bundle = Bundle::new();
+        bundle.insert(value_id, Value(1));
+        world.defer(Command::Spawn { bundle }).unwrap();
+        let entity = ecs.apply_deferred_commands().unwrap().spawned[0].entity;
+
+        let handle = AgentHandle::new(entity, vec![value_id]);
+        handle.write(value_id, Value(7), world).unwrap();
+        ecs.apply_deferred_commands().unwrap();
+
+        assert_eq!(handle.read::<Value>(value_id, world).unwrap(), Value(7));
     }
 }

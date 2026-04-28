@@ -1,7 +1,7 @@
 //! Metadata descriptor for ECS component types.
 //!
 //! This module defines [`ComponentDesc`], a lightweight, copyable struct that captures
-//! static type information about a registered component — including its runtime [`TypeId`],
+//! static type information about a registered component - including its runtime [`TypeId`],
 //! Rust type name, memory layout (size and alignment), assigned [`ComponentID`], and
 //! whether it is marked as GPU-safe.
 //!
@@ -29,11 +29,11 @@
 //! - The `component_id` field is `None` until the descriptor is registered via
 //!   [`ComponentDesc::with_id`]. Consumers must handle the `None` case explicitly
 //!   rather than relying on a sentinel value.
-//! - GPU safety is opt-in and carries no automatic enforcement — it is a hint for
+//! - GPU safety is opt-in and carries no automatic enforcement - it is a hint for
 //!   systems that need to distinguish GPU-uploadable components.
 
-use std::any::{TypeId, type_name};
-use std::mem::{size_of, align_of};
+use std::any::{type_name, TypeId};
+use std::mem::{align_of, size_of};
 
 use crate::engine::types::ComponentID;
 
@@ -76,7 +76,6 @@ pub struct ComponentDesc {
 }
 
 impl ComponentDesc {
-
     /// Creates a descriptor from explicit metadata.
     #[inline]
     pub fn new(
@@ -85,9 +84,16 @@ impl ComponentDesc {
         type_id: TypeId,
         size: usize,
         align: usize,
-        gpu_usage: bool
+        gpu_usage: bool,
     ) -> Self {
-        Self { component_id, name, type_id, size, align, gpu_usage }
+        Self {
+            component_id,
+            name,
+            type_id,
+            size,
+            align,
+            gpu_usage,
+        }
     }
 
     /// Constructs a descriptor for type `T` using its `TypeId`, name, size, and alignment.

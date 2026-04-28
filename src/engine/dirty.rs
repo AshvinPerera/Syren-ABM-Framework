@@ -12,11 +12,10 @@
 
 #![cfg(feature = "gpu")]
 
-use std::sync::{RwLock, Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use crate::engine::types::{ArchetypeID, ComponentID, COMPONENT_CAP};
-
 
 // ---------------------------------------------------------------------------
 // Small-vec bitset for Entry
@@ -24,14 +23,14 @@ use crate::engine::types::{ArchetypeID, ComponentID, COMPONENT_CAP};
 
 /// Bitset storage for dirty chunk tracking.
 ///
-/// For typical archetype sizes (≤ 64 chunks), a single `AtomicU64` is
+/// For typical archetype sizes (<= 64 chunks), a single `AtomicU64` is
 /// sufficient and avoids a heap allocation.  Larger archetypes fall back
 /// to a heap-allocated `Vec<AtomicU64>`.
 #[derive(Debug)]
 enum Words {
-    /// ≤ 64 chunks — single inline atomic word.
+    /// <= 64 chunks - single inline atomic word.
     Inline(AtomicU64),
-    /// > 64 chunks — heap-allocated word array.
+    /// > 64 chunks - heap-allocated word array.
     Heap(Vec<AtomicU64>),
 }
 
@@ -53,7 +52,11 @@ impl Words {
     fn get(&self, index: usize) -> Option<&AtomicU64> {
         match self {
             Words::Inline(w) => {
-                if index == 0 { Some(w) } else { None }
+                if index == 0 {
+                    Some(w)
+                } else {
+                    None
+                }
             }
             Words::Heap(v) => v.get(index),
         }
@@ -61,7 +64,10 @@ impl Words {
 
     /// Iterates over all words in the bitset.
     fn iter(&self) -> WordsIter<'_> {
-        WordsIter { words: self, index: 0 }
+        WordsIter {
+            words: self,
+            index: 0,
+        }
     }
 }
 
@@ -80,7 +86,6 @@ impl<'a> Iterator for WordsIter<'a> {
         Some(w)
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -126,7 +131,9 @@ impl Entry {
         let mut out = Vec::new();
         for (word_index, word) in self.words.iter().enumerate() {
             let bits = word.swap(0, Ordering::AcqRel);
-            if bits == 0 { continue; }
+            if bits == 0 {
+                continue;
+            }
 
             let base = word_index * 64;
             let mut remaining = bits;
@@ -143,7 +150,6 @@ impl Entry {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Flat, lock-free DirtyChunks
 // ---------------------------------------------------------------------------
@@ -155,7 +161,7 @@ impl Entry {
 /// The backing store is a flat `Vec<Option<Arc<Entry>>>` indexed by
 /// `archetype_id * COMPONENT_CAP + component_id`.  This eliminates the
 /// `HashMap` and makes the hot path (`mark_chunk_dirty` during parallel
-/// iteration) fully lock-free — callers index directly into the vec and
+/// iteration) fully lock-free - callers index directly into the vec and
 /// operate on the `Arc<Entry>` without acquiring any lock.
 ///
 /// The `RwLock` protects only structural mutations (entry creation,
@@ -221,7 +227,7 @@ impl DirtyChunks {
     ) -> Arc<Entry> {
         let index = Self::flat_index(archetype, component);
 
-        // Fast path: read lock — no allocation, no write lock.
+        // Fast path: read lock - no allocation, no write lock.
         if let Ok(entries) = self.entries.read() {
             if let Some(Some(entry)) = entries.get(index) {
                 if entry.chunk_count == chunk_count {
@@ -230,7 +236,7 @@ impl DirtyChunks {
             }
         }
 
-        // Slow path: write lock — create or replace entry.
+        // Slow path: write lock - create or replace entry.
         let mut entries = self.entries.write().expect("DirtyChunks lock poisoned");
         Self::ensure_vec_capacity(&mut entries, index);
 

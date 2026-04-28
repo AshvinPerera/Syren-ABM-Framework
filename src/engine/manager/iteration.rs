@@ -1,7 +1,7 @@
 //! Internal iteration primitives for chunk-parallel ECS queries.
 //!
 //! Contains the precomputed chunk pointer view (`ChunkView`) and the RAII
-//! iteration scope guard (`IterationScope`).  Both are `pub(super)` — they
+//! iteration scope guard (`IterationScope`).  Both are `pub(super)` - they
 //! are implementation details shared between `data` and `ecs_reference`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

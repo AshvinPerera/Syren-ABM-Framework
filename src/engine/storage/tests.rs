@@ -1,9 +1,11 @@
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     use crate::engine::storage::Attribute;
     use crate::engine::types::CHUNK_CAP;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -94,7 +96,10 @@ mod tests {
         let mut attr: Attribute<i32> = Attribute::default();
         attr.push(7).unwrap();
         let moved = attr.swap_remove(0, 0).unwrap();
-        assert!(moved.is_none(), "no element should be moved when removing the only one");
+        assert!(
+            moved.is_none(),
+            "no element should be moved when removing the only one"
+        );
         assert_eq!(attr.length, 0);
         assert_eq!(attr.chunk_count(), 0);
     }
@@ -150,7 +155,11 @@ mod tests {
         // The last element lives in chunk 1, row 0.
         // Remove the very first element (chunk 0, row 0).
         let moved = attr.swap_remove(0, 0).unwrap();
-        assert_eq!(moved, Some((1, 0)), "last element from chunk 1 should fill the hole");
+        assert_eq!(
+            moved,
+            Some((1, 0)),
+            "last element from chunk 1 should fill the hole"
+        );
         assert_eq!(attr.length, CHUNK_CAP);
         // The value that was at chunk 1, row 0 (= CHUNK_CAP as i32) is now at (0, 0).
         assert_eq!(*attr.get(0, 0).unwrap(), CHUNK_CAP as i32);
@@ -169,7 +178,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // push_from – success path
+    // push_from - success path
     // -----------------------------------------------------------------------
 
     #[test]
@@ -208,7 +217,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // push_from – source unchanged after invalid position
+    // push_from - source unchanged after invalid position
     // -----------------------------------------------------------------------
 
     #[test]
@@ -232,7 +241,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // clear and Drop – destructor accounting
+    // clear and Drop - destructor accounting
     // -----------------------------------------------------------------------
 
     #[test]
@@ -247,7 +256,11 @@ mod tests {
         assert_eq!(drop_count.load(Ordering::Relaxed), 0);
 
         attr.clear();
-        assert_eq!(drop_count.load(Ordering::Relaxed), N, "all {N} elements must be dropped by clear");
+        assert_eq!(
+            drop_count.load(Ordering::Relaxed),
+            N,
+            "all {N} elements must be dropped by clear"
+        );
         assert_eq!(attr.length, 0);
         assert!(attr.chunks.is_empty());
     }

@@ -3,7 +3,7 @@
 //! This module provides [`BorrowGuard`], a RAII type that acquires and releases
 //! read/write borrows on [`ComponentID`]s through a shared [`BorrowTracker`].
 //! It is the primary mechanism by which the engine enforces Rust-like aliasing
-//! rules at runtime — ensuring no component is accessed mutably while any other
+//! rules at runtime - ensuring no component is accessed mutably while any other
 //! system holds a reference to it.
 //!
 //! ## Acquisition protocol
@@ -20,7 +20,7 @@
 //! A guard is typically constructed by the scheduler immediately before a
 //! system runs and is dropped when the system's closure returns:
 //!
-//! ```ignore
+//! ```text
 //! let guard = BorrowGuard::new(&tracker, &[position_id], &[velocity_id])?;
 //! // system executes here
 //! // borrows released automatically when `guard` is dropped
@@ -32,9 +32,9 @@
 
 use std::fmt;
 
-use crate::engine::types::ComponentID;
-use crate::engine::error::{ExecutionError, InvalidAccessReason};
 use super::tracker::BorrowTracker;
+use crate::engine::error::{ExecutionError, InvalidAccessReason};
+use crate::engine::types::ComponentID;
 
 /// RAII guard representing a system or query's full borrow lifetime.
 ///
@@ -65,7 +65,6 @@ impl fmt::Debug for BorrowGuard<'_> {
 }
 
 impl<'a> BorrowGuard<'a> {
-
     /// Creates a new `BorrowGuard` and acquires all requested borrows.
     ///
     /// ## Parameters
@@ -115,8 +114,12 @@ impl<'a> BorrowGuard<'a> {
         let mut acquired_reads: Vec<ComponentID> = Vec::with_capacity(r.len());
 
         let rollback = |aw: &[ComponentID], ar: &[ComponentID]| {
-            for &id in ar.iter().rev() { tracker.release_read(id); }
-            for &id in aw.iter().rev() { tracker.release_write(id); }
+            for &id in ar.iter().rev() {
+                tracker.release_read(id);
+            }
+            for &id in aw.iter().rev() {
+                tracker.release_write(id);
+            }
         };
 
         for &component_id in &w {
@@ -135,14 +138,22 @@ impl<'a> BorrowGuard<'a> {
             acquired_reads.push(component_id);
         }
 
-        Ok(Self { tracker, reads: r, writes: w })
+        Ok(Self {
+            tracker,
+            reads: r,
+            writes: w,
+        })
     }
 }
 
 impl Drop for BorrowGuard<'_> {
     /// Releases all acquired borrows in reverse order.
     fn drop(&mut self) {
-        for &component_id in self.reads.iter().rev() { self.tracker.release_read(component_id); }
-        for &component_id in self.writes.iter().rev() { self.tracker.release_write(component_id); }
+        for &component_id in self.reads.iter().rev() {
+            self.tracker.release_read(component_id);
+        }
+        for &component_id in self.writes.iter().rev() {
+            self.tracker.release_write(component_id);
+        }
     }
 }

@@ -11,11 +11,20 @@
 //!   abm_framework::profiler::shutdown();
 
 use std::borrow::Cow;
-use std::path::Path;
 use std::fmt;
+use std::path::Path;
+
+/// Errors returned by [`try_init`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProfilingError {
+    /// The profiler was already initialized for this process.
+    #[error("profiler is already initialized")]
+    AlreadyInitialized,
+}
 
 #[cfg(feature = "profiling")]
 mod enabled {
+    use std::borrow::Cow;
     use std::cell::RefCell;
     use std::fs::File;
     use std::io::{BufWriter, Write};
@@ -23,7 +32,6 @@ mod enabled {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
-    use std::borrow::Cow;
 
     use super::*;
 
@@ -117,15 +125,22 @@ mod enabled {
     }
 
     /// Initialize the profiler and set output path.
-    pub fn init<P: AsRef<Path>>(path: P) {
+    pub fn try_init<P: AsRef<Path>>(path: P) -> Result<(), ProfilingError> {
         let out_path = path.as_ref().to_path_buf();
-        let _ = STATE.set(ProfilerState {
-            start: Instant::now(),
-            out_path,
-            pid: 1,
-            is_on: AtomicBool::new(true),
-            collected_events: Mutex::new(Vec::new()),
-        });
+        STATE
+            .set(ProfilerState {
+                start: Instant::now(),
+                out_path,
+                pid: 1,
+                is_on: AtomicBool::new(true),
+                collected_events: Mutex::new(Vec::new()),
+            })
+            .map_err(|_| ProfilingError::AlreadyInitialized)
+    }
+
+    /// Initialize the profiler and ignore repeated initialization attempts.
+    pub fn init<P: AsRef<Path>>(path: P) {
+        let _ = try_init(path);
     }
 
     /// Flush this thread's local event buffer into the global `collected_events` store.
@@ -217,7 +232,12 @@ mod enabled {
                     }
                     write!(w, "}}")?;
                 }
-                TraceEvent::ThreadName { ts_us, pid, tid, name } => {
+                TraceEvent::ThreadName {
+                    ts_us,
+                    pid,
+                    tid,
+                    name,
+                } => {
                     write!(
                         w,
                         "{{\"name\":\"thread_name\",\"ph\":\"M\",\"ts\":{},\"pid\":{},\"tid\":{},\"args\":{{\"name\":",
@@ -375,9 +395,19 @@ mod disabled {
     #[inline]
     pub fn init<P: AsRef<Path>>(_path: P) {}
 
+    /// Initialize profiler (always succeeds when profiling is disabled).
+    #[inline]
+    pub fn try_init<P: AsRef<Path>>(_path: P) -> Result<(), ProfilingError> {
+        Ok(())
+    }
+
     /// Shut down profiler (no-op).
     #[inline]
     pub fn shutdown() {}
+
+    /// Flush this thread's local profiler buffer (no-op).
+    #[inline]
+    pub fn flush_thread() {}
 
     /// Set thread name (no-op).
     #[inline]
@@ -411,9 +441,9 @@ mod disabled {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Public API surface (stable regardless of feature flag)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A span name; accepts `&'static str`, `String`, or `Cow<'static, str>`.
 pub struct SpanName(pub Cow<'static, str>);
@@ -463,7 +493,7 @@ pub use enabled::SpanGuard;
 pub use disabled::SpanGuard;
 
 #[cfg(feature = "profiling")]
-pub use enabled::{flush_thread, init, next_arg, shutdown, span, span_fmt, thread_name};
+pub use enabled::{flush_thread, init, next_arg, shutdown, span, span_fmt, thread_name, try_init};
 
 #[cfg(not(feature = "profiling"))]
-pub use disabled::{init, next_arg, shutdown, span, span_fmt, thread_name};
+pub use disabled::{flush_thread, init, next_arg, shutdown, span, span_fmt, thread_name, try_init};

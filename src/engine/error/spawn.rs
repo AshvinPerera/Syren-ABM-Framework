@@ -11,12 +11,12 @@
 //!
 //! ```text
 //! SpawnError
-//! ├── Capacity(CapacityError)                — storage full
-//! ├── ShardBounds(ShardBoundsError)          — shard index out of range
-//! ├── Registry(RegistryError)               — component registration failure
-//! ├── StaleEntity(StaleEntityError)         — entity handle no longer valid
-//! ├── StoragePushFailedWith(AttributeError)
-//! └── StorageSwapRemoveFailed(AttributeError)
+//! +-- Capacity(CapacityError)                - storage full
+//! +-- ShardBounds(ShardBoundsError)          - shard index out of range
+//! +-- Registry(RegistryError)               - component registration failure
+//! +-- StaleEntity(StaleEntityError)         - entity handle no longer valid
+//! +-- StoragePushFailedWith(AttributeError)
+//! +-- StorageSwapRemoveFailed(AttributeError)
 //! ```
 //!
 //! Variants without a source error (e.g. [`SpawnError::MisalignedStorage`])
@@ -29,7 +29,7 @@
 //! fail. The `From` conversions let all low-level errors propagate with `?`
 //! without manual wrapping:
 //!
-//! ```ignore
+//! ```text
 //! use crate::errors::spawn::SpawnError;
 //!
 //! fn spawn(world: &mut World) -> Result<Entity, SpawnError> {
@@ -40,13 +40,13 @@
 //! }
 //! ```
 
-use std::fmt;
 use std::any::TypeId;
+use std::fmt;
 
 use crate::engine::types::{ChunkID, RowID};
 
-use super::primitives::{CapacityError, ShardBoundsError, StaleEntityError};
 use super::attribute::AttributeError;
+use super::primitives::{CapacityError, ShardBoundsError, StaleEntityError};
 use super::registry::RegistryError;
 
 /// High-level error for entity spawning.
@@ -64,7 +64,7 @@ use super::registry::RegistryError;
 ///
 /// ### Usage
 /// `From<T>` conversions allow `?` from low-level operations:
-/// ```ignore
+/// ```text
 /// fn spawn_batch(world: &mut World, batch: Batch) -> Result<Vec<Entity>, SpawnError> {
 ///     ensure_capacity(world, batch.len())?;     // -> Capacity -> SpawnError
 ///     let shard = world.shards.get_mut(batch.shard_index)?; // -> ShardBounds -> SpawnError
@@ -81,7 +81,6 @@ use super::registry::RegistryError;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
-
     /// Entity creation failed due to insufficient capacity.
     Capacity(CapacityError),
 
@@ -120,7 +119,7 @@ pub enum SpawnError {
         type_id: TypeId,
 
         /// Human-readable component name.
-        name: &'static str
+        name: &'static str,
     },
 
     /// Component storages disagreed on the row position of an entity.
@@ -131,7 +130,7 @@ pub enum SpawnError {
         expected: (ChunkID, RowID),
 
         /// Actual `(chunk, row)` encountered.
-        got: (ChunkID, RowID)
+        got: (ChunkID, RowID),
     },
 
     /// A shard mutex was poisoned (panic occurred while holding it).
@@ -156,8 +155,12 @@ impl fmt::Display for SpawnError {
             ),
             SpawnError::StaleEntity(e) => write!(f, "{e}"),
             SpawnError::EmptyArchetype => write!(f, "archetype contains no components"),
-            SpawnError::ArchetypeNotEmpty => write!(f, "cannot remove component from non-empty archetype"),
-            SpawnError::StorageSwapRemoveFailed(e) => write!(f, "failed to swap-remove from storage: {e}"),
+            SpawnError::ArchetypeNotEmpty => {
+                write!(f, "cannot remove component from non-empty archetype")
+            }
+            SpawnError::StorageSwapRemoveFailed(e) => {
+                write!(f, "failed to swap-remove from storage: {e}")
+            }
             SpawnError::StoragePushFailedWith(e) => write!(f, "failed to push into storage: {e}"),
             SpawnError::MissingComponent { name, .. } => write!(f, "missing component: {}", name),
             SpawnError::MisalignedStorage { expected, got } => write!(
@@ -187,21 +190,31 @@ impl std::error::Error for SpawnError {
 }
 
 impl From<CapacityError> for SpawnError {
-    fn from(e: CapacityError) -> Self { SpawnError::Capacity(e) }
+    fn from(e: CapacityError) -> Self {
+        SpawnError::Capacity(e)
+    }
 }
 
 impl From<ShardBoundsError> for SpawnError {
-    fn from(e: ShardBoundsError) -> Self { SpawnError::ShardBounds(e) }
+    fn from(e: ShardBoundsError) -> Self {
+        SpawnError::ShardBounds(e)
+    }
 }
 
 impl From<StaleEntityError> for SpawnError {
-    fn from(e: StaleEntityError) -> Self { SpawnError::StaleEntity(e) }
+    fn from(e: StaleEntityError) -> Self {
+        SpawnError::StaleEntity(e)
+    }
 }
 
 impl From<AttributeError> for SpawnError {
-    fn from(e: AttributeError) -> Self { SpawnError::StoragePushFailedWith(e) }
+    fn from(e: AttributeError) -> Self {
+        SpawnError::StoragePushFailedWith(e)
+    }
 }
 
 impl From<RegistryError> for SpawnError {
-    fn from(e: RegistryError) -> Self { SpawnError::Registry(e) }
+    fn from(e: RegistryError) -> Self {
+        SpawnError::Registry(e)
+    }
 }

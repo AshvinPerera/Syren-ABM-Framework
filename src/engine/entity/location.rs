@@ -6,12 +6,11 @@
 //! the entity, a [`ChunkID`] selects the memory chunk within that archetype,
 //! and a [`RowID`] pinpoints the individual row within that chunk.
 //!
-//! Locations are kept in sync with the storage layer — any operation that
+//! Locations are kept in sync with the storage layer - any operation that
 //! moves component rows (insertion, removal, archetype migration, or despawn)
 //! must update or invalidate the corresponding `EntityLocation` atomically.
 
 use crate::engine::types::{ArchetypeID, ChunkID, RowID};
-
 
 /// Physical storage location of an entity within archetype storage.
 ///

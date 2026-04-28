@@ -50,7 +50,7 @@
 //!
 //! ## Usage example
 //!
-//! ```ignore
+//! ```text
 //! // `ecs` is an ECSReference obtained from ECSManager::world_ref().
 //! let query = ecs.query()?.read::<Wealth>()?.build()?;
 //!
@@ -194,7 +194,7 @@ impl Welford {
     /// This method is intended to be used as the `combine` function in
     /// [`ECSReference::reduce_read`] and [`ECSReference::reduce_abstraction`]:
     ///
-    /// ```ignore
+    /// ```text
     /// ecs.reduce_read::<Value, Welford>(
     ///     query,
     ///     Welford::default,

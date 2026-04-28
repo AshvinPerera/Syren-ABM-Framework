@@ -13,17 +13,17 @@
 //!
 //! # Responsibilities
 //!
-//! - **Archetype management** — archetypes are created lazily and looked up by
+//! - **Archetype management** - archetypes are created lazily and looked up by
 //!   component signature via `signature_map`. Each archetype is created with an
 //!   explicit `&ComponentRegistry` rather than calling global registry functions,
 //!   which enables multi-world support.
-//! - **Entity placement** — entity locations `(archetype, chunk, row)` are tracked
+//! - **Entity placement** - entity locations `(archetype, chunk, row)` are tracked
 //!   through [`EntityShards`] and kept consistent with archetype storage.
-//! - **Structural mutations** — adding or removing a component migrates the entity's
+//! - **Structural mutations** - adding or removing a component migrates the entity's
 //!   row to a new archetype whose signature reflects the change.
-//! - **Deferred commands** — [`ECSData::apply_deferred_commands`] flushes a batch of
-//!   [`Command`]s (spawn, despawn, add, remove) as a single synchronization point.
-//! - **Parallel iteration** — [`ECSData::for_each_abstraction_unchecked`] and
+//! - **Deferred commands** - [`ECSData::apply_deferred_commands`] flushes a batch of
+//!   [`Command`]s (spawn, despawn, add, remove) as a single synchronisation point.
+//! - **Parallel iteration** - [`ECSData::for_each_abstraction_unchecked`] and
 //!   [`ECSData::reduce_abstraction_unchecked`] execute chunk-oriented queries across
 //!   matching archetypes using Rayon, with per-column RwLock guards enforcing
 //!   read/write separation. Column locks are acquired in ascending [`ComponentID`]
@@ -34,7 +34,7 @@
 //!
 //! When the `gpu` feature is enabled, `ECSData` additionally maintains:
 //! - A [`DirtyChunks`] tracker that records which component chunks were written
-//!   during a query, enabling selective CPU→GPU uploads.
+//!   during a query, enabling selective CPU->GPU uploads.
 //! - A [`GPUResourceRegistry`] for world-owned GPU buffers and bind-group resources.
 //!
 //! # Safety contract
@@ -47,31 +47,19 @@
 
 use std::any::TypeId;
 
-use std::sync::{
-    Arc,
-    RwLock,
-    RwLockReadGuard,
-    RwLockWriteGuard,
-    Mutex,
-};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-use smallvec::SmallVec;
-
-use crate::engine::commands::Command;
-use crate::engine::types::{
-    ComponentID,
-    ArchetypeID,
-    ShardID,
-    SIGNATURE_SIZE,
-};
-use crate::engine::query::{QuerySignature, BuiltQuery};
-use crate::engine::archetype::{Archetype, ArchetypeMatch};
+use crate::engine::archetype::Archetype;
+use crate::engine::commands::{Command, CommandEvents, DespawnEvent, SpawnEvent};
+use crate::engine::component::{ComponentRegistry, Signature};
 use crate::engine::entity::{Entity, EntityShards};
-use crate::engine::storage::TypeErasedAttribute;
-use crate::engine::component::{Signature, ComponentRegistry};
-use crate::engine::error::{ECSResult, ECSError, ExecutionError, InternalViolation, RegistryError, SpawnError, StaleEntityError, AccessKind};
+use crate::engine::error::{
+    AccessKind, AttributeError, ECSError, ECSResult, ExecutionError, InternalViolation, MoveError,
+    RegistryError, SpawnError, StaleEntityError,
+};
+use crate::engine::query::BuiltQuery;
+use crate::engine::types::{ArchetypeID, ComponentID, ShardID, SIGNATURE_SIZE};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::DirtyChunks;
@@ -80,63 +68,74 @@ use crate::engine::dirty::DirtyChunks;
 use crate::engine::types::GPUResourceID;
 
 #[cfg(feature = "gpu")]
-use crate::gpu::{GPUResource, GPUResourceRegistry};
-
-use super::iteration::ChunkView;
+use crate::gpu::{GPUResource, GPUResourceRegistry, GpuWorldState};
 
 /// Core ECS storage and orchestration structure.
-///
-/// ## Responsibilities
-/// * Owns all archetypes and their component storage
-/// * Maps signatures to archetype IDs
-/// * Manages entity placement across archetypes
-/// * Executes structural changes and parallel iteration
-/// * Holds the component registry used for archetype creation, enabling multi-world support
-///
-/// ## Invariants
-/// * `signature_map` and `archetypes` must remain consistent
-/// * Entity locations must always point to valid archetypes
-/// * Column locks are always acquired in ascending [`ComponentID`] order
-
 pub struct ECSData {
-    /// All registered archetypes.
     archetypes: Vec<Archetype>,
-
-    /// Maps component signatures to archetype IDs.
     signature_map: HashMap<[u64; SIGNATURE_SIZE], ArchetypeID>,
-
-    /// Entity shard allocator and location tracker.
+    archetype_generation: u64,
+    query_match_cache: RwLock<HashMap<QueryMatchKey, QueryMatchEntry>>,
     shards: EntityShards,
-
     next_spawn_shard: ShardID,
-
-    /// Component registry used for archetype and column creation.
     registry: Arc<RwLock<ComponentRegistry>>,
 
-    /// Chunk-level dirty tracking for CPU writes.
     #[cfg(feature = "gpu")]
     gpu_dirty_chunks: DirtyChunks,
 
     #[cfg(feature = "gpu")]
     gpu_resources: GPUResourceRegistry,
+
+    #[cfg(feature = "gpu")]
+    gpu_world_state: GpuWorldState,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct QueryMatchKey {
+    read: [u64; SIGNATURE_SIZE],
+    write: [u64; SIGNATURE_SIZE],
+    without: [u64; SIGNATURE_SIZE],
+}
+
+impl QueryMatchKey {
+    fn from_signature(signature: &crate::engine::query::QuerySignature) -> Self {
+        Self {
+            read: signature.read.components,
+            write: signature.write.components,
+            without: signature.without.components,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QueryMatchEntry {
+    generation: u64,
+    archetype_ids: Vec<ArchetypeID>,
+}
+
+/// Result of a deferred command drain that stopped before applying the whole batch.
+pub(crate) struct CommandDrainFailure {
+    /// Error returned by the failed command.
+    pub(crate) error: ECSError,
+    /// Commands that were never attempted and must remain queued.
+    pub(crate) unapplied: Vec<Command>,
+    /// Lifecycle events produced by commands that completed before the failure.
+    pub(crate) events: CommandEvents,
 }
 
 impl ECSData {
-
-    /// Creates a new, empty `ECSData` with the given entity shard allocator and component registry.
+    /// Creates a new `ECSData` instance with the specified number of entity shards
+    /// and component registry.
     ///
-    /// ## Semantics
-    /// Archetypes are created lazily and assigned monotonically increasing IDs.
-    /// The registry is used for all archetype and component column creation, enabling
-    /// multi-world support without relying on global registry state.
-    ///
-    /// ## Complexity
-    /// Amortized O(1).
-
+    /// # Arguments
+    /// * `shards` - Configuration for entity sharding (number of shards)
+    /// * `registry` - Shared component registry for type resolution
     pub fn new(shards: EntityShards, registry: Arc<RwLock<ComponentRegistry>>) -> Self {
         Self {
             archetypes: Vec::new(),
             signature_map: HashMap::new(),
+            archetype_generation: 0,
+            query_match_cache: RwLock::new(HashMap::new()),
             shards,
             next_spawn_shard: 0,
             registry,
@@ -146,14 +145,16 @@ impl ECSData {
 
             #[cfg(feature = "gpu")]
             gpu_resources: GPUResourceRegistry::new(),
+
+            #[cfg(feature = "gpu")]
+            gpu_world_state: GpuWorldState::new(),
         }
     }
 
-    /// Returns a reference to the component registry held by this world.
+    /// Returns a reference to the component registry.
     ///
-    /// ## Purpose
-    /// Provides access to the registry for callers that need to inspect or
-    /// register component types without going through global state.
+    /// The registry is shared via `Arc<RwLock<ComponentRegistry>>`, allowing
+    /// concurrent reads and exclusive writes for registration of new components.
     #[inline]
     pub fn registry(&self) -> &Arc<RwLock<ComponentRegistry>> {
         &self.registry
@@ -167,23 +168,52 @@ impl ECSData {
     }
 
     #[cfg(feature = "gpu")]
-    /// Returns GPU dirty chunks
     #[inline]
+    /// Returns a reference to the dirty chunks tracker.
+    ///
+    /// The dirty chunks tracker records which component chunks were modified
+    /// during query execution, enabling selective CPU->GPU uploads. This is
+    /// used by the GPU synchronisation layer to minimise data transfer
+    /// between host and device.
     pub fn gpu_dirty_chunks(&self) -> &DirtyChunks {
         &self.gpu_dirty_chunks
     }
 
-    /// Returns mutable references to two distinct archetypes.
-    ///
-    /// ## Purpose
-    /// Enables safe mutation of source and destination archetypes during entity
-    /// migration without violating Rust aliasing rules.
-    ///
-    /// ## Errors
-    /// Returns `InternalViolation::ArchetypePairSameId` if `a == b`.
-    ///
-    /// ## Safety
-    /// Relies on slice splitting to ensure disjoint mutable borrows.
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_world_state(&self) -> &GpuWorldState {
+        &self.gpu_world_state
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_world_state_mut(&mut self) -> &mut GpuWorldState {
+        &mut self.gpu_world_state
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_execution_parts(
+        &mut self,
+    ) -> (
+        &[Archetype],
+        &DirtyChunks,
+        &mut GpuWorldState,
+        &GPUResourceRegistry,
+    ) {
+        (
+            &self.archetypes,
+            &self.gpu_dirty_chunks,
+            &mut self.gpu_world_state,
+            &self.gpu_resources,
+        )
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub(crate) fn gpu_download_parts(&mut self) -> (&mut [Archetype], &mut GpuWorldState) {
+        (&mut self.archetypes, &mut self.gpu_world_state)
+    }
 
     fn get_or_create_archetype(&mut self, signature: &Signature) -> ECSResult<ArchetypeID> {
         let key = signature.components;
@@ -194,12 +224,67 @@ impl ECSData {
         let id = self.archetypes.len() as ArchetypeID;
         self.signature_map.insert(key, id);
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
         let arch = Archetype::new(id, *signature, &registry)?;
         self.archetypes.push(arch);
+        drop(registry);
+        self.invalidate_query_match_cache();
 
         Ok(id)
+    }
+
+    fn invalidate_query_match_cache(&mut self) {
+        self.archetype_generation = self.archetype_generation.wrapping_add(1);
+        if let Ok(cache) = self.query_match_cache.get_mut() {
+            cache.clear();
+        }
+    }
+
+    fn matching_archetype_ids(
+        &self,
+        query: &crate::engine::query::QuerySignature,
+    ) -> Result<Vec<ArchetypeID>, ExecutionError> {
+        let key = QueryMatchKey::from_signature(query);
+        let generation = self.archetype_generation;
+
+        {
+            let cache =
+                self.query_match_cache
+                    .read()
+                    .map_err(|_| ExecutionError::LockPoisoned {
+                        what: "query match cache",
+                    })?;
+            if let Some(entry) = cache.get(&key) {
+                if entry.generation == generation {
+                    return Ok(entry.archetype_ids.clone());
+                }
+            }
+        }
+
+        let mut archetype_ids = Vec::new();
+        for archetype in &self.archetypes {
+            if query.requires_all(archetype.signature()) {
+                archetype_ids.push(archetype.archetype_id());
+            }
+        }
+
+        let mut cache =
+            self.query_match_cache
+                .write()
+                .map_err(|_| ExecutionError::LockPoisoned {
+                    what: "query match cache",
+                })?;
+        cache.insert(
+            key,
+            QueryMatchEntry {
+                generation,
+                archetype_ids: archetype_ids.clone(),
+            },
+        );
+        Ok(archetype_ids)
     }
 
     #[inline]
@@ -221,77 +306,53 @@ impl ECSData {
         Ok(if a < b { (left, right) } else { (right, left) })
     }
 
-    /// Adds a component to an existing entity, migrating it to a new archetype if necessary.
+    /// Adds a component to an existing entity.
     ///
-    /// This operation **changes the structural signature** of an entity. In an archetype-based ECS,
-    /// entities are grouped by the exact set of components they possess; therefore adding a component
-    /// requires **moving the entity's row** from its current archetype to another archetype whose
-    /// signature includes the new component.
+    /// If the component type already exists on the entity, this operation will fail.
+    /// The entity is moved to a new archetype that includes the added component.
     ///
-    /// ### High-level behaviour
-    /// 1. The entity's current location `(archetype, chunk, row)` is retrieved.
-    /// 2. A new signature is derived by setting `added_component_id`.
-    /// 3. The destination archetype corresponding to that signature is located or created.
-    /// 4. The destination archetype is prepared to store:
-    ///    * the newly added component, and
-    ///    * all components shared with the source archetype.
-    /// 5. The entity's row is migrated from the source archetype to the destination archetype:
-    ///    * shared components are copied/moved,
-    ///    * the new component value is inserted,
-    ///    * source-only components are removed.
-    /// 6. Entity location metadata is updated as part of the row move.
+    /// # Arguments
+    /// * `entity` - The target entity
+    /// * `added_component_id` - The `ComponentID` of the component to add
+    /// * `added_value` - The boxed initial value for the component
     ///
-    /// If the entity does not exist or is stale, the function returns early without performing
-    /// any operation.
-    ///
-    /// ### Parameters
-    /// * `entity` - The entity to which the component should be added.
-    /// * `added_component_id` - The component type identifier to add.
-    /// * `added_value` - The concrete component value, type-erased as `Box<dyn Any>`.
-    ///   The dynamic type **must match** the registered type of `added_component_id`.
-    ///
-    /// ### Safety and correctness notes
-    /// * This function assumes **exclusive access** to `ECSData`.
-    /// * Archetype mutation is safe because `get_archetype_pair_mut` guarantees distinct mutable
-    ///   references.
-    /// * The dynamic type of `added_value` must correspond exactly to the component's registered
-    ///   storage type; mismatches will cause the row move to fail internally.
-    /// * Errors from `move_row_to_archetype` are intentionally ignored here; structural failures
-    ///   are treated as non-recoverable or handled elsewhere.
-    ///
-    /// ### Complexity
-    /// * **Time:** O(n) where n is the number of components in the source archetype.
-    /// * **Memory:** May allocate a new archetype and component storage on first use of a signature.
-    ///
-    /// ### Archetype invariants
-    /// * After completion, the entity will reside in an archetype whose signature includes
-    ///   `added_component_id`.
-    /// * Component column alignment across chunks is preserved.
-    /// * Source archetype row density is maintained via swap-remove semantics.
-    ///
-    /// ### Example
-    /// ```ignore
-    /// ecs.add_component(entity, position_id, Box::new(Position { x: 1.0, y: 2.0 }));
-    /// ```
-    ///
-    /// ### See also
-    /// * [`remove_component`](Self::remove_component)
-    /// * [`Archetype::move_row_to_archetype`]
-    /// * [`Signature`]
-
+    /// # Errors
+    /// Returns an error if:
+    /// * The entity is stale (already despawned)
+    /// * The component already exists on the entity
+    /// * The registry lock is poisoned
+    /// * Archetype creation or component storage allocation fails
     pub fn add_component(
         &mut self,
         entity: Entity,
         added_component_id: ComponentID,
         added_value: Box<dyn std::any::Any>,
     ) -> ECSResult<()> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(added_component_id)?;
+        }
+
         let Some(location) = self.shards.get_location(entity)? else {
             return Err(SpawnError::StaleEntity(StaleEntityError).into());
         };
         let source_id = location.archetype;
 
+        if self.archetypes[source_id as usize]
+            .signature()
+            .try_has(added_component_id)?
+        {
+            return Err(MoveError::ComponentAlreadyPresent {
+                component_id: added_component_id,
+            }
+            .into());
+        }
+
         let mut new_signature = self.archetypes[source_id as usize].signature().clone();
-        new_signature.set(added_component_id);
+        new_signature.try_set(added_component_id)?;
 
         let destination_id = self.get_or_create_archetype(&new_signature)?;
         let source_sig = self.archetypes[source_id as usize].signature().clone();
@@ -300,7 +361,9 @@ impl ECSData {
         let (source, destination) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
 
         let factory = || registry.make_empty_component(added_component_id);
@@ -309,12 +372,10 @@ impl ECSData {
             .ensure_component(added_component_id, factory)
             .map_err(ECSError::from)?;
 
-        // Ensure all shared components exist in destination storage
         Self::ensure_shared_components(&source_sig, destination, added_component_id, &registry)?;
 
         drop(registry);
 
-        // Move row + insert new value
         source.move_row_to_archetype(
             destination,
             shards,
@@ -326,63 +387,53 @@ impl ECSData {
         Ok(())
     }
 
-    /// Removes a component from an entity, migrating it to a new archetype if needed.
+    /// Removes a component from an existing entity.
     ///
-    /// ## Semantics
-    /// This operation performs a *structural mutation* of the ECS:
+    /// The entity is moved to a new archetype that excludes the removed component.
+    /// If the entity has no components remaining after removal, it is despawned.
     ///
-    /// 1. The entity's current archetype is determined from its stored location.
-    /// 2. If the entity does not currently own `removed_component_id`, the operation
-    ///    is a no-op.
-    /// 3. A new component signature is constructed by clearing the specified
-    ///    component bit.
-    /// 4. If the resulting signature is empty, the entity is **despawned** and all
-    ///    associated storage is released.
-    /// 5. Otherwise, the entity's row is migrated to an archetype matching the new
-    ///    signature, preserving all remaining components.
+    /// # Arguments
+    /// * `entity` - The target entity
+    /// * `removed_component_id` - The `ComponentID` of the component to remove
     ///
-    /// ## Archetype migration
-    /// * The destination archetype is created lazily if it does not already exist.
-    /// * All remaining components from the source archetype are ensured to exist
-    ///   in the destination before the row move.
-    /// * Component storage order and chunk alignment are preserved by
-    ///   `move_row_to_archetype`.
+    /// # Returns
+    /// Returns `Ok(())` if:
+    /// * The component was successfully removed
+    /// * The entity didn't have the component (no-op)
+    /// * The entity was despawned due to having no components left
     ///
-    /// ## Safety and invariants
-    /// * This method assumes the entity location stored in `EntityShards` is valid.
-    /// * Entity movement relies on consistent archetype metadata and component
-    ///   storage alignment.
-    /// * This function must **not** be called concurrently with parallel iteration
-    ///   over archetypes.
-    ///
-    /// ## Failure behaviour
-    /// * Invalid or stale entities are silently ignored.
-    /// * Removing the last component always results in despawning the entity.
-    /// * Storage-level errors during migration are handled internally by
-    ///   `move_row_to_archetype`.
-    ///
-    /// ## Performance
-    /// * O(number of components in the source archetype)
-    /// * No heap allocations unless a new archetype must be created
-    ///
-    /// ## Example
-    /// ```ignore
-    /// // Removes Velocity from an entity; may move it to a different archetype
-    /// world.remove_component(entity, Velocity::ID);
-    /// ```
+    /// # Errors
+    /// Returns an error if:
+    /// * The entity is stale (already despawned)
+    /// * The registry lock is poisoned
+    /// * Archetype creation or entity movement fails
+    pub fn remove_component(
+        &mut self,
+        entity: Entity,
+        removed_component_id: ComponentID,
+    ) -> ECSResult<()> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(removed_component_id)?;
+        }
 
-    pub fn remove_component(&mut self, entity: Entity, removed_component_id: ComponentID) -> ECSResult<()> {
         let Some(location) = self.shards.get_location(entity)? else {
             return Err(SpawnError::StaleEntity(StaleEntityError).into());
         };
         let source_id = location.archetype;
 
-        if !self.archetypes[source_id as usize].has(removed_component_id) {
+        if !self.archetypes[source_id as usize]
+            .signature()
+            .try_has(removed_component_id)?
+        {
             return Ok(());
         }
 
         let mut new_signature = self.archetypes[source_id as usize].signature().clone();
-        new_signature.clear(removed_component_id);
+        new_signature.try_clear(removed_component_id)?;
 
         if new_signature.components.iter().all(|&bits| bits == 0) {
             self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity)?;
@@ -396,7 +447,9 @@ impl ECSData {
         let (source_arch, dest_arch) =
             Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
 
-        let registry = self.registry.read()
+        let registry = self
+            .registry
+            .read()
             .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
 
         Self::ensure_shared_components(&source_sig, dest_arch, removed_component_id, &registry)?;
@@ -414,559 +467,252 @@ impl ECSData {
         Ok(())
     }
 
-    /// Applies all queued deferred commands.
+    /// Writes a new component value directly into the entity's current archetype
+    /// row, **without** any archetype transition.
     ///
-    /// ## Notes
-    /// This method is expected to evolve as command execution is implemented.
-    /// Currently acts as a structural synchronization point.
+    /// The old value stored at the target slot is dropped correctly using the
+    /// stored component's real drop glue, so this path is sound for any
+    /// registered component type regardless of whether it implements `Copy`.
+    ///
+    /// ## Errors
+    ///
+    /// - [`ExecutionError::MissingComponent`] - the entity's archetype does not
+    ///   contain `component_id`.
+    /// - [`ExecutionError::InternalExecutionError`] - the dynamic `TypeId` of
+    ///   `value` does not match the column's registered element type, or the
+    ///   entity's row is out of range.
+    /// - [`SpawnError::StaleEntity`] - the entity no longer exists.
+    /// - [`ExecutionError::LockPoisoned`] - the component column lock is poisoned.
+    ///
+    /// ## Safety / exclusivity
+    ///
+    /// Must only be called while holding the exclusive phase lock
+    /// (`PhaseWrite`), which is the invariant of `apply_deferred_commands`.
+    pub(crate) fn apply_set_command(
+        &mut self,
+        entity: Entity,
+        component_id: ComponentID,
+        value: Box<dyn std::any::Any + Send>,
+    ) -> ECSResult<()> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(component_id)?;
+        }
 
-    pub fn apply_deferred_commands(
+        // 1. Resolve entity location.
+        let location = self
+            .shards
+            .get_location(entity)?
+            .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
+
+        // 2. Verify archetype contains the component.
+        let archetype = self
+            .archetypes
+            .get(location.archetype as usize)
+            .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
+
+        if !archetype.has(component_id) {
+            return Err(ECSError::from(ExecutionError::MissingComponent {
+                component_id,
+            }));
+        }
+
+        // 3. Acquire an exclusive write lock on the column.
+        let col_lock = archetype
+            .component_locked(component_id)
+            .ok_or(ECSError::from(ExecutionError::MissingComponent {
+                component_id,
+            }))?;
+
+        let mut col_guard = col_lock.write().map_err(|_| {
+            ECSError::from(ExecutionError::LockPoisoned {
+                what: "component column (set)",
+            })
+        })?;
+
+        // 4. Delegate the actual replace to the storage layer, which:
+        //    - type-checks the incoming value against the column,
+        //    - drops the old value in place using its real drop glue,
+        //    - consumes the incoming box cleanly (no leak, no double-free).
+        //
+        // `Box<dyn Any + Send>` coerces freely to `Box<dyn Any>`; the `Send`
+        // bound is not needed at the apply site because we hold the exclusive
+        // phase lock.
+        let value: Box<dyn std::any::Any> = value;
+        match col_guard.replace_slot_dyn(location.chunk, location.row, value) {
+            Ok(()) => Ok(()),
+            Err(AttributeError::TypeMismatch(_)) => {
+                Err(ECSError::from(ExecutionError::InternalExecutionError))
+            }
+            Err(AttributeError::Position(_)) => {
+                Err(ECSError::from(ExecutionError::InternalExecutionError))
+            }
+            Err(other) => Err(ECSError::from(other)),
+        }
+    }
+
+    /// Applies all queued deferred commands.
+    /// `Spawn`, `Despawn`, `Add`, and `Remove` variants.
+    pub fn apply_deferred_commands(&mut self, commands: Vec<Command>) -> ECSResult<CommandEvents> {
+        self.apply_deferred_commands_partial(commands)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Applies deferred commands until completion or the first error.
+    ///
+    /// On error, commands that were never attempted are returned so the manager
+    /// can preserve their relative order in the deferred queue.
+    pub(crate) fn apply_deferred_commands_partial(
         &mut self,
         commands: Vec<Command>,
-    ) -> ECSResult<Vec<Entity>> {
-        let mut spawned = Vec::new();
+    ) -> Result<CommandEvents, CommandDrainFailure> {
+        let mut events = CommandEvents::default();
+        #[cfg(feature = "gpu")]
+        let mut applied_any = false;
+        let mut iter = commands.into_iter();
 
-        for command in commands {
-            match command {
+        while let Some(command) = iter.next() {
+            let result = match command {
                 Command::Spawn { bundle } => {
                     let signature = bundle.signature();
-                    let archetype_id = self.get_or_create_archetype(&signature)?;
+                    let archetype_id = self.get_or_create_archetype(&signature);
+                    let archetype_id = match archetype_id {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return Err(CommandDrainFailure {
+                                error,
+                                unapplied: iter.collect(),
+                                events,
+                            });
+                        }
+                    };
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
-                    let entity = archetype.spawn_on(
-                        &mut self.shards, shard_id, bundle
-                    )?;
-                    spawned.push(entity);
+                    archetype
+                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .map(|entity| {
+                            events.spawned.push(SpawnEvent::untagged(entity));
+                        })
+                }
+
+                Command::SpawnTagged { bundle, tag } => {
+                    let signature = bundle.signature();
+                    let archetype_id = self.get_or_create_archetype(&signature);
+                    let archetype_id = match archetype_id {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return Err(CommandDrainFailure {
+                                error,
+                                unapplied: iter.collect(),
+                                events,
+                            });
+                        }
+                    };
+                    let shard_id = self.pick_spawn_shard();
+                    let archetype = &mut self.archetypes[archetype_id as usize];
+                    archetype
+                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .map(|entity| {
+                            events.spawned.push(SpawnEvent::tagged(entity, tag));
+                        })
                 }
 
                 Command::Despawn { entity } => {
-                    let loc = self.shards.get_location(entity)
-                        .map_err(ECSError::from)?
-                        .ok_or(ECSError::from(
-                            SpawnError::StaleEntity(StaleEntityError)
-                        ))?;
-                    let archetype = &mut self.archetypes[loc.archetype as usize];
-                    archetype.despawn_on(&mut self.shards, entity)?;
+                    let loc = self
+                        .shards
+                        .get_location(entity)
+                        .map_err(ECSError::from)
+                        .and_then(|loc| {
+                            loc.ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))
+                        });
+                    match loc {
+                        Ok(loc) => {
+                            let archetype = &mut self.archetypes[loc.archetype as usize];
+                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                                events.despawned.push(DespawnEvent::untagged(entity));
+                            })
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
 
-                Command::Add { entity, component_id, value } => {
-                    self.add_component(entity, component_id, value)?;
+                Command::DespawnTagged { entity, tag } => {
+                    let loc = self
+                        .shards
+                        .get_location(entity)
+                        .map_err(ECSError::from)
+                        .and_then(|loc| {
+                            loc.ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))
+                        });
+                    match loc {
+                        Ok(loc) => {
+                            let archetype = &mut self.archetypes[loc.archetype as usize];
+                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                                events.despawned.push(DespawnEvent::tagged(entity, tag));
+                            })
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
 
-                Command::Remove { entity, component_id } => {
-                    self.remove_component(entity, component_id)?;
+                Command::Add {
+                    entity,
+                    component_id,
+                    value,
+                } => self.add_component(entity, component_id, value),
+
+                Command::Remove {
+                    entity,
+                    component_id,
+                } => self.remove_component(entity, component_id),
+
+                Command::Set {
+                    entity,
+                    component_id,
+                    value,
+                } => self.apply_set_command(entity, component_id, value),
+            };
+
+            match result {
+                Ok(()) => {
+                    #[cfg(feature = "gpu")]
+                    {
+                        applied_any = true;
+                    }
+                }
+                Err(error) => {
+                    #[cfg(feature = "gpu")]
+                    if applied_any {
+                        self.notify_all_archetypes_dirty();
+                    }
+                    return Err(CommandDrainFailure {
+                        error,
+                        unapplied: iter.collect(),
+                        events,
+                    });
                 }
             }
         }
 
         #[cfg(feature = "gpu")]
-        {
-            for archetype in &self.archetypes {
-                self.gpu_dirty_chunks
-                    .notify_archetype_changed(archetype.archetype_id());
-            }
+        if applied_any {
+            self.notify_all_archetypes_dirty();
         }
 
-        Ok(spawned)
-    }
-
-    /// Executes a generic, parallel, chunk-oriented ECS query **without safety checks**.
-    ///
-    /// ## Important
-    /// This function is **unsafe by contract** and must only be called from
-    /// [`ECSReference::for_each_abstraction`].
-    ///
-    /// ## Required invariants
-    /// The caller must guarantee:
-    ///
-    /// * no structural mutation occurs for the duration of the call,
-    /// * component borrow rules are already enforced,
-    /// * each chunk represents a disjoint memory region,
-    /// * the callback does not escape references.
-    ///
-    /// ## Lock ordering
-    /// Column locks are acquired in ascending [`ComponentID`] order (reads and writes merged
-    /// and sorted together) to prevent deadlocks. Guards are then reordered back to declaration
-    /// order before pointer arrays are built, so callback index semantics are preserved.
-
-    pub(crate) fn for_each_abstraction_unchecked(
-        &self,
-        query: BuiltQuery,
-        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
-    ) -> Result<(), ExecutionError> {
-        let matches = self.matching_archetypes(&query.signature)?;
-
-        // Share callback across spawned tasks
-        let f = Arc::new(f);
-
-        // Hoist the error latch outside the archetype loop to avoid
-        // allocating an Arc<Mutex<...>> per archetype.
-        let abort = Arc::new(AtomicBool::new(false));
-        let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
-
-        for matched_archetype in matches {
-            let archetype = &self.archetypes[matched_archetype.archetype_id as usize];
-
-            // Build a combined lock order sorted by ascending ComponentID.
-            // This matches the contract documented in archetype/mod.rs and prevents
-            // deadlocks when multiple queries run concurrently on overlapping archetypes.
-            let mut lock_order: Vec<(ComponentID, bool)> =
-                Vec::with_capacity(query.reads.len() + query.writes.len());
-            for &cid in &query.reads {
-                lock_order.push((cid, false)); // false = read
-            }
-            for &cid in &query.writes {
-                lock_order.push((cid, true)); // true = write
-            }
-            lock_order.sort_unstable_by_key(|(cid, _)| *cid);
-
-            // Acquire locks in sorted order.
-            let mut read_guards: Vec<(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)> =
-                Vec::with_capacity(query.reads.len());
-            let mut write_guards: Vec<(ComponentID, RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>)> =
-                Vec::with_capacity(query.writes.len());
-
-            for (component_id, is_write) in &lock_order {
-                let locked = archetype
-                    .component_locked(*component_id)
-                    .ok_or(ExecutionError::MissingComponent { component_id: *component_id })?;
-
-                if *is_write {
-                    let guard = locked.write().map_err(|_| ExecutionError::LockPoisoned {
-                        what: "component column (write)",
-                    })?;
-                    write_guards.push((*component_id, guard));
-                } else {
-                    let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
-                        what: "component column (read)",
-                    })?;
-                    read_guards.push((*component_id, guard));
-                }
-            }
-
-            let chunk_count = archetype
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-
-            if chunk_count == 0 {
-                continue;
-            }
-
-            let mut chunk_lens = Vec::with_capacity(chunk_count);
-            for chunk in 0..chunk_count {
-                let len = archetype
-                    .chunk_valid_length(chunk)
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                chunk_lens.push(len);
-            }
-
-            // Precompute pointers.
-            // Reorder guards back to declaration order for the pointer arrays so that
-            // callback index semantics (col[0] = first declared read, etc.) are preserved.
-            let n_reads = query.reads.len();
-            let n_writes = query.writes.len();
-
-            let mut read_ptrs: Vec<(*const u8, usize)> = Vec::with_capacity(chunk_count * n_reads);
-            let mut write_ptrs: Vec<(*mut u8, usize)> = Vec::with_capacity(chunk_count * n_writes);
-
-            for chunk in 0..chunk_count {
-                let len = chunk_lens[chunk];
-
-                if len == 0 {
-                    for _ in 0..n_reads {
-                        read_ptrs.push((std::ptr::null(), 0));
-                    }
-                    for _ in 0..n_writes {
-                        write_ptrs.push((std::ptr::null_mut(), 0));
-                    }
-                    continue;
-                }
-
-                let chunk_id: crate::engine::types::ChunkID = chunk
-                    .try_into()
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-
-                Self::collect_read_ptrs_by_id(&read_guards, &query.reads, chunk_id, len, &mut read_ptrs)?;
-
-                // Collect write pointers in declaration order.
-                for &cid in &query.writes {
-                    let (_, g) = write_guards.iter_mut()
-                        .find(|(id, _)| *id == cid)
-                        .ok_or(ExecutionError::InternalExecutionError)?;
-                    let (ptr, bytes) = g
-                        .chunk_bytes_mut(chunk_id, len)
-                        .ok_or(ExecutionError::InternalExecutionError)?;
-                    write_ptrs.push((ptr, bytes));
-                }
-            }
-
-            let views = ChunkView {
-                chunk_count,
-                chunk_lens,
-                n_reads,
-                n_writes,
-                read_ptrs,
-                write_ptrs,
-            };
-
-            let threads = rayon::current_num_threads().max(1);
-            let grainsize = (views.chunk_count / threads).max(8);
-            let views_ref = &views;
-
-            #[cfg(feature = "gpu")]
-            let archetype_id: ArchetypeID = matched_archetype.archetype_id;
-
-            #[cfg(feature = "gpu")]
-            let resolved_dirty_entries: Vec<Arc<crate::engine::dirty::Entry>> = if n_writes > 0 {
-                let dirty = self.gpu_dirty_chunks();
-                query.writes.iter().map(|&cid| {
-                    dirty.resolve_entry(archetype_id, cid, views.chunk_count)
-                }).collect()
-            } else {
-                Vec::new()
-            };
-
-            #[cfg(feature = "gpu")]
-            let resolved_dirty_entries = Arc::new(resolved_dirty_entries);
-
-            rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
-
-                    let abort = abort.clone();
-                    let err = err.clone();
-                    let f = f.clone();
-                    let views = views_ref;
-
-                    #[cfg(feature = "gpu")]
-                    let resolved_dirty_entries = resolved_dirty_entries.clone();
-
-                    s.spawn(move |_| {
-                        let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::with_capacity(views.n_reads);
-                        let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::with_capacity(views.n_writes);
-
-                        for chunk in start..end {
-                            if abort.load(Ordering::Acquire) {
-                                return;
-                            }
-
-                            let fail = |e: ExecutionError| {
-                                abort.store(true, Ordering::Release);
-                                if let Ok(mut slot) = err.lock() {
-                                    if slot.is_none() {
-                                        *slot = Some(e);
-                                    }
-                                }
-                            };
-
-                            let len = views.chunk_lens[chunk];
-                            if len == 0 {
-                                continue;
-                            }
-
-                            read_views.clear();
-                            write_views.clear();
-
-                            let read_base = chunk * views.n_reads;
-                            for i in 0..views.n_reads {
-                                let (ptr, bytes) = views.read_ptrs[read_base + i];
-                                if ptr.is_null() || bytes == 0 {
-                                    fail(ExecutionError::InternalExecutionError);
-                                    return;
-                                }
-                                unsafe { read_views.push(std::slice::from_raw_parts(ptr, bytes)); }
-                            }
-
-                            let write_base = chunk * views.n_writes;
-                            for i in 0..views.n_writes {
-                                let (ptr, bytes) = views.write_ptrs[write_base + i];
-                                if ptr.is_null() || bytes == 0 {
-                                    fail(ExecutionError::InternalExecutionError);
-                                    return;
-                                }
-                                unsafe { write_views.push(std::slice::from_raw_parts_mut(ptr, bytes)); }
-                            }
-
-                            #[cfg(feature = "gpu")]
-                            {
-                                for entry in resolved_dirty_entries.as_slice() {
-                                    entry.mark_dirty(chunk);
-                                }
-                            }
-
-                            // Call user callback.
-                            // SAFETY: SmallVec<[&[u8]; 8]> derefs to &[&[u8]], which
-                            // matches the callback signature.
-                            f(&read_views, &mut write_views);
-                        }
-                    });
-
-                    start = end;
-                }
-            });
-
-            if abort.load(Ordering::Acquire) {
-                let guard = err.lock().map_err(|_| ExecutionError::LockPoisoned {
-                    what: "job error latch",
-                })?;
-
-                return Err(guard.clone().unwrap_or(ExecutionError::InternalExecutionError));
-            }
-
-            // Guards drop
-            drop(read_guards);
-            drop(write_guards);
-        }
-
-        Ok(())
-    }
-
-    /// Executes a parallel reduction over all archetypes matching a query.
-    ///
-    /// ## Lock ordering
-    /// Read column locks are acquired in ascending [`ComponentID`] order to prevent
-    /// deadlocks, then reordered back to declaration order for pointer building.
-
-    pub(crate) fn reduce_abstraction_unchecked<R>(
-        &self,
-        query: BuiltQuery,
-        init: impl Fn() -> R + Send + Sync,
-        fold_chunk: impl Fn(&mut R, &[&[u8]], usize) + Send + Sync,
-        combine: impl Fn(&mut R, R) + Send + Sync,
-    ) -> Result<R, ExecutionError>
-    where
-        R: Send + 'static,
-    {
-        let matches = self.matching_archetypes(&query.signature)?;
-
-        let init = Arc::new(init);
-        let fold_chunk = Arc::new(fold_chunk);
-        let combine = Arc::new(combine);
-
-        // (start_chunk, partial)
-        let partials: Arc<Mutex<Vec<(usize, R)>>> =
-            Arc::new(Mutex::new(Vec::new()));
-
-        for matched in matches {
-            let archetype = &self.archetypes[matched.archetype_id as usize];
-
-            // Acquire read guards in ascending ComponentID order to match the
-            // documented lock-ordering contract. Guards are stored with their
-            // ComponentID so they can be retrieved in declaration order when
-            // building pointer arrays.
-            let mut sorted_reads: Vec<ComponentID> = query.reads.clone();
-            sorted_reads.sort_unstable();
-
-            let mut read_guards: Vec<(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)> =
-                Vec::with_capacity(query.reads.len());
-
-            for &cid in &sorted_reads {
-                let locked = archetype
-                    .component_locked(cid)
-                    .ok_or(ExecutionError::MissingComponent { component_id: cid })?;
-
-                let guard = locked.read().map_err(|_| ExecutionError::LockPoisoned {
-                    what: "component column (read)",
-                })?;
-
-                read_guards.push((cid, guard));
-            }
-
-            let chunk_count = archetype
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-            if chunk_count == 0 {
-                continue;
-            }
-
-            // Precompute chunk lengths
-            let mut chunk_lens = Vec::with_capacity(chunk_count);
-            for c in 0..chunk_count {
-                let len = archetype
-                    .chunk_valid_length(c)
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-                chunk_lens.push(len);
-            }
-
-            // Precompute read pointers in declaration order.
-            let n_reads = query.reads.len();
-            let mut read_ptrs: Vec<(*const u8, usize)> =
-                Vec::with_capacity(chunk_count * n_reads);
-
-            for chunk in 0..chunk_count {
-                let len = chunk_lens[chunk];
-
-                if len == 0 {
-                    for _ in 0..n_reads {
-                        read_ptrs.push((std::ptr::null(), 0));
-                    }
-                    continue;
-                }
-
-                let chunk_id: crate::engine::types::ChunkID = chunk
-                    .try_into()
-                    .map_err(|_| ExecutionError::InternalExecutionError)?;
-
-                Self::collect_read_ptrs_by_id(&read_guards, &query.reads, chunk_id, len, &mut read_ptrs)?;
-            }
-
-            let views = ChunkView {
-                chunk_count,
-                chunk_lens,
-                n_reads,
-                n_writes: 0,
-                read_ptrs,
-                write_ptrs: Vec::new(),
-            };
-
-            let threads = rayon::current_num_threads().max(1);
-            let grainsize = (views.chunk_count / threads).max(8);
-            let views_ref = &views;
-
-            rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
-
-                    let init = init.clone();
-                    let fold_chunk = fold_chunk.clone();
-                    let partials = partials.clone();
-                    let views = views_ref;
-
-                    s.spawn(move |_| {
-                        let mut local = init();
-                        let mut read_views: SmallVec<[&[u8]; 8]> =
-                            SmallVec::with_capacity(views.n_reads);
-
-                        for chunk in start..end {
-                            let len = views.chunk_lens[chunk];
-                            if len == 0 {
-                                continue;
-                            }
-
-                            read_views.clear();
-                            let base = chunk * views.n_reads;
-
-                            for i in 0..views.n_reads {
-                                let (ptr, bytes) = views.read_ptrs[base + i];
-                                unsafe {
-                                    read_views.push(std::slice::from_raw_parts(ptr, bytes));
-                                }
-                            }
-
-                            fold_chunk(&mut local, &read_views, len);
-                        }
-
-                        partials.lock().unwrap().push((start, local));
-                    });
-
-                    start = end;
-                }
-            });
-
-            drop(read_guards);
-        }
-
-        // Deterministic combine
-        let mut parts = partials.lock().unwrap();
-        parts.sort_by_key(|(start, _)| *start);
-
-        let mut out = init();
-        for (_, p) in parts.drain(..) {
-            combine(&mut out, p);
-        }
-
-        Ok(out)
-    }
-
-    /// Returns archetypes matching a query signature.
-    ///
-    /// ## Returns
-    /// A list of archetype IDs and their chunk counts.
-
-    fn matching_archetypes(
-        &self,
-        query: &QuerySignature,
-    ) -> Result<Vec<ArchetypeMatch>, ExecutionError> {
-        let mut out = Vec::new();
-
-        for a in &self.archetypes {
-            if !query.requires_all(a.signature()) {
-                continue;
-            }
-
-            let chunks = a
-                .chunk_count()
-                .map_err(|_| ExecutionError::InternalExecutionError)?;
-
-            out.push(ArchetypeMatch {
-                archetype_id: a.archetype_id(),
-                chunks,
-            });
-        }
-
-        Ok(out)
+        Ok(events)
     }
 
     #[cfg(feature = "gpu")]
-    #[inline]
-    pub(crate) fn archetypes(&self) -> &[Archetype] {
-        &self.archetypes
+    fn notify_all_archetypes_dirty(&self) {
+        for archetype in &self.archetypes {
+            self.gpu_dirty_chunks
+                .notify_archetype_changed(archetype.archetype_id());
+        }
     }
 
-    #[cfg(feature = "gpu")]
-    #[inline]
-    pub(crate) fn archetypes_mut(&mut self) -> &mut [Archetype] {
-        &mut self.archetypes
-    }
-
-    /// Registers a world-owned GPU resource with the ECS world.
-    ///
-    /// ## Semantics
-    /// * The resource becomes owned by the ECS world for its entire lifetime.
-    /// * GPU buffers are created lazily when the GPU runtime is initialized.
-    ///
-    /// ## Returns
-    /// A stable `GPUResourceID` that can be referenced by GPU systems.
-
-    #[cfg(feature = "gpu")]
-    pub fn register_gpu_resource<R: GPUResource + 'static>(&mut self, r: R) -> GPUResourceID {
-        self.gpu_resources.register(r)
-    }
-
-    /// Returns an immutable view of the GPU resource registry.
-    ///
-    /// ## Purpose
-    /// Intended for GPU dispatch and scheduling logic that needs to:
-    /// * resolve resource bindings,
-    /// * inspect resource layouts,
-    /// * or build GPU bind groups.
-
-    #[cfg(feature = "gpu")]
-    #[inline]
-    pub fn gpu_resources(&self) -> &GPUResourceRegistry {
-        &self.gpu_resources
-    }
-
-    /// Returns a mutable view of the GPU resource registry.
-    ///
-    /// ## Purpose
-    /// Allows controlled mutation of GPU resource state, including:
-    /// * marking CPU-side data dirty,
-    /// * marking pending GPU to CPU downloads,
-    /// * performing explicit upload/download synchronization.
-
-    #[cfg(feature = "gpu")]
-    #[inline]
-    pub fn gpu_resources_mut(&mut self) -> &mut GPUResourceRegistry {
-        &mut self.gpu_resources
-    }
-
-    /// Ensures all components from `source_sig` (excluding one) exist in `destination`.
-    ///
-    /// Uses the provided `registry` to create empty component storage, avoiding
-    /// global registry calls and enabling multi-world support.
     fn ensure_shared_components(
         source_sig: &Signature,
         destination: &mut Archetype,
@@ -978,88 +724,64 @@ impl ECSData {
                 continue;
             }
             let factory = || registry.make_empty_component(cid);
-            destination.ensure_component(cid, factory).map_err(ECSError::from)?;
+            destination
+                .ensure_component(cid, factory)
+                .map_err(ECSError::from)?;
         }
         Ok(())
     }
 
-    /// Collects read pointers in declaration order from guards keyed by ComponentID.
+    /// Reads a component value from a specific entity, cloning it.
     ///
-    /// Guards are stored in lock-acquisition order (ascending ComponentID), but
-    /// callers need pointers in declaration order. This helper looks up each
-    /// declared ComponentID in the guards list and appends the chunk pointer to `out`.
-    fn collect_read_ptrs_by_id(
-        guards: &[(ComponentID, RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>)],
-        declaration_order: &[ComponentID],
-        chunk_id: crate::engine::types::ChunkID,
-        len: usize,
-        out: &mut Vec<(*const u8, usize)>,
-    ) -> Result<(), ExecutionError> {
-        for &cid in declaration_order {
-            let (_, g) = guards.iter()
-                .find(|(id, _)| *id == cid)
-                .ok_or(ExecutionError::InternalExecutionError)?;
-            let (ptr, bytes) = g
-                .chunk_bytes(chunk_id, len)
-                .ok_or(ExecutionError::InternalExecutionError)?;
-            out.push((ptr, bytes));
-        }
-        Ok(())
-    }
-
-    /// Reads a single component value for one entity.
+    /// This method provides random-access read of a single entity's component.
+    /// For bulk operations, prefer using queries with `for_each` or `reduce`.
     ///
-    /// Resolves the entity's archetype location through `EntityShards`,
-    /// acquires a read lock on the target component column, and clones the
-    /// value at the entity's `(chunk, row)`.
+    /// # Type Parameters
+    /// * `T` - The expected component type. Must match the type registered for
+    ///   `component_id`.
     ///
-    /// # Concurrency
+    /// # Arguments
+    /// * `entity` - The target entity
+    /// * `component_id` - The `ComponentID` of the component to read
     ///
-    /// This method requires only `&self` — no exclusive access. It is safe
-    /// to call under a shared phase lock (the same lock held by `for_each`)
-    /// because:
-    ///
-    /// * `EntityShards::get_location` acquires only the per-shard mutex,
-    ///   which does not conflict with the phase lock.
-    /// * The component column `RwLock` allows concurrent readers. If the
-    ///   column is write-locked by the calling system's own query, the read
-    ///   will block — which is correct, because reading a component that is
-    ///   concurrently being written is a data race.
-    /// * No structural mutation occurs.
+    /// # Returns
+    /// Returns a cloned copy of the component value.
     ///
     /// # Errors
-    ///
-    /// * `SpawnError::StaleEntity` — entity is dead or recycled.
-    /// * `ExecutionError::MissingComponent` — archetype does not contain
-    ///   this component.
-    /// * `ExecutionError::LockPoisoned` — column lock is poisoned.
+    /// Returns an error if:
+    /// * The entity is stale (already despawned)
+    /// * The archetype or component column is missing
+    /// * The component type `T` doesn't match the actual stored type
+    /// * The component is currently borrowed for writing
+    /// * The column lock is poisoned
     pub fn read_component<T: 'static + Clone>(
         &self,
         entity: Entity,
         component_id: ComponentID,
     ) -> ECSResult<T> {
-        let loc = self.shards.get_location(entity)?
+        let loc = self
+            .shards
+            .get_location(entity)?
             .ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))?;
 
-        let arch = self.archetypes.get(loc.archetype as usize)
+        let arch = self
+            .archetypes
+            .get(loc.archetype as usize)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        let col_lock = arch.component_locked(component_id)
-            .ok_or(ECSError::from(
-                ExecutionError::MissingComponent { component_id }
-            ))?;
+        let col_lock = arch.component_locked(component_id).ok_or(ECSError::from(
+            ExecutionError::MissingComponent { component_id },
+        ))?;
 
         let col = col_lock.try_read().map_err(|e| match e {
-            std::sync::TryLockError::WouldBlock => ECSError::from(
-                ExecutionError::BorrowConflict {
-                    component_id,
-                    held: AccessKind::Write,
-                    requested: AccessKind::Read,
-                }
-            ),
-            std::sync::TryLockError::Poisoned(_) => ECSError::from(
-                ExecutionError::LockPoisoned { what: "component column" }
-            ),
+            std::sync::TryLockError::WouldBlock => ECSError::from(ExecutionError::BorrowConflict {
+                component_id,
+                held: AccessKind::Write,
+                requested: AccessKind::Read,
+            }),
+            std::sync::TryLockError::Poisoned(_) => ECSError::from(ExecutionError::LockPoisoned {
+                what: "component column",
+            }),
         })?;
 
         if col.element_type_id() != TypeId::of::<T>() {
@@ -1067,13 +789,11 @@ impl ECSData {
         }
 
         let chunk_len = arch.chunk_valid_length(loc.chunk as usize)?;
-
-        let (ptr, bytes) = col.chunk_bytes(loc.chunk, chunk_len)
+        let (ptr, bytes) = col
+            .chunk_bytes(loc.chunk, chunk_len)
             .ok_or(ECSError::from(ExecutionError::InternalExecutionError))?;
 
-        let slice: &[T] = unsafe {
-            crate::engine::storage::cast_slice::<T>(ptr, bytes)
-        };
+        let slice: &[T] = unsafe { crate::engine::storage::cast_slice::<T>(ptr, bytes) };
 
         let row = loc.row as usize;
         if row >= slice.len() {
@@ -1081,5 +801,493 @@ impl ECSData {
         }
 
         Ok(slice[row].clone())
+    }
+
+    pub(crate) fn for_each_abstraction_unchecked(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
+    ) -> Result<(), ExecutionError> {
+        let matches = self.matching_archetype_ids(query.signature())?;
+        #[cfg(feature = "gpu")]
+        {
+            super::query_executor::for_each_unchecked(
+                &self.archetypes,
+                matches,
+                query,
+                &self.gpu_dirty_chunks,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+
+        #[cfg(not(feature = "gpu"))]
+        {
+            super::query_executor::for_each_unchecked(
+                &self.archetypes,
+                matches,
+                query,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+    }
+
+    /// Parallel chunk iteration whose closure may return an error.
+    ///
+    /// Identical contract to [`for_each_abstraction_unchecked`] for borrow,
+    /// phase, and aliasing safety, but the user closure returns
+    /// [`ECSResult<()>`]. If any chunk's closure returns `Err`, every other
+    /// chunk in the same archetype short-circuits and the lowest-chunk-index
+    /// error is returned. The selected error is therefore deterministic in
+    /// the chunk identifier rather than wall-clock first-to-error, so
+    /// repeated runs over identical data produce identical error reports.
+    pub(crate) fn for_each_abstraction_fallible_unchecked(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[&[u8]], &mut [&mut [u8]]) -> crate::engine::error::ECSResult<()> + Send + Sync,
+    ) -> crate::engine::error::ECSResult<()> {
+        let matches = self
+            .matching_archetype_ids(query.signature())
+            .map_err(ECSError::from)?;
+        #[cfg(feature = "gpu")]
+        {
+            super::query_executor::for_each_fallible_unchecked(
+                &self.archetypes,
+                matches,
+                query,
+                &self.gpu_dirty_chunks,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+
+        #[cfg(not(feature = "gpu"))]
+        {
+            super::query_executor::for_each_fallible_unchecked(
+                &self.archetypes,
+                matches,
+                query,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+    }
+
+    pub(crate) fn reduce_abstraction_unchecked<R>(
+        &self,
+        query: BuiltQuery,
+        init: impl Fn() -> R + Send + Sync,
+        fold_chunk: impl Fn(&mut R, &[&[u8]], usize) + Send + Sync,
+        combine: impl Fn(&mut R, R) + Send + Sync,
+    ) -> Result<R, ExecutionError>
+    where
+        R: Send + 'static,
+    {
+        let matches = self.matching_archetype_ids(query.signature())?;
+        super::query_executor::reduce_unchecked(
+            &self.archetypes,
+            matches,
+            query,
+            init,
+            fold_chunk,
+            combine,
+        )
+    }
+
+    #[cfg(feature = "gpu")]
+    /// Registers a GPU resource with the ECS world.
+    ///
+    /// GPU resources are world-owned buffers, textures, or bind groups that
+    /// persist across frames. Once registered, the resource is managed by the
+    /// ECS and can be accessed from GPU systems.
+    ///
+    /// # Type Parameters
+    /// * `R` - The GPU resource type, which must implement [`GPUResource`].
+    ///
+    /// # Arguments
+    /// * `r` - The resource instance to register.
+    ///
+    /// # Returns
+    /// A [`GPUResourceID`] that can be used to reference this resource in
+    /// GPU systems and queries.
+    ///
+    /// # Example
+    /// ```text
+    /// let buffer = world.create_buffer(&device, &descriptor);
+    /// let resource_id = ecs_data.register_gpu_resource(buffer);
+    /// ```
+    pub fn register_gpu_resource<R: GPUResource + 'static>(
+        &mut self,
+        r: R,
+    ) -> ECSResult<GPUResourceID> {
+        self.gpu_resources.register(r)
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    /// Returns an immutable reference to the GPU resource registry.
+    ///
+    /// The registry holds all world-owned GPU resources (buffers, textures,
+    /// bind groups) and provides lookup by [`GPUResourceID`]. This is used
+    /// by GPU systems to access resources during execution.
+    pub fn gpu_resources(&self) -> &GPUResourceRegistry {
+        &self.gpu_resources
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    /// Returns a mutable reference to the GPU resource registry.
+    ///
+    /// Allows adding, removing, or modifying GPU resources owned by the world.
+    /// Used during resource creation, clean-up, or when updating resource contents.
+    ///
+    /// # Safety
+    /// Callers must ensure that no GPU systems are currently executing when
+    /// mutating the registry, as this may invalidate active resource bindings.
+    pub fn gpu_resources_mut(&mut self) -> &mut GPUResourceRegistry {
+        &mut self.gpu_resources
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::component::Bundle;
+    use crate::engine::entity::EntityShards;
+    use std::sync::{Arc, RwLock};
+
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)]
+    struct Marker(u32);
+
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)]
+    struct Extra(u32);
+
+    fn test_manager() -> (crate::engine::manager::ECSManager, ComponentID, ComponentID) {
+        let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+        let (marker_id, extra_id) = {
+            let mut registry = registry.write().unwrap();
+            let marker_id = registry.register::<Marker>().unwrap();
+            let extra_id = registry.register::<Extra>().unwrap();
+            registry.freeze();
+            (marker_id, extra_id)
+        };
+        (
+            crate::engine::manager::ECSManager::with_registry(
+                EntityShards::new(1).unwrap(),
+                registry,
+            ),
+            marker_id,
+            extra_id,
+        )
+    }
+
+    fn marker_bundle(marker_id: ComponentID, value: u32) -> Bundle {
+        let mut bundle = Bundle::new();
+        bundle.insert(marker_id, Marker(value));
+        bundle
+    }
+
+    fn spawn_marker(
+        ecs: &crate::engine::manager::ECSManager,
+        marker_id: ComponentID,
+        value: u32,
+    ) -> Entity {
+        let world = ecs.world_ref();
+        world
+            .defer(Command::Spawn {
+                bundle: marker_bundle(marker_id, value),
+            })
+            .unwrap();
+        ecs.apply_deferred_commands().unwrap().spawned[0].entity
+    }
+
+    fn assert_all_columns_empty(data: &ECSData) {
+        for archetype in &data.archetypes {
+            assert_eq!(archetype.length().unwrap(), 0);
+            for (_, len) in archetype.component_lengths_for_test() {
+                assert_eq!(len, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn wrong_type_spawn_rolls_back_all_written_columns() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let mut bundle = Bundle::new();
+        bundle.insert(marker_id, Marker(1));
+        bundle.insert(extra_id, Marker(2));
+
+        world.defer(Command::Spawn { bundle }).unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        world
+            .with_exclusive(|data| {
+                assert_all_columns_empty(data);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_add_component_leaves_source_destination_and_location_unchanged() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 7);
+        let world = ecs.world_ref();
+
+        let before = world
+            .with_exclusive(|data| {
+                let loc = data.shards.get_location(entity)?.unwrap();
+                let source_len = data.archetypes[loc.archetype as usize].length()?;
+                let marker_len = data.archetypes[loc.archetype as usize]
+                    .component_locked(marker_id)
+                    .unwrap()
+                    .read()
+                    .unwrap()
+                    .length();
+                Ok((loc, source_len, marker_len))
+            })
+            .unwrap();
+
+        world
+            .defer(Command::Add {
+                entity,
+                component_id: extra_id,
+                value: Box::new(Marker(99)),
+            })
+            .unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        world
+            .with_exclusive(|data| {
+                let loc = data.shards.get_location(entity)?.unwrap();
+                assert_eq!(loc.archetype, before.0.archetype);
+                assert_eq!(loc.chunk, before.0.chunk);
+                assert_eq!(loc.row, before.0.row);
+                assert_eq!(
+                    data.archetypes[loc.archetype as usize].length().unwrap(),
+                    before.1
+                );
+                assert_eq!(
+                    data.archetypes[loc.archetype as usize]
+                        .component_locked(marker_id)
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                        .length(),
+                    before.2
+                );
+                for archetype in &data.archetypes {
+                    if archetype.archetype_id() != loc.archetype {
+                        assert_eq!(archetype.length().unwrap(), 0);
+                        for (_, len) in archetype.component_lengths_for_test() {
+                            assert_eq!(len, 0);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicate_add_component_returns_error_without_migration() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 7);
+        let world = ecs.world_ref();
+
+        world
+            .defer(Command::Add {
+                entity,
+                component_id: marker_id,
+                value: Box::new(Marker(8)),
+            })
+            .unwrap();
+
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Move(MoveError::ComponentAlreadyPresent { .. }))
+        ));
+    }
+
+    #[test]
+    fn disjoint_archetype_move_replaces_source_only_with_destination_only_components() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 7);
+        let world = ecs.world_ref();
+
+        let (source_id, destination_id) = world
+            .with_exclusive(|data| {
+                let location = data.shards.get_location(entity)?.unwrap();
+                let source_id = location.archetype;
+
+                let mut destination_signature = Signature::default();
+                destination_signature.set(extra_id);
+                let destination_id = data.get_or_create_archetype(&destination_signature)?;
+
+                let shards = &data.shards;
+                let (source, destination) = ECSData::get_archetype_pair_mut(
+                    &mut data.archetypes,
+                    source_id,
+                    destination_id,
+                )?;
+
+                source.move_row_to_archetype(
+                    destination,
+                    shards,
+                    entity,
+                    (location.chunk, location.row),
+                    vec![(extra_id, Box::new(Extra(9)) as Box<dyn std::any::Any>)],
+                )?;
+
+                Ok((source_id, destination_id))
+            })
+            .unwrap();
+
+        world
+            .with_exclusive(|data| {
+                let location = data.shards.get_location(entity)?.unwrap();
+                assert_eq!(location.archetype, destination_id);
+                assert_eq!(data.archetypes[source_id as usize].length().unwrap(), 0);
+                assert_eq!(
+                    data.archetypes[source_id as usize]
+                        .component_locked(marker_id)
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                        .length(),
+                    0
+                );
+                assert_eq!(
+                    data.archetypes[destination_id as usize].length().unwrap(),
+                    1
+                );
+                assert_eq!(
+                    data.archetypes[destination_id as usize]
+                        .component_locked(extra_id)
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                        .length(),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "gpu")]
+    fn clear_dirty_for_entity(
+        data: &mut ECSData,
+        entity: Entity,
+        component_id: ComponentID,
+    ) -> (ArchetypeID, usize) {
+        let loc = data.shards.get_location(entity).unwrap().unwrap();
+        let chunk_count = data.archetypes[loc.archetype as usize]
+            .chunk_count()
+            .unwrap();
+        let _ = data
+            .gpu_dirty_chunks
+            .take_dirty_chunks(loc.archetype, component_id, chunk_count);
+        (loc.archetype, chunk_count)
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn cpu_write_query_marks_gpu_dirty_chunks() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 1);
+        let world = ecs.world_ref();
+        let (archetype_id, chunk_count) = world
+            .with_exclusive(|data| Ok(clear_dirty_for_entity(data, entity, marker_id)))
+            .unwrap();
+
+        let query = world
+            .query()
+            .unwrap()
+            .write::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        world
+            .for_each_w1(query, |marker: &mut Marker| marker.0 += 1)
+            .unwrap();
+
+        world
+            .with_exclusive(|data| {
+                let dirty =
+                    data.gpu_dirty_chunks
+                        .take_dirty_chunks(archetype_id, marker_id, chunk_count);
+                assert_eq!(dirty, vec![0]);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn cpu_read_query_does_not_mark_gpu_dirty_chunks() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 1);
+        let world = ecs.world_ref();
+        let (archetype_id, chunk_count) = world
+            .with_exclusive(|data| Ok(clear_dirty_for_entity(data, entity, marker_id)))
+            .unwrap();
+
+        let query = world
+            .query()
+            .unwrap()
+            .read::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        world.for_each_r1(query, |_marker: &Marker| {}).unwrap();
+
+        world
+            .with_exclusive(|data| {
+                let dirty =
+                    data.gpu_dirty_chunks
+                        .take_dirty_chunks(archetype_id, marker_id, chunk_count);
+                assert!(dirty.is_empty());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn fallible_cpu_write_query_marks_gpu_dirty_before_error() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 1);
+        let world = ecs.world_ref();
+        let (archetype_id, chunk_count) = world
+            .with_exclusive(|data| Ok(clear_dirty_for_entity(data, entity, marker_id)))
+            .unwrap();
+
+        let query = world
+            .query()
+            .unwrap()
+            .write::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = world.for_each_w1_fallible(query, |marker: &mut Marker| {
+            marker.0 += 1;
+            Err(ECSError::from(ExecutionError::InternalExecutionError))
+        });
+        assert!(result.is_err());
+
+        world
+            .with_exclusive(|data| {
+                let dirty =
+                    data.gpu_dirty_chunks
+                        .take_dirty_chunks(archetype_id, marker_id, chunk_count);
+                assert_eq!(dirty, vec![0]);
+                Ok(())
+            })
+            .unwrap();
     }
 }

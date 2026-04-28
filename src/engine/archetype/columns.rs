@@ -3,15 +3,15 @@
 //! This module implements the component-level mutation methods on [`Archetype`],
 //! covering the full lifecycle of component attributes within an archetype:
 //!
-//! - **Insertion** – [`Archetype::ensure_component`] and [`Archetype::insert_empty_component`]
+//! - **Insertion** - [`Archetype::ensure_component`] and [`Archetype::insert_empty_component`]
 //!   add new component columns, update the archetype signature, and maintain the
 //!   sorted invariant of the internal component list.
 //!
-//! - **Removal** – [`Archetype::remove_component`] extracts and returns a component
+//! - **Removal** - [`Archetype::remove_component`] extracts and returns a component
 //!   column, guarded by a precondition that the archetype must be empty to preserve
 //!   row alignment.
 //!
-//! - **Construction** – [`Archetype::from_components`] builds a fully-signed, empty
+//! - **Construction** - [`Archetype::from_components`] builds a fully-signed, empty
 //!   archetype from an iterator of [`std::any::TypeId`]s, resolving each to a
 //!   registered [`ComponentID`] via the provided [`ComponentRegistry`].
 //!
@@ -22,39 +22,21 @@
 //! - The `components` vec remains sorted by [`ComponentID`] at all times, enabling
 //!   binary-search access.
 //! - The archetype [`Signature`] always reflects the exact set of component columns
-//!   present — no more, no less.
+//!   present - no more, no less.
 //! - Component attributes are never added to or removed from a populated archetype,
 //!   as doing so would break row-index alignment across columns.
 
-use crate::engine::types::{
-    ArchetypeID,
-    ComponentID,
-    COMPONENT_CAP,
-};
+use crate::engine::types::{ArchetypeID, ComponentID, COMPONENT_CAP};
 
-use crate::engine::storage::{
-    TypeErasedAttribute,
-    LockedAttribute,
-};
+use crate::engine::storage::{LockedAttribute, TypeErasedAttribute};
 
-use crate::engine::component::{
-    Signature,
-    ComponentRegistry,
-};
+use crate::engine::component::{ComponentRegistry, Signature};
 
-use crate::engine::error::{
-    SpawnError,
-    ECSError,
-    ECSResult,
-    InternalViolation,
-    RegistryError,
-};
+use crate::engine::error::{ECSError, ECSResult, InternalViolation, RegistryError, SpawnError};
 
-use super::core::{Archetype};
-
+use super::core::Archetype;
 
 impl Archetype {
-
     /// Guarantees that a component attribute exists for the given `component_id`.
     ///
     /// ## Behaviour
@@ -77,11 +59,15 @@ impl Archetype {
         }
 
         // Binary search on sorted vec.
-        match self.components.binary_search_by_key(&component_id, |(cid, _)| *cid) {
+        match self
+            .components
+            .binary_search_by_key(&component_id, |(cid, _)| *cid)
+        {
             Ok(_) => { /* already present */ }
             Err(insert_pos) => {
                 let col = factory()?;
-                self.components.insert(insert_pos, (component_id, LockedAttribute::new(col)));
+                self.components
+                    .insert(insert_pos, (component_id, LockedAttribute::new(col)));
                 self.signature.set(component_id);
             }
         }
@@ -114,12 +100,16 @@ impl Archetype {
         }
 
         // Binary search for insertion.
-        match self.components.binary_search_by_key(&component_id, |(cid, _)| *cid) {
+        match self
+            .components
+            .binary_search_by_key(&component_id, |(cid, _)| *cid)
+        {
             Ok(_) => {
                 return Err(InternalViolation::ComponentAlreadyPresent.into());
             }
             Err(insert_pos) => {
-                self.components.insert(insert_pos, (component_id, LockedAttribute::new(component)));
+                self.components
+                    .insert(insert_pos, (component_id, LockedAttribute::new(component)));
                 self.signature.set(component_id);
             }
         }
@@ -146,12 +136,17 @@ impl Archetype {
         }
 
         // Binary search for removal.
-        match self.components.binary_search_by_key(&component_id, |(cid, _)| *cid) {
+        match self
+            .components
+            .binary_search_by_key(&component_id, |(cid, _)| *cid)
+        {
             Ok(pos) => {
                 let (_, locked) = self.components.remove(pos);
                 self.signature.clear(component_id);
                 Ok(Some(
-                    locked.into_inner().map_err(|e| SpawnError::StoragePushFailedWith(e))?
+                    locked
+                        .into_inner()
+                        .map_err(|e| SpawnError::StoragePushFailedWith(e))?,
                 ))
             }
             Err(_) => Ok(None),
@@ -178,8 +173,11 @@ impl Archetype {
         let mut component_ids = Vec::new();
 
         for type_id in types {
-            let component_id = registry.component_id_of_type_id(type_id)
-                .ok_or(ECSError::from(InternalViolation::ComponentTypeNotRegistered))?;
+            let component_id = registry
+                .component_id_of_type_id(type_id)
+                .ok_or(ECSError::from(
+                    InternalViolation::ComponentTypeNotRegistered,
+                ))?;
             signature.set(component_id);
             component_ids.push(component_id);
         }

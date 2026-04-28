@@ -1,7 +1,7 @@
 //! Raw byte slice reinterpretation utilities.
 //!
-//! This module provides two `unsafe` helper functions — [`cast_slice`] and
-//! [`cast_slice_mut`] — for reinterpreting a raw byte pointer and length as a
+//! This module provides two `unsafe` helper functions - [`cast_slice`] and
+//! [`cast_slice_mut`] - for reinterpreting a raw byte pointer and length as a
 //! typed slice without copying any data.
 //!
 //! # Purpose
@@ -21,7 +21,7 @@
 //! - `bytes` must be an exact multiple of `size_of::<T>()`.
 //! - The entire memory region must contain fully initialized, valid `T` values.
 //! - The returned slice must not outlive the allocation the pointer was derived from.
-//! - For [`cast_slice_mut`]: no other live references — mutable or shared — may
+//! - For [`cast_slice_mut`]: no other live references - mutable or shared - may
 //!   alias the same memory region.
 //!
 //! Alignment and byte-length preconditions are verified with `assert_eq!` at
@@ -35,9 +35,8 @@
 //! avoiding a division by zero and matching the semantics of
 //! `slice::from_raw_parts` for ZSTs.
 
+use std::mem::{align_of, size_of};
 use std::slice;
-use std::mem::{size_of, align_of};
-
 
 /// Interprets a raw byte slice as a typed slice.
 ///
@@ -50,10 +49,13 @@ use std::mem::{size_of, align_of};
 #[inline]
 pub unsafe fn cast_slice<'a, T>(pointer: *const u8, bytes: usize) -> &'a [T] {
     let size = size_of::<T>();
-    if size == 0 { return &[]; }
+    if size == 0 {
+        return &[];
+    }
     assert_eq!(bytes % size, 0, "bytes not multiple of element size");
     assert_eq!(
-        pointer as usize % align_of::<T>(), 0,
+        pointer as usize % align_of::<T>(),
+        0,
         "pointer is not properly aligned for type"
     );
     let len = bytes / size;
@@ -74,10 +76,13 @@ pub unsafe fn cast_slice<'a, T>(pointer: *const u8, bytes: usize) -> &'a [T] {
 #[inline]
 pub unsafe fn cast_slice_mut<'a, T>(pointer: *mut u8, bytes: usize) -> &'a mut [T] {
     let size = size_of::<T>();
-    if size == 0 { return &mut []; }
+    if size == 0 {
+        return &mut [];
+    }
     assert_eq!(bytes % size, 0, "bytes not multiple of element size");
     assert_eq!(
-        pointer as usize % align_of::<T>(), 0,
+        pointer as usize % align_of::<T>(),
+        0,
         "pointer is not properly aligned for type"
     );
     let len = bytes / size;

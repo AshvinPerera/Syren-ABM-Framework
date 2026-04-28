@@ -4,13 +4,13 @@
 //! logic when transferring component rows between archetypes during add/remove
 //! component operations.
 //!
-//! These errors typically reflect internal invariant violations — storage
-//! misalignment, inconsistent swap metadata, or failed component transfers —
+//! These errors typically reflect internal invariant violations - storage
+//! misalignment, inconsistent swap metadata, or failed component transfers -
 //! rather than recoverable user-facing conditions.
 
 use std::fmt;
 
-use crate::engine::types::{ChunkID, RowID, ComponentID, EntityID, ArchetypeID};
+use crate::engine::types::{ArchetypeID, ChunkID, ComponentID, EntityID, RowID};
 
 use super::attribute::AttributeError;
 
@@ -27,7 +27,6 @@ use super::attribute::AttributeError;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
-
     /// Component storage layouts were inconsistent between archetypes.
     InconsistentStorage,
 
@@ -37,7 +36,7 @@ pub enum MoveError {
         component_id: ComponentID,
 
         /// Underlying attribute error.
-        source_error: AttributeError
+        source_error: AttributeError,
     },
 
     /// Component columns disagreed on the destination row.
@@ -49,11 +48,17 @@ pub enum MoveError {
         got: (ChunkID, RowID),
 
         /// Component whose storage was misaligned.
-        component_id: ComponentID
+        component_id: ComponentID,
     },
 
     /// No components were transferred during the move.
     NoComponentsMoved,
+
+    /// The destination signature would not change because the component exists already.
+    ComponentAlreadyPresent {
+        /// Component already present on the source entity.
+        component_id: ComponentID,
+    },
 
     /// Failed while inserting component data into the destination archetype.
     PushFailed {
@@ -61,7 +66,7 @@ pub enum MoveError {
         component_id: ComponentID,
 
         /// Underlying attribute error.
-        source_error: AttributeError
+        source_error: AttributeError,
     },
 
     /// Failed while removing component data from the source archetype.
@@ -70,7 +75,7 @@ pub enum MoveError {
         component_id: ComponentID,
 
         /// Underlying attribute error.
-        source_error: AttributeError
+        source_error: AttributeError,
     },
 
     /// Swap-remove operations yielded inconsistent metadata.
@@ -96,7 +101,10 @@ impl fmt::Display for MoveError {
                 f.write_str("component storage layouts are inconsistent between archetypes")
             }
 
-            MoveError::PushFromFailed { component_id, source_error } => {
+            MoveError::PushFromFailed {
+                component_id,
+                source_error,
+            } => {
                 write!(
                     f,
                     "failed to move component {} from source archetype: {}",
@@ -104,7 +112,11 @@ impl fmt::Display for MoveError {
                 )
             }
 
-            MoveError::RowMisalignment { expected, got, component_id } => {
+            MoveError::RowMisalignment {
+                expected,
+                got,
+                component_id,
+            } => {
                 write!(
                     f,
                     "component {} storage misaligned: expected position {:?}, got {:?}",
@@ -116,7 +128,14 @@ impl fmt::Display for MoveError {
                 f.write_str("no components were moved during archetype transition")
             }
 
-            MoveError::PushFailed { component_id, source_error } => {
+            MoveError::ComponentAlreadyPresent { component_id } => {
+                write!(f, "component {} is already present", component_id)
+            }
+
+            MoveError::PushFailed {
+                component_id,
+                source_error,
+            } => {
                 write!(
                     f,
                     "failed to insert component {} into destination archetype: {}",
@@ -124,7 +143,10 @@ impl fmt::Display for MoveError {
                 )
             }
 
-            MoveError::SwapRemoveError { component_id, source_error } => {
+            MoveError::SwapRemoveError {
+                component_id,
+                source_error,
+            } => {
                 write!(
                     f,
                     "failed to remove component {} from source archetype: {}",
@@ -136,7 +158,11 @@ impl fmt::Display for MoveError {
                 f.write_str("swap-remove produced inconsistent metadata")
             }
 
-            MoveError::MetadataFailure { entity, source_archetype, destination_archetype } => {
+            MoveError::MetadataFailure {
+                entity,
+                source_archetype,
+                destination_archetype,
+            } => {
                 write!(f, "failed to update entity metadata after archetype move")?;
                 if let Some(e) = entity {
                     write!(f, " (entity: {})", e)?;

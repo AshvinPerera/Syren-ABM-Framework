@@ -8,11 +8,11 @@
 //!
 //! # Entity Lifecycle
 //!
-//! 1. **Spawn** — a free index is claimed from the free list (or new slots are grown),
+//! 1. **Spawn** - a free index is claimed from the free list (or new slots are grown),
 //!    marked alive, and bundled with a shard ID and version into an [`Entity`] handle.
-//! 2. **Live** — the slot holds a valid [`EntityLocation`] pointing into archetype storage.
+//! 2. **Live** - the slot holds a valid [`EntityLocation`] pointing into archetype storage.
 //!    Location can be updated as entities move between archetypes.
-//! 3. **Despawn** — the version is incremented, the slot is marked dead, its location is
+//! 3. **Despawn** - the version is incremented, the slot is marked dead, its location is
 //!    cleared, and the index is returned to the free list. All previously issued handles
 //!    for the entity become permanently stale.
 //!
@@ -34,16 +34,12 @@
 //! [`Entities`] is **not thread-safe**. Callers are responsible for external synchronization;
 //! in practice this is provided by the `Mutex` wrapping [`Entities`] inside `Shard`.
 
-use crate::engine::types::{
-    EntityID, ShardID, IndexID, VersionID, EntityCount,
-    INDEX_CAP,
-};
 use crate::engine::error::CapacityError;
+use crate::engine::types::{EntityCount, EntityID, IndexID, ShardID, VersionID, INDEX_CAP};
 
-use super::entity::{make_entity, split_entity};
 use super::entity::Entity;
+use super::entity::{make_entity, split_entity};
 use super::location::EntityLocation;
-
 
 /// Shard-local entity pool.
 ///
@@ -76,20 +72,25 @@ pub struct Entities {
 }
 
 impl Entities {
-
     fn ensure_capacity(&mut self, additional_entities: EntityCount) -> Result<(), CapacityError> {
-        if additional_entities == 0 { return Ok(()); }
+        if additional_entities == 0 {
+            return Ok(());
+        }
 
         let current_entity_count = self.versions.len() as EntityID;
         let entities_needed = current_entity_count + (additional_entities as EntityID);
         let capacity = INDEX_CAP as EntityID + 1;
         if entities_needed > capacity {
-            return Err(CapacityError { entities_needed, capacity });
+            return Err(CapacityError {
+                entities_needed,
+                capacity,
+            });
         }
 
         self.versions.resize(entities_needed as usize, 0);
         self.alive.resize(entities_needed as usize, false);
-        self.locations.resize(entities_needed as usize, EntityLocation::default());
+        self.locations
+            .resize(entities_needed as usize, EntityLocation::default());
 
         for index in current_entity_count..entities_needed {
             self.free_store.push(index as IndexID);
@@ -113,7 +114,11 @@ impl Entities {
     /// - The returned entity is alive upon success.
     /// - The version is unchanged from the previous occupant of the slot.
 
-    pub(crate) fn spawn(&mut self, shard_id: ShardID, location: EntityLocation) -> Result<Entity, CapacityError> {
+    pub(crate) fn spawn(
+        &mut self,
+        shard_id: ShardID,
+        location: EntityLocation,
+    ) -> Result<Entity, CapacityError> {
         let index = if let Some(i) = self.free_store.pop() {
             i
         } else {
@@ -124,7 +129,10 @@ impl Entities {
                 None => {
                     let entities_needed = (self.versions.len() as u64).saturating_add(1);
                     let capacity = (INDEX_CAP as u64).saturating_add(1);
-                    return Err(CapacityError { entities_needed, capacity });
+                    return Err(CapacityError {
+                        entities_needed,
+                        capacity,
+                    });
                 }
             }
         };
@@ -178,8 +186,7 @@ impl Entities {
     /// Returns the archetype location of an entity, if alive.
     pub fn get_location(&self, entity: Entity) -> Option<EntityLocation> {
         let (_, i, _) = split_entity(entity);
-        if self.is_alive(entity)
-        {
+        if self.is_alive(entity) {
             Some(self.locations[i as usize])
         } else {
             None
@@ -197,7 +204,8 @@ impl Entities {
         debug_assert!(
             self.is_alive(entity),
             "set_location was called on a dead or stale entity. Entity: {:?}, Location: {:?}",
-            entity, location
+            entity,
+            location
         );
         if index < self.locations.len() {
             self.locations[index] = location;

@@ -19,14 +19,14 @@
 //! * At scheduler/manager boundaries, convert with `map_err(ECSError::from)?`.
 
 pub mod error;
-pub mod hooks;
-pub mod template;
 pub mod handle;
-pub mod spawner;
+pub mod hooks;
 pub mod registry;
+pub mod spawner;
+pub mod template;
 
 pub use error::{AgentError, AgentResult};
-pub use template::{AgentTemplate, AgentTemplateBuilder, DefaultFactory};
 pub use handle::{AgentHandle, AgentHandleError};
-pub use spawner::AgentSpawner;
 pub use registry::AgentRegistry;
+pub use spawner::AgentSpawner;
+pub use template::{AgentTemplate, AgentTemplateBuilder, DefaultFactory};

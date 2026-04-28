@@ -2,7 +2,7 @@
 //!
 //! This module provides [`LockedAttribute`], a thin wrapper that combines
 //! `Arc` and `RwLock` to allow multiple owners to safely share a single
-//! [`TypeErasedAttribute`] across threads — typically the component columns
+//! [`TypeErasedAttribute`] across threads - typically the component columns
 //! stored inside an [`Archetype`].
 //!
 //! # Design
@@ -30,8 +30,8 @@
 //!
 //! # Errors
 //!
-//! Lock-poisoning — caused by a thread panicking while holding the write lock
-//! — is treated as an unrecoverable internal invariant violation and surfaces
+//! Lock-poisoning - caused by a thread panicking while holding the write lock
+//! - is treated as an unrecoverable internal invariant violation and surfaces
 //! as [`AttributeError::InternalInvariant`].
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -39,8 +39,6 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::engine::error::AttributeError;
 use crate::engine::error::AttributeInvariantViolation;
 use crate::engine::storage::type_erased_attribute::TypeErasedAttribute;
-
-
 
 /// A thread-safe wrapper around a type-erased attribute.
 #[derive(Clone)]
@@ -51,7 +49,9 @@ pub struct LockedAttribute {
 impl LockedAttribute {
     /// Creates a new `LockedAttribute` wrapping the given type-erased attribute.
     pub fn new(attribute: Box<dyn TypeErasedAttribute>) -> Self {
-        Self { inner: Arc::new(RwLock::new(attribute)) }
+        Self {
+            inner: Arc::new(RwLock::new(attribute)),
+        }
     }
 
     /// Returns a read guard to the inner attribute.
@@ -59,9 +59,9 @@ impl LockedAttribute {
     pub fn read(
         &self,
     ) -> Result<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
-        self.inner
-            .read()
-            .map_err(|_| AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned))
+        self.inner.read().map_err(|_| {
+            AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned)
+        })
     }
 
     /// Returns a write guard to the inner attribute.
@@ -69,9 +69,9 @@ impl LockedAttribute {
     pub fn write(
         &self,
     ) -> Result<RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
-        self.inner
-            .write()
-            .map_err(|_| AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned))
+        self.inner.write().map_err(|_| {
+            AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned)
+        })
     }
 
     /// Returns a clone of the internal `Arc<RwLock<Box<dyn TypeErasedAttribute>>>`.
@@ -83,9 +83,9 @@ impl LockedAttribute {
     /// Consumes the `LockedAttribute`, returning the inner attribute.
     pub fn into_inner(self) -> Result<Box<dyn TypeErasedAttribute>, AttributeError> {
         match Arc::try_unwrap(self.inner) {
-            Ok(lock) => lock
-                .into_inner()
-                .map_err(|_| AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned)),
+            Ok(lock) => lock.into_inner().map_err(|_| {
+                AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned)
+            }),
             Err(_) => Err(AttributeError::InternalInvariant(
                 AttributeInvariantViolation::StillShared,
             )),
@@ -101,11 +101,10 @@ impl LockedAttribute {
     #[inline]
     pub fn try_read(
         &self,
-    ) -> Result
-    <
+    ) -> Result<
         RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>,
         std::sync::TryLockError<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>>,
     > {
-    self.inner.try_read()
+        self.inner.try_read()
     }
 }

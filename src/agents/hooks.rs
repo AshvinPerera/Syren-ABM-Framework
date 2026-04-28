@@ -8,10 +8,10 @@
 //! `apply_deferred_commands` completes and the resolved entity handles are
 //! available.
 //!
-//! Hook invocation is wired through
-//! [`AgentRegistry::flush_spawn_hooks`](super::registry::AgentRegistry::flush_spawn_hooks),
-//! which the model calls at the existing `apply_deferred_commands` sync
-//! boundary.
+//! Hook invocation is wired through the model-owned
+//! [`AgentRegistry`](super::registry::AgentRegistry). The model flushes spawn
+//! and despawn hooks after each deferred command drain reports the entities it
+//! created or removed.
 //!
 //! ## Constraints
 //!
@@ -36,14 +36,15 @@ use crate::engine::manager::ECSReference;
 /// `apply_deferred_commands` returns.  Never called inside a running system.
 pub type SpawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
 
-/// Called before a `Command::Despawn` is applied.
+/// Called after a tagged despawn command is applied.
 ///
-/// Receives an [`ECSReference`] and the entity about to be destroyed. The
-/// hook may enqueue additional commands via [`ECSReference::defer`] but must
-/// not perform immediate structural mutations.
+/// Receives an [`ECSReference`] and the entity that was destroyed. The hook may
+/// enqueue additional commands via [`ECSReference::defer`] but must not perform
+/// immediate structural mutations.
 ///
 /// # Timing
 ///
-/// Invoked by `AgentRegistry::flush_despawn_hooks` before the despawn command
-/// is applied.  Never called inside a running system.
+/// Invoked by `AgentRegistry::flush_despawn_hooks` after
+/// `apply_deferred_commands` reports a tagged despawn. Never called inside a
+/// running system.
 pub type DespawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
