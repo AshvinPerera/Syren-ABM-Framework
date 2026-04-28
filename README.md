@@ -5,7 +5,7 @@ custom archetype ECS, declared system access sets, optional model-level
 composition, typed environments, typed per-tick messaging, and an optional
 `wgpu` compute backend.
 
-This project is still a hobby and learning project. It is useful for exploring
+This project is a hobby project. It is useful for exploring
 the internals of scalable ABM runtimes and for building early economic model
 experiments, but it should be treated as evolving infrastructure rather than a
 finished research platform.
@@ -122,8 +122,7 @@ cargo bench --no-run --features all
 
 ## Benchmarks
 
-Criterion benchmarks live under `benches/`. Machine-specific notes and recorded
-review measurements are in `benches/BENCHMARKS.md`.
+Criterion benchmarks live under `benches/`.
 
 Representative split benchmark targets:
 
