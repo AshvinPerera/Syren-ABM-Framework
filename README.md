@@ -122,8 +122,7 @@ cargo bench --no-run --features all
 
 ## Benchmarks
 
-Criterion benchmarks live under `benches/`. Machine-specific notes and recorded
-review measurements are in `benches/BENCHMARKS.md`.
+Criterion benchmarks live under `benches/`.
 
 Representative split benchmark targets:
 
