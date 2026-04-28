@@ -132,27 +132,25 @@ fn make_scheduler_for_packing() -> Scheduler {
         } else if i % 4 == 1 {
             access.consumes.insert((i / 4) as u32);
         }
-        scheduler.add_system(FnSystem::new(
-            i as u16,
-            "packing_node",
-            access,
-            |_| Ok(()),
-        ));
+        scheduler.add_system(FnSystem::new(i as u16, "packing_node", access, |_| Ok(())));
     }
     scheduler
 }
 
 fn scheduler_packing_benchmark(c: &mut Criterion) {
-    c.bench_function("scheduler_packing/rebuild_1000_system_realistic_graph", |b| {
-        b.iter_batched(
-            make_scheduler_for_packing,
-            |mut scheduler| {
-                scheduler.try_rebuild().unwrap();
-                black_box(scheduler.plan().len());
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    c.bench_function(
+        "scheduler_packing/rebuild_1000_system_realistic_graph",
+        |b| {
+            b.iter_batched(
+                make_scheduler_for_packing,
+                |mut scheduler| {
+                    scheduler.try_rebuild().unwrap();
+                    black_box(scheduler.plan().len());
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
 fn environment_dirty_tracking_benchmark(c: &mut Criterion) {

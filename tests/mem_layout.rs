@@ -304,7 +304,13 @@ fn reduction_combines_multi_archetype_chunks_deterministically() {
 
     world.apply_deferred_commands().unwrap();
 
-    let query = ecs.query().unwrap().read::<ReduceValue>().unwrap().build().unwrap();
+    let query = ecs
+        .query()
+        .unwrap()
+        .read::<ReduceValue>()
+        .unwrap()
+        .build()
+        .unwrap();
     let mut expected = Vec::with_capacity(per_archetype * 2);
     expected.extend((0..per_archetype).map(|i| (i * 2) as u32));
     expected.extend((0..per_archetype).map(|i| (i * 2 + 1) as u32));

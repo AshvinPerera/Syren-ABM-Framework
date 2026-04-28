@@ -69,12 +69,10 @@ impl SpatialBuffer {
             return Ok(());
         }
 
-        let position_fn = fns
-            .position
-            .ok_or(MessagingError::MissingErasedFunction {
-                specialisation: "Spatial",
-                function: "position",
-            })?;
+        let position_fn = fns.position.ok_or(MessagingError::MissingErasedFunction {
+            specialisation: "Spatial",
+            function: "position",
+        })?;
         let total_cells = self.config.total_cells();
 
         // -- 1. Count ---------------------------------------------------------

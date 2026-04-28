@@ -134,6 +134,7 @@ struct GPUResourceEntry {
 pub struct GPUResourceRegistry {
     entries: Vec<GPUResourceEntry>,
     next_id: GPUResourceID,
+    binding_generation: u64,
 }
 
 #[cfg(feature = "gpu")]
@@ -161,6 +162,12 @@ impl GPUResourceRegistry {
         });
 
         Ok(id)
+    }
+
+    /// Monotonic generation for bindable buffers owned by registered resources.
+    #[inline]
+    pub(crate) fn binding_generation(&self) -> u64 {
+        self.binding_generation
     }
 
     /// Marks a resource as modified on the CPU.
@@ -193,6 +200,7 @@ impl GPUResourceRegistry {
             if !e.created {
                 e.resource.create_gpu(context)?;
                 e.created = true;
+                self.binding_generation = self.binding_generation.wrapping_add(1);
             }
         }
         Ok(())
@@ -204,6 +212,7 @@ impl GPUResourceRegistry {
             if e.cpu_dirty {
                 e.resource.upload(context)?;
                 e.cpu_dirty = false;
+                self.binding_generation = self.binding_generation.wrapping_add(1);
             }
         }
         Ok(())

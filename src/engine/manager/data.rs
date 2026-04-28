@@ -251,12 +251,12 @@ impl ECSData {
         let generation = self.archetype_generation;
 
         {
-            let cache = self
-                .query_match_cache
-                .read()
-                .map_err(|_| ExecutionError::LockPoisoned {
-                    what: "query match cache",
-                })?;
+            let cache =
+                self.query_match_cache
+                    .read()
+                    .map_err(|_| ExecutionError::LockPoisoned {
+                        what: "query match cache",
+                    })?;
             if let Some(entry) = cache.get(&key) {
                 if entry.generation == generation {
                     return Ok(entry.archetype_ids.clone());

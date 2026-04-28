@@ -23,8 +23,9 @@
 //! 2. Compute the union of read/write component signatures.
 //! 3. Upload matching component columns to GPU buffers.
 //! 4. Dispatch the GPU compute pipeline **per matching archetype**.
-//! 5. Synchronize GPU execution.
-//! 6. Download mutated component columns back into ECS storage.
+//! 5. Submit GPU work; the following scheduler boundary performs the blocking
+//!    synchronization/readback when CPU state is needed.
+//! 6. Download mutated component columns back into ECS storage at that boundary.
 //!
 //! ## Design philosophy
 //!
@@ -44,12 +45,14 @@
 //! * GPU execution occurs inside `ECSReference::with_exclusive`.
 //! * No ECS iteration may be active during GPU dispatch.
 //! * Component borrows are enforced before upload and after download.
-//! * GPU synchronization is explicit via `device.poll`.
+//! * GPU synchronization is explicit and concentrated at sync/readback
+//!   boundaries via `device.poll`.
 
 #![cfg(feature = "gpu")]
 
+use std::collections::HashMap;
 use std::mem::size_of;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::engine::archetype::Archetype;
 use crate::engine::component::{or_signature_in_place, Signature};
@@ -67,8 +70,6 @@ use crate::gpu::GPUResourceRegistry;
 use crate::gpu::pipeline::hash_str;
 #[cfg(feature = "messaging_gpu")]
 use crate::gpu::GPUBindingDesc;
-#[cfg(feature = "messaging_gpu")]
-use std::collections::HashMap;
 
 struct DeviceRuntime {
     context: GPUContext,
@@ -82,6 +83,8 @@ pub(crate) struct GpuWorldState {
     pub(crate) mirror: Mirror,
     pub(crate) pending_download: Signature,
     pub(crate) params_buffers: Vec<wgpu::Buffer>,
+    params_generation: u64,
+    bind_groups: GpuBindGroupCache,
 }
 
 impl GpuWorldState {
@@ -91,6 +94,61 @@ impl GpuWorldState {
             mirror: Mirror::new(),
             pending_download: Signature::default(),
             params_buffers: Vec::new(),
+            params_generation: 0,
+            bind_groups: GpuBindGroupCache::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ComponentBindGroupKey {
+    system_id: crate::engine::types::SystemID,
+    archetype_id: crate::engine::types::ArchetypeID,
+    reads: Vec<crate::engine::types::ComponentID>,
+    writes: Vec<crate::engine::types::ComponentID>,
+    params_index: usize,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ResourceBindGroupKey {
+    system_id: crate::engine::types::SystemID,
+    resource_ids: Vec<GPUResourceID>,
+    layout_keys: Vec<u8>,
+}
+
+struct GpuBindGroupCache {
+    component_groups: HashMap<ComponentBindGroupKey, Arc<wgpu::BindGroup>>,
+    resource_groups: HashMap<ResourceBindGroupKey, Arc<wgpu::BindGroup>>,
+    mirror_generation: u64,
+    params_generation: u64,
+    resource_generation: u64,
+}
+
+impl GpuBindGroupCache {
+    fn new() -> Self {
+        Self {
+            component_groups: HashMap::new(),
+            resource_groups: HashMap::new(),
+            mirror_generation: 0,
+            params_generation: 0,
+            resource_generation: 0,
+        }
+    }
+
+    fn sync_component_generations(&mut self, mirror_generation: u64, params_generation: u64) {
+        if self.mirror_generation != mirror_generation
+            || self.params_generation != params_generation
+        {
+            self.component_groups.clear();
+            self.mirror_generation = mirror_generation;
+            self.params_generation = params_generation;
+        }
+    }
+
+    fn sync_resource_generation(&mut self, resource_generation: u64) {
+        if self.resource_generation != resource_generation {
+            self.resource_groups.clear();
+            self.resource_generation = resource_generation;
         }
     }
 }
@@ -457,6 +515,8 @@ fn dispatch_over_archetypes(
         }
     }
     let resource_layout = gpu_resources.flattened_binding_descs(&resource_ids);
+    let resource_layout_keys: Vec<u8> = resource_layout.iter().map(|desc| desc.key()).collect();
+    let resource_generation = gpu_resources.binding_generation();
 
     // Resolve component access
 
@@ -489,8 +549,42 @@ fn dispatch_over_archetypes(
     let GpuWorldState {
         mirror,
         params_buffers,
+        params_generation,
+        bind_groups,
         ..
     } = world_state;
+    bind_groups.sync_component_generations(mirror.binding_generation(), *params_generation);
+    bind_groups.sync_resource_generation(resource_generation);
+
+    // Bind group 1 (GPU resources) is stable across every archetype for this
+    // dispatch as long as resource buffers and layouts are unchanged.
+    let bind_group1 = if let Some(bgl1) = bgl1_opt {
+        let key = ResourceBindGroupKey {
+            system_id,
+            resource_ids: resource_ids.clone(),
+            layout_keys: resource_layout_keys,
+        };
+
+        if let Some(cached) = bind_groups.resource_groups.get(&key) {
+            Some(Arc::clone(cached))
+        } else {
+            let mut entries1 = Vec::with_capacity(resource_layout.len());
+            gpu_resources.append_bind_group_entries(&resource_ids, 0, &mut entries1)?;
+            let bind_group = Arc::new(context.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("abm_bind_group_group1"),
+                    layout: bgl1,
+                    entries: &entries1,
+                },
+            ));
+            bind_groups
+                .resource_groups
+                .insert(key, Arc::clone(&bind_group));
+            Some(bind_group)
+        }
+    } else {
+        None
+    };
     let mut params_index = 0usize;
 
     let mut encoder = context
@@ -522,33 +616,6 @@ fn dispatch_over_archetypes(
                 continue;
             }
 
-            // Bind group 0 (components + params)
-
-            let mut entries0 = Vec::with_capacity(read_count + write_count + 1);
-
-            for (i, &component_id) in reads.iter().enumerate() {
-                let entry = resolve_buffer_entry(
-                    mirror,
-                    archetype,
-                    component_id,
-                    i as u32,
-                    GPUAccessMode::Read,
-                )?;
-                entries0.push(entry);
-            }
-
-            let base = reads.len();
-            for (j, &component_id) in writes.iter().enumerate() {
-                let entry = resolve_buffer_entry(
-                    mirror,
-                    archetype,
-                    component_id,
-                    (base + j) as u32,
-                    GPUAccessMode::Write,
-                )?;
-                entries0.push(entry);
-            }
-
             // Params buffer
 
             #[repr(C, align(16))]
@@ -571,6 +638,7 @@ fn dispatch_over_archetypes(
             };
 
             let size = size_of::<Params>() as u64;
+            let current_params_index = params_index;
             if params_buffers.len() <= params_index {
                 params_buffers.push(context.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("abm_params"),
@@ -578,6 +646,7 @@ fn dispatch_over_archetypes(
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));
+                *params_generation = params_generation.wrapping_add(1);
             } else if params_buffers[params_index].size() < size {
                 params_buffers[params_index] =
                     context.device.create_buffer(&wgpu::BufferDescriptor {
@@ -586,7 +655,9 @@ fn dispatch_over_archetypes(
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
+                *params_generation = params_generation.wrapping_add(1);
             }
+            bind_groups.sync_component_generations(mirror.binding_generation(), *params_generation);
 
             let params_buf = &params_buffers[params_index];
             params_index += 1;
@@ -594,44 +665,68 @@ fn dispatch_over_archetypes(
                 .queue
                 .write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
 
-            entries0.push(wgpu::BindGroupEntry {
-                binding: (read_count + write_count) as u32,
-                resource: params_buf.as_entire_binding(),
-            });
+            // Bind group 0 (components + params) is stable while the component
+            // mirror buffers and params buffer set keep the same generation.
+            let component_key = ComponentBindGroupKey {
+                system_id,
+                archetype_id: archetype.archetype_id(),
+                reads: reads.clone(),
+                writes: writes.clone(),
+                params_index: current_params_index,
+            };
 
-            let bind_group0 = context
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("abm_bind_group_group0"),
-                    layout: bgl0,
-                    entries: &entries0,
+            let bind_group0 = if let Some(cached) = bind_groups.component_groups.get(&component_key)
+            {
+                Arc::clone(cached)
+            } else {
+                let mut entries0 = Vec::with_capacity(read_count + write_count + 1);
+
+                for (i, &component_id) in reads.iter().enumerate() {
+                    let entry = resolve_buffer_entry(
+                        mirror,
+                        archetype,
+                        component_id,
+                        i as u32,
+                        GPUAccessMode::Read,
+                    )?;
+                    entries0.push(entry);
+                }
+
+                let base = reads.len();
+                for (j, &component_id) in writes.iter().enumerate() {
+                    let entry = resolve_buffer_entry(
+                        mirror,
+                        archetype,
+                        component_id,
+                        (base + j) as u32,
+                        GPUAccessMode::Write,
+                    )?;
+                    entries0.push(entry);
+                }
+
+                entries0.push(wgpu::BindGroupEntry {
+                    binding: (read_count + write_count) as u32,
+                    resource: params_buf.as_entire_binding(),
                 });
 
-            // Bind group 1 (GPU resources)
-
-            let bind_group1 = if let Some(bgl1) = bgl1_opt {
-                let mut entries1 = Vec::with_capacity(resource_layout.len());
-
-                gpu_resources.append_bind_group_entries(&resource_ids, 0, &mut entries1)?;
-
-                Some(
-                    context
-                        .device
-                        .create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("abm_bind_group_group1"),
-                            layout: bgl1,
-                            entries: &entries1,
-                        }),
-                )
-            } else {
-                None
+                let bind_group = Arc::new(context.device.create_bind_group(
+                    &wgpu::BindGroupDescriptor {
+                        label: Some("abm_bind_group_group0"),
+                        layout: bgl0,
+                        entries: &entries0,
+                    },
+                ));
+                bind_groups
+                    .component_groups
+                    .insert(component_key, Arc::clone(&bind_group));
+                bind_group
             };
 
             // Dispatch
 
-            pass.set_bind_group(0, &bind_group0, &[]);
+            pass.set_bind_group(0, bind_group0.as_ref(), &[]);
             if let Some(bg1) = &bind_group1 {
-                pass.set_bind_group(1, bg1, &[]);
+                pass.set_bind_group(1, bg1.as_ref(), &[]);
             }
 
             let workgroup = gpu.workgroup_size().max(1);
@@ -641,14 +736,15 @@ fn dispatch_over_archetypes(
         }
     }
 
-    // Submit
-
+    // Submit without blocking. The scheduler inserts a boundary after GPU
+    // stages, and `sync_pending_to_cpu` performs the required blocking poll
+    // before CPU-visible reads observe GPU-written state.
     context.queue.submit(Some(encoder.finish()));
-    poll_context(context)?;
 
     Ok(())
 }
 
+#[cfg(feature = "messaging_gpu")]
 fn poll_context(context: &GPUContext) -> ECSResult<()> {
     context
         .device

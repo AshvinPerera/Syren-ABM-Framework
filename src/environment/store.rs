@@ -361,7 +361,7 @@ impl Environment {
     ///
     /// Single-channel membership probe used by
     /// [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary)
-    /// to compute the precise intersection of `channels  intersection  env.dirty  intersection 
+    /// to compute the precise intersection of `channels  intersection  env.dirty  intersection
     /// uniform.owned` without constructing intermediate iterators.
     ///
     /// Currently only the GPU uniform-buffer integration needs this primitive,

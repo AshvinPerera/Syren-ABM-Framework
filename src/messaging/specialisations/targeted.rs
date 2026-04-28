@@ -63,12 +63,10 @@ impl TargetedBuffer {
             return Ok(());
         }
 
-        let recipient_fn = fns
-            .recipient
-            .ok_or(MessagingError::MissingErasedFunction {
-                specialisation: "Targeted",
-                function: "recipient",
-            })?;
+        let recipient_fn = fns.recipient.ok_or(MessagingError::MissingErasedFunction {
+            specialisation: "Targeted",
+            function: "recipient",
+        })?;
 
         // -- 1. Count per-entity -----------------------------------------------
         // We use a deterministic two-pass approach to avoid per-entity Vec
@@ -113,12 +111,12 @@ impl TargetedBuffer {
 
         for (i, &entity) in entity_pairs.iter().enumerate() {
             let src = unsafe { raw.as_ptr_at(i) };
-            let dst_idx = *scatter_cursor.get(&entity).ok_or(
-                MessagingError::FinaliseInvariant {
+            let dst_idx = *scatter_cursor
+                .get(&entity)
+                .ok_or(MessagingError::FinaliseInvariant {
                     specialisation: "Targeted",
                     reason: "entity missing from scatter cursor",
-                },
-            )? as usize;
+                })? as usize;
             let dst = unsafe { self.data.as_mut_ptr_at(dst_idx) };
             unsafe { std::ptr::copy_nonoverlapping(src, dst, self.item_size) };
             let cursor =

@@ -378,22 +378,10 @@ impl Scheduler {
         for a in 0..n {
             for b in (a + 1)..n {
                 if access[a].produces.intersects(&access[b].consumes) {
-                    Self::add_edge(
-                        &mut edges,
-                        &mut in_degree,
-                        &mut boundary_predecessors,
-                        a,
-                        b,
-                    );
+                    Self::add_edge(&mut edges, &mut in_degree, &mut boundary_predecessors, a, b);
                 }
                 if access[b].produces.intersects(&access[a].consumes) {
-                    Self::add_edge(
-                        &mut edges,
-                        &mut in_degree,
-                        &mut boundary_predecessors,
-                        b,
-                        a,
-                    );
+                    Self::add_edge(&mut edges, &mut in_degree, &mut boundary_predecessors, b, a);
                 }
             }
         }

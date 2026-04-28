@@ -76,12 +76,12 @@ impl BucketBuffer {
             return Ok(());
         }
 
-        let bucket_key_fn =
-            fns.bucket_key
-                .ok_or(MessagingError::MissingErasedFunction {
-                    specialisation: "Bucket",
-                    function: "bucket_key",
-                })?;
+        let bucket_key_fn = fns
+            .bucket_key
+            .ok_or(MessagingError::MissingErasedFunction {
+                specialisation: "Bucket",
+                function: "bucket_key",
+            })?;
         let max = self.max_buckets as usize;
 
         // -- 1. Count ---------------------------------------------------------

@@ -24,15 +24,39 @@ struct BufferEntry {
 }
 
 #[derive(Debug)]
+struct ReadbackEntry {
+    buffer: wgpu::Buffer,
+    bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DownloadTask {
+    archetype_index: usize,
+    archetype_id: ArchetypeID,
+    component_id: ComponentID,
+    bytes_total: usize,
+}
+
+#[derive(Debug)]
 pub struct Mirror {
     buffers: HashMap<(ArchetypeID, ComponentID), BufferEntry>,
+    readback_buffers: HashMap<(ArchetypeID, ComponentID), ReadbackEntry>,
+    binding_generation: u64,
 }
 
 impl Mirror {
     pub fn new() -> Self {
         Self {
             buffers: HashMap::new(),
+            readback_buffers: HashMap::new(),
+            binding_generation: 0,
         }
+    }
+
+    /// Monotonic generation for component buffers used in GPU bind groups.
+    #[inline]
+    pub(crate) fn binding_generation(&self) -> u64 {
+        self.binding_generation
     }
 
     /// Checks that the component identified by `component_id` is registered and GPU-safe,
@@ -100,14 +124,41 @@ impl Mirror {
             iter_bits_from_words(&signature.components).collect();
         component_ids.sort_unstable();
 
-        for archetype in archetypes {
+        let mut tasks = Vec::new();
+
+        for (archetype_index, archetype) in archetypes.iter().enumerate() {
             for &component_id in &component_ids {
                 if archetype.has(component_id) {
                     let (size, _) = self.ensure_gpu_safe(component_id, registry)?;
-                    self.download_column(context, archetype, component_id, size)?;
+                    let len = archetype.length()?;
+                    if len == 0 {
+                        continue;
+                    }
+
+                    let bytes_total = align_to_4(len * size);
+                    self.ensure_buffer(
+                        context,
+                        archetype.archetype_id(),
+                        component_id,
+                        bytes_total,
+                    );
+                    self.ensure_readback_buffer(
+                        context,
+                        archetype.archetype_id(),
+                        component_id,
+                        bytes_total,
+                    );
+                    tasks.push(DownloadTask {
+                        archetype_index,
+                        archetype_id: archetype.archetype_id(),
+                        component_id,
+                        bytes_total,
+                    });
                 }
             }
         }
+
+        self.download_columns_batched(context, archetypes, &tasks)?;
         Ok(())
     }
 
@@ -147,6 +198,35 @@ impl Mirror {
                 mapped_at_creation: false,
             });
             self.buffers.insert(key, BufferEntry { buffer, bytes });
+            self.binding_generation = self.binding_generation.wrapping_add(1);
+        }
+    }
+
+    fn ensure_readback_buffer(
+        &mut self,
+        context: &GPUContext,
+        archetype: ArchetypeID,
+        component_id: ComponentID,
+        bytes: usize,
+    ) {
+        let key = (archetype, component_id);
+
+        let recreate = match self.readback_buffers.get(&key) {
+            None => true,
+            Some(e) => e.bytes < bytes,
+        };
+
+        if recreate {
+            let label = format!("abm_readback_staging[a{} c{}]", archetype, component_id);
+
+            let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&label),
+                size: bytes as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.readback_buffers
+                .insert(key, ReadbackEntry { buffer, bytes });
         }
     }
 
@@ -294,32 +374,15 @@ impl Mirror {
         Ok(())
     }
 
-    fn download_column(
+    fn download_columns_batched(
         &mut self,
         context: &GPUContext,
-        archetype: &mut Archetype,
-        component_id: ComponentID,
-        component_size: usize,
+        archetypes: &mut [Archetype],
+        tasks: &[DownloadTask],
     ) -> ECSResult<()> {
-        let len = archetype.length()?;
-        if len == 0 {
+        if tasks.is_empty() {
             return Ok(());
         }
-
-        let bytes_total = align_to_4(len * component_size);
-        self.ensure_buffer(context, archetype.archetype_id(), component_id, bytes_total);
-
-        let storage = self
-            .buffers
-            .get(&(archetype.archetype_id(), component_id))
-            .unwrap();
-
-        let staging = context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("abm_readback_staging"),
-            size: bytes_total as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         let mut encoder = context
             .device
@@ -327,26 +390,39 @@ impl Mirror {
                 label: Some("abm_readback_encoder"),
             });
 
-        encoder.copy_buffer_to_buffer(&storage.buffer, 0, &staging, 0, bytes_total as u64);
+        for task in tasks {
+            let storage = self
+                .buffers
+                .get(&(task.archetype_id, task.component_id))
+                .unwrap();
+            let staging = self
+                .readback_buffers
+                .get(&(task.archetype_id, task.component_id))
+                .unwrap();
+            encoder.copy_buffer_to_buffer(
+                &storage.buffer,
+                0,
+                &staging.buffer,
+                0,
+                task.bytes_total as u64,
+            );
+        }
+
         context.queue.submit(Some(encoder.finish()));
 
-        context
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(|e| {
-                ECSError::from(ExecutionError::GpuDispatchFailed {
-                    message: format!("wgpu poll failed after copy: {e:?}").into(),
-                })
-            })?;
-
-        let slice = staging.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = sender.send(r);
-        });
+        let mut receivers = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let staging = self
+                .readback_buffers
+                .get(&(task.archetype_id, task.component_id))
+                .unwrap();
+            let slice = staging.buffer.slice(0..task.bytes_total as u64);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = sender.send(r);
+            });
+            receivers.push(receiver);
+        }
 
         context
             .device
@@ -360,43 +436,55 @@ impl Mirror {
                 })
             })?;
 
-        receiver.recv().ok().transpose().map_err(|_| {
-            ECSError::from(ExecutionError::GpuDispatchFailed {
-                message: "failed to map readback buffer".into(),
-            })
-        })?;
+        for (task, receiver) in tasks.iter().zip(receivers) {
+            receiver.recv().ok().transpose().map_err(|_| {
+                ECSError::from(ExecutionError::GpuDispatchFailed {
+                    message: "failed to map readback buffer".into(),
+                })
+            })?;
 
-        let data = slice.get_mapped_range();
-        let host: &[u8] = &data;
+            let staging = self
+                .readback_buffers
+                .get(&(task.archetype_id, task.component_id))
+                .unwrap();
+            let slice = staging.buffer.slice(0..task.bytes_total as u64);
+            let data = slice.get_mapped_range();
+            let host: &[u8] = &data;
 
-        let locked = archetype
-            .component_locked(component_id)
-            .ok_or_else(|| ECSError::from(ExecutionError::MissingComponent { component_id }))?;
-        let mut guard = locked.write().map_err(|_| {
-            ECSError::from(ExecutionError::LockPoisoned {
-                what: "attribute write lock (download)",
-            })
-        })?;
+            let archetype = &mut archetypes[task.archetype_index];
+            let locked = archetype
+                .component_locked(task.component_id)
+                .ok_or_else(|| {
+                    ECSError::from(ExecutionError::MissingComponent {
+                        component_id: task.component_id,
+                    })
+                })?;
+            let mut guard = locked.write().map_err(|_| {
+                ECSError::from(ExecutionError::LockPoisoned {
+                    what: "attribute write lock (download)",
+                })
+            })?;
 
-        let mut offset = 0usize;
-        let chunks = archetype.chunk_count()?;
-        for chunk in 0..chunks {
-            let valid = archetype.chunk_valid_length(chunk)?;
-            if valid == 0 {
-                continue;
+            let mut offset = 0usize;
+            let chunks = archetype.chunk_count()?;
+            for chunk in 0..chunks {
+                let valid = archetype.chunk_valid_length(chunk)?;
+                if valid == 0 {
+                    continue;
+                }
+
+                let (pointer, bytes) = guard
+                    .chunk_bytes_mut(chunk as ChunkID, valid)
+                    .ok_or_else(|| ECSError::from(ExecutionError::InternalExecutionError))?;
+                let destination = unsafe { std::slice::from_raw_parts_mut(pointer, bytes) };
+
+                destination.copy_from_slice(&host[offset..offset + bytes]);
+                offset += bytes;
             }
 
-            let (pointer, bytes) = guard
-                .chunk_bytes_mut(chunk as ChunkID, valid)
-                .ok_or_else(|| ECSError::from(ExecutionError::InternalExecutionError))?;
-            let destination = unsafe { std::slice::from_raw_parts_mut(pointer, bytes) };
-
-            destination.copy_from_slice(&host[offset..offset + bytes]);
-            offset += bytes;
+            drop(data);
+            staging.buffer.unmap();
         }
-
-        drop(data);
-        staging.unmap();
         Ok(())
     }
 }

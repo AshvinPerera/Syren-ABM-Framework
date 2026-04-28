@@ -39,8 +39,6 @@ pub(super) fn for_each_unchecked(
     f: impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync,
 ) -> Result<(), ExecutionError> {
     let f = Arc::new(f);
-    let abort = Arc::new(AtomicBool::new(false));
-    let err: Arc<Mutex<Option<ExecutionError>>> = Arc::new(Mutex::new(None));
 
     for archetype_id in matches {
         let archetype = &archetypes[archetype_id as usize];
@@ -57,28 +55,11 @@ pub(super) fn for_each_unchecked(
             archetype_id,
             activation,
             &*f,
-            &abort,
             &dirty_entries,
         );
 
         #[cfg(not(feature = "gpu"))]
-        run_chunks(
-            &views,
-            &query,
-            archetype_id,
-            activation,
-            &*f,
-            &abort,
-        );
-
-        if abort.load(Ordering::Acquire) {
-            let guard = err.lock().map_err(|_| ExecutionError::LockPoisoned {
-                what: "job error latch",
-            })?;
-            return Err(guard
-                .clone()
-                .unwrap_or(ExecutionError::InternalExecutionError));
-        }
+        run_chunks(&views, &query, archetype_id, activation, &*f);
 
         drop(read_guards);
         drop(write_guards);
@@ -122,15 +103,7 @@ pub(super) fn for_each_fallible_unchecked(
         );
 
         #[cfg(not(feature = "gpu"))]
-        run_chunks_fallible(
-            &views,
-            &query,
-            archetype_id,
-            activation,
-            &*f,
-            &abort,
-            &err,
-        );
+        run_chunks_fallible(&views, &query, archetype_id, activation, &*f, &abort, &err);
 
         if abort.load(Ordering::Acquire) {
             let guard = err.lock().map_err(|_| {
@@ -223,47 +196,54 @@ where
 
         let threads = rayon::current_num_threads().max(1);
         let grainsize = (views.chunk_count / threads).max(8);
-        let views_ref = &views;
 
-        rayon::scope(|s| {
-            let mut start = 0usize;
-            while start < views_ref.chunk_count {
-                let end = (start + grainsize).min(views_ref.chunk_count);
-                let init = init.clone();
-                let fold_chunk = fold_chunk.clone();
-                let partials = partials.clone();
-                let views = views_ref;
+        if views.chunk_count <= grainsize {
+            let mut local = init();
+            let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::with_capacity(views.n_reads);
+            fold_reduce_range(
+                &views,
+                0,
+                views.chunk_count,
+                &mut local,
+                &*fold_chunk,
+                &mut read_views,
+            );
+            partials.lock().unwrap().push((archetype_order, 0, local));
+        } else {
+            let views_ref = &views;
 
-                s.spawn(move |_| {
-                    let mut local = init();
-                    let mut read_views: SmallVec<[&[u8]; 8]> =
-                        SmallVec::with_capacity(views.n_reads);
+            rayon::scope(|s| {
+                let mut start = 0usize;
+                while start < views_ref.chunk_count {
+                    let end = (start + grainsize).min(views_ref.chunk_count);
+                    let init = init.clone();
+                    let fold_chunk = fold_chunk.clone();
+                    let partials = partials.clone();
+                    let views = views_ref;
 
-                    for chunk in start..end {
-                        let len = views.chunk_lens[chunk];
-                        if len == 0 {
-                            continue;
-                        }
-                        read_views.clear();
-                        let base = chunk * views.n_reads;
-                        for i in 0..views.n_reads {
-                            let (ptr, bytes) = views.read_ptrs[base + i];
-                            unsafe {
-                                read_views.push(std::slice::from_raw_parts(ptr, bytes));
-                            }
-                        }
-                        fold_chunk(&mut local, &read_views, len);
-                    }
+                    s.spawn(move |_| {
+                        let mut local = init();
+                        let mut read_views: SmallVec<[&[u8]; 8]> =
+                            SmallVec::with_capacity(views.n_reads);
+                        fold_reduce_range(
+                            views,
+                            start,
+                            end,
+                            &mut local,
+                            &*fold_chunk,
+                            &mut read_views,
+                        );
 
-                    partials
-                        .lock()
-                        .unwrap()
-                        .push((archetype_order, start, local));
-                });
+                        partials
+                            .lock()
+                            .unwrap()
+                            .push((archetype_order, start, local));
+                    });
 
-                start = end;
-            }
-        });
+                    start = end;
+                }
+            });
+        }
 
         drop(read_guards);
     }
@@ -275,6 +255,31 @@ where
         combine(&mut out, p);
     }
     Ok(out)
+}
+
+fn fold_reduce_range<R>(
+    views: &ChunkView,
+    start: usize,
+    end: usize,
+    local: &mut R,
+    fold_chunk: &(impl Fn(&mut R, &[&[u8]], usize) + Send + Sync),
+    read_views: &mut SmallVec<[&[u8]; 8]>,
+) {
+    for chunk in start..end {
+        let len = views.chunk_lens[chunk];
+        if len == 0 {
+            continue;
+        }
+        read_views.clear();
+        let base = chunk * views.n_reads;
+        for i in 0..views.n_reads {
+            let (ptr, bytes) = views.read_ptrs[base + i];
+            unsafe {
+                read_views.push(std::slice::from_raw_parts(ptr, bytes));
+            }
+        }
+        fold_chunk(local, read_views, len);
+    }
 }
 
 fn lock_columns<'a>(
@@ -409,7 +414,6 @@ fn run_chunks(
     archetype_id: crate::engine::types::ArchetypeID,
     activation: ActivationContext,
     f: &(impl Fn(&[&[u8]], &mut [&mut [u8]]) + Send + Sync),
-    abort: &Arc<AtomicBool>,
     #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
 ) {
     let threads = rayon::current_num_threads().max(1);
@@ -420,16 +424,11 @@ fn run_chunks(
         let mut start = 0usize;
         while start < chunk_order.len() {
             let end = (start + grainsize).min(chunk_order.len());
-            let abort = Arc::clone(abort);
             let views = views;
             let query = query;
             let chunks = &chunk_order[start..end];
 
             s.spawn(move |_| {
-                if abort.load(Ordering::Acquire) {
-                    return;
-                }
-
                 let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
                 let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
 
@@ -711,4 +710,3 @@ fn fill_row_slices<'a>(
         }
     }
 }
-

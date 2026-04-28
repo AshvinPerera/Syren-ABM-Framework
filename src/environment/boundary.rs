@@ -370,7 +370,9 @@ mod tests {
         let env_for_thread = Arc::clone(&env);
         let _ = thread::spawn(move || env_for_thread.poison_dirty_channels_for_test()).join();
 
-        let err = boundary.end_tick(&mut BoundaryContext::empty()).unwrap_err();
+        let err = boundary
+            .end_tick(&mut BoundaryContext::empty())
+            .unwrap_err();
         assert!(matches!(
             err,
             ECSError::Environment(EnvironmentError::LockPoisoned {
