@@ -532,6 +532,12 @@ impl MessageBufferSet {
     }
 }
 
+impl Drop for MessageBufferSet {
+    fn drop(&mut self) {
+        thread_local_emit::deregister_runtime(self.runtime_id);
+    }
+}
+
 impl BoundaryResource for MessageBufferSet {
     fn name(&self) -> &str {
         "MessageBufferSet"
@@ -787,6 +793,38 @@ mod tests {
 
         assert_eq!(a.brute_force(handle_a).unwrap().count(), 1);
         assert_eq!(b.brute_force(handle_b).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn drop_deregisters_thread_local_emit_runtime() {
+        let mut alloc = ChannelAllocator::new();
+        let mut registry = MessageRegistry::new();
+        let handle = registry
+            .register_brute_force::<GlobalMsg>(&mut alloc, Capacity::unbounded(4))
+            .unwrap();
+        registry.freeze();
+
+        let buffers = MessageBufferSet::new(Arc::new(registry)).unwrap();
+        let runtime_id = buffers.runtime_id;
+
+        buffers.emit(handle, GlobalMsg(1)).unwrap();
+        assert_eq!(
+            thread_local_emit::registered_worker_count_for_test(runtime_id),
+            1
+        );
+        assert!(thread_local_emit::current_thread_has_worker_for_test(
+            runtime_id
+        ));
+
+        drop(buffers);
+
+        assert_eq!(
+            thread_local_emit::registered_worker_count_for_test(runtime_id),
+            0
+        );
+        assert!(!thread_local_emit::current_thread_has_worker_for_test(
+            runtime_id
+        ));
     }
 
     #[test]

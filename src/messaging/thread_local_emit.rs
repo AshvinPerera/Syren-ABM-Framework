@@ -34,7 +34,7 @@
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use super::aligned_buffer::AlignedBuffer;
 use super::error::MessagingError;
@@ -92,7 +92,7 @@ static GLOBAL_EMIT_REGISTRY: LazyLock<Mutex<HashMap<MessageRuntimeID, Vec<Arc<Wo
 
 thread_local! {
     /// The current thread's slot container.  Initialised lazily on first use.
-    static THIS_WORKER: std::cell::RefCell<HashMap<MessageRuntimeID, Arc<WorkerEmitSlots>>> =
+    static THIS_WORKER: std::cell::RefCell<HashMap<MessageRuntimeID, Weak<WorkerEmitSlots>>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -105,12 +105,16 @@ fn ensure_worker_registered_fallible(
     num_message_types: usize,
 ) -> ECSResult<Arc<WorkerEmitSlots>> {
     THIS_WORKER.with(|cell| {
-        if let Some(existing) = cell.borrow().get(&runtime_id).cloned() {
+        let existing = {
+            let workers = cell.borrow();
+            workers.get(&runtime_id).and_then(Weak::upgrade)
+        };
+        if let Some(existing) = existing {
             return Ok(existing);
         }
 
         let slots = Arc::new(WorkerEmitSlots::new(num_message_types));
-        cell.borrow_mut().insert(runtime_id, Arc::clone(&slots));
+        cell.borrow_mut().insert(runtime_id, Arc::downgrade(&slots));
         GLOBAL_EMIT_REGISTRY
             .lock()
             .map_err(|_| ECSError::from(MessagingError::LockPoisoned("global emit registry")))?
@@ -119,6 +123,36 @@ fn ensure_worker_registered_fallible(
             .push(Arc::clone(&slots));
         Ok(slots)
     })
+}
+
+/// Removes all globally registered worker slots for a message runtime.
+///
+/// Called when the owning [`MessageBufferSet`](crate::messaging::MessageBufferSet)
+/// is dropped. The current thread's weak cache entry is also removed as a
+/// best-effort cleanup; other worker threads hold only weak references, so they
+/// do not keep the buffers alive after the global registry entry is removed.
+pub(crate) fn deregister_runtime(runtime_id: MessageRuntimeID) {
+    if let Ok(mut registry) = GLOBAL_EMIT_REGISTRY.lock() {
+        registry.remove(&runtime_id);
+    }
+
+    THIS_WORKER.with(|cell| {
+        cell.borrow_mut().remove(&runtime_id);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn registered_worker_count_for_test(runtime_id: MessageRuntimeID) -> usize {
+    GLOBAL_EMIT_REGISTRY
+        .lock()
+        .ok()
+        .and_then(|registry| registry.get(&runtime_id).map(Vec::len))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(crate) fn current_thread_has_worker_for_test(runtime_id: MessageRuntimeID) -> bool {
+    THIS_WORKER.with(|cell| cell.borrow().contains_key(&runtime_id))
 }
 // -----------------------------------------------------------------------------
 // Emit (Phase A - called from worker threads)

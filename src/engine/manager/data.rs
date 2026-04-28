@@ -1113,6 +1113,72 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn disjoint_archetype_move_replaces_source_only_with_destination_only_components() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let entity = spawn_marker(&ecs, marker_id, 7);
+        let world = ecs.world_ref();
+
+        let (source_id, destination_id) = world
+            .with_exclusive(|data| {
+                let location = data.shards.get_location(entity)?.unwrap();
+                let source_id = location.archetype;
+
+                let mut destination_signature = Signature::default();
+                destination_signature.set(extra_id);
+                let destination_id = data.get_or_create_archetype(&destination_signature)?;
+
+                let shards = &data.shards;
+                let (source, destination) = ECSData::get_archetype_pair_mut(
+                    &mut data.archetypes,
+                    source_id,
+                    destination_id,
+                )?;
+
+                source.move_row_to_archetype(
+                    destination,
+                    shards,
+                    entity,
+                    (location.chunk, location.row),
+                    vec![(extra_id, Box::new(Extra(9)) as Box<dyn std::any::Any>)],
+                )?;
+
+                Ok((source_id, destination_id))
+            })
+            .unwrap();
+
+        world
+            .with_exclusive(|data| {
+                let location = data.shards.get_location(entity)?.unwrap();
+                assert_eq!(location.archetype, destination_id);
+                assert_eq!(data.archetypes[source_id as usize].length().unwrap(), 0);
+                assert_eq!(
+                    data.archetypes[source_id as usize]
+                        .component_locked(marker_id)
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                        .length(),
+                    0
+                );
+                assert_eq!(
+                    data.archetypes[destination_id as usize].length().unwrap(),
+                    1
+                );
+                assert_eq!(
+                    data.archetypes[destination_id as usize]
+                        .component_locked(extra_id)
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                        .length(),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[cfg(feature = "gpu")]
     fn clear_dirty_for_entity(
         data: &mut ECSData,

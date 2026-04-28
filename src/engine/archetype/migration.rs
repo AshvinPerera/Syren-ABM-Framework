@@ -490,10 +490,6 @@ impl Archetype {
         let destination_only_components: Vec<ComponentID> =
             iter_bits_from_words(&destination_only_words).collect();
 
-        if shared_components.is_empty() {
-            return Err(MoveError::NoComponentsMoved.into());
-        }
-
         let mut destination_only_values: Vec<(ComponentID, Box<dyn Any>)> =
             Vec::with_capacity(destination_only_components.len());
 
