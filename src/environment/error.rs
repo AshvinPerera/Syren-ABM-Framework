@@ -36,6 +36,14 @@ pub enum EnvironmentError {
 
     /// An environment key was declared with an empty name.
     EmptyKey,
+
+    /// A GPU uniform buffer's packed byte size did not match the expected WGSL layout.
+    UniformLayoutMismatch {
+        /// Expected packed byte size.
+        expected: usize,
+        /// Actual packed byte size.
+        actual: usize,
+    },
 }
 
 impl std::fmt::Display for EnvironmentError {
@@ -54,6 +62,10 @@ impl std::fmt::Display for EnvironmentError {
                 write!(f, "environment lock poisoned: {what}")
             }
             EnvironmentError::EmptyKey => f.write_str("environment key must not be empty"),
+            EnvironmentError::UniformLayoutMismatch { expected, actual } => write!(
+                f,
+                "uniform layout mismatch: packed {actual} bytes but expected {expected}"
+            ),
         }
     }
 }
@@ -112,5 +124,16 @@ mod tests {
         // Verify the Display output retains the original message.
         assert!(ecs.to_string().contains("rate"));
         assert!(ecs.to_string().contains("f32"));
+    }
+
+    #[test]
+    fn display_uniform_layout_mismatch() {
+        let e = EnvironmentError::UniformLayoutMismatch {
+            expected: 16,
+            actual: 8,
+        };
+        let s = e.to_string();
+        assert!(s.contains("16"));
+        assert!(s.contains("8"));
     }
 }

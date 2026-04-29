@@ -1,8 +1,20 @@
 [package]
 name = "abm_framework"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-rust-version = "1.76"
+rust-version = "1.87"
+description = "A parallel Rust framework for agent-based models with ECS storage, scheduling, messaging, environments, and optional GPU execution."
+license = "MIT"
+repository = "https://github.com/AshvinPerera/ABM-Framework"
+homepage = "https://github.com/AshvinPerera/ABM-Framework"
+documentation = "https://docs.rs/abm_framework"
+exclude = [
+    ".idea/**",
+    ".vscode/**",
+    ".vs/**",
+    "profile/**",
+    "CODE_REVIEW_FINDINGS.md",
+]
 
 [lib]
 name = "abm_framework"
@@ -26,7 +38,7 @@ pollster = "0.4.0"
 
 [features]
 default = []
-gpu = ["wgpu", "bytemuck", "pollster"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 profiling = []
 agents = []
 environment = []

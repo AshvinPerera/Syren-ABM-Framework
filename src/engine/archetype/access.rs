@@ -39,6 +39,17 @@ use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 
 use super::core::Archetype;
 
+type ReadColumnGuard<'a> = (
+    ComponentID,
+    RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>,
+);
+type WriteColumnGuard<'a> = (
+    ComponentID,
+    RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>,
+);
+type ReadGuardSet<'a> = SmallVec<[ReadColumnGuard<'a>; 8]>;
+type WriteGuardSet<'a> = SmallVec<[WriteColumnGuard<'a>; 8]>;
+
 /// Represents a temporary borrow of a single archetype chunk for system execution.
 ///
 /// ## Safety
@@ -56,7 +67,6 @@ use super::core::Archetype;
 /// - performing structural ECS mutations in parallel.
 ///
 /// Violating these constraints may cause deadlock or panic.
-
 pub struct ChunkBorrow<'a> {
     /// Number of valid rows in the borrowed chunk.
     pub length: usize,
@@ -66,19 +76,9 @@ pub struct ChunkBorrow<'a> {
     pub writes: SmallVec<[*mut u8; 8]>,
 
     /// Holds the read locks alive for the lifetime of this borrow.
-    _read_guards: SmallVec<
-        [(
-            ComponentID,
-            RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>,
-        ); 8],
-    >,
+    _read_guards: ReadGuardSet<'a>,
     /// Holds the write locks alive for the lifetime of this borrow.
-    _write_guards: SmallVec<
-        [(
-            ComponentID,
-            RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>,
-        ); 8],
-    >,
+    _write_guards: WriteGuardSet<'a>,
 }
 
 impl Archetype {
@@ -111,7 +111,6 @@ impl Archetype {
     /// ## Lock ordering
     /// All column locks are acquired in ascending `ComponentID` order,
     /// consistent with the global lock ordering contract.
-
     pub fn borrow_chunk_for<'a>(
         &'a self,
         chunk: ChunkID,
@@ -145,18 +144,8 @@ impl Archetype {
         all.sort_unstable_by_key(|(cid, _)| *cid);
 
         // Guard storage.
-        let mut read_guards: SmallVec<
-            [(
-                ComponentID,
-                RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>,
-            ); 8],
-        > = SmallVec::with_capacity(read_ids.len());
-        let mut write_guards: SmallVec<
-            [(
-                ComponentID,
-                RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>,
-            ); 8],
-        > = SmallVec::with_capacity(write_ids.len());
+        let mut read_guards: ReadGuardSet<'a> = SmallVec::with_capacity(read_ids.len());
+        let mut write_guards: WriteGuardSet<'a> = SmallVec::with_capacity(write_ids.len());
 
         for (cid, is_write) in all {
             // Use find_component for sparse lookup.

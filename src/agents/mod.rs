@@ -18,6 +18,7 @@
 //! * Inside this module, all fallible functions return `Result<T, AgentError>`.
 //! * At scheduler/manager boundaries, convert with `map_err(ECSError::from)?`.
 
+pub mod batch;
 pub mod error;
 pub mod handle;
 pub mod hooks;
@@ -25,6 +26,8 @@ pub mod registry;
 pub mod spawner;
 pub mod template;
 
+pub use crate::engine::types::AgentTemplateId;
+pub use batch::AgentBatch;
 pub use error::{AgentError, AgentResult};
 pub use handle::{AgentHandle, AgentHandleError};
 pub use registry::AgentRegistry;

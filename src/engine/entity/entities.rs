@@ -1,4 +1,4 @@
-//! Shard-local entity pool managing slot allocation, versioning, and liveness tracking.
+﻿//! Shard-local entity pool managing slot allocation, versioning, and liveness tracking.
 //!
 //! # Overview
 //!
@@ -62,7 +62,6 @@ use super::location::EntityLocation;
 /// ## Concurrency
 /// This type is **not thread-safe** and must be externally synchronized.
 /// In practice, it is protected by a `Mutex` in `Shard`.
-
 #[derive(Default)]
 pub struct Entities {
     versions: Vec<VersionID>,
@@ -113,7 +112,6 @@ impl Entities {
     /// ## Invariants
     /// - The returned entity is alive upon success.
     /// - The version is unchanged from the previous occupant of the slot.
-
     pub(crate) fn spawn(
         &mut self,
         shard_id: ShardID,
@@ -158,7 +156,6 @@ impl Entities {
     ///
     /// ## Invariants
     /// All previously issued handles for this entity become invalid.
-
     pub(crate) fn despawn(&mut self, entity: Entity) -> bool {
         let (_, i, v) = split_entity(entity);
         let index = i as usize;
@@ -197,7 +194,6 @@ impl Entities {
     ///
     /// ## Safety
     /// Caller must ensure the entity is alive.
-
     pub(crate) fn set_location(&mut self, entity: Entity, location: EntityLocation) {
         let (_, i, _) = split_entity(entity);
         let index = i as usize;

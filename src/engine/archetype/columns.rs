@@ -1,4 +1,4 @@
-//! Archetype component management operations.
+﻿//! Archetype component management operations.
 //!
 //! This module implements the component-level mutation methods on [`Archetype`],
 //! covering the full lifecycle of component attributes within an archetype:
@@ -46,7 +46,6 @@ impl Archetype {
     ///
     /// ## Invariants
     /// Attribute allocation and signature must remain consistent.
-
     #[inline]
     pub fn ensure_component(
         &mut self,
@@ -88,7 +87,6 @@ impl Archetype {
     ///
     /// ## Invariants
     /// Component attributes must be added only before entities are inserted.
-
     pub fn insert_empty_component(
         &mut self,
         component_id: ComponentID,
@@ -121,7 +119,6 @@ impl Archetype {
     ///
     /// ## Invariants
     /// Removing attributes in a populated archetype would break row alignment.
-
     pub fn remove_component(
         &mut self,
         component_id: ComponentID,
@@ -146,7 +143,7 @@ impl Archetype {
                 Ok(Some(
                     locked
                         .into_inner()
-                        .map_err(|e| SpawnError::StoragePushFailedWith(e))?,
+                        .map_err(SpawnError::StoragePushFailedWith)?,
                 ))
             }
             Err(_) => Ok(None),
@@ -163,7 +160,6 @@ impl Archetype {
     ///
     /// ## Invariants
     /// The resulting archetype is empty but has a fully defined signature.
-
     pub fn from_components<T: IntoIterator<Item = std::any::TypeId>>(
         archetype_id: ArchetypeID,
         types: T,

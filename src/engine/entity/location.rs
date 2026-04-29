@@ -1,4 +1,4 @@
-//! Physical storage location of an entity within archetype storage.
+﻿//! Physical storage location of an entity within archetype storage.
 //!
 //! This module defines [`EntityLocation`], a lightweight descriptor that maps
 //! an entity handle to the exact position of its component data within the
@@ -22,7 +22,6 @@ use crate::engine::types::{ArchetypeID, ChunkID, RowID};
 /// - Must always reflect the true location of the entity's component row.
 /// - Updated atomically with archetype row moves.
 /// - Invalidated immediately on despawn.
-
 #[derive(Clone, Copy, Debug, Default)]
 #[must_use]
 pub struct EntityLocation {

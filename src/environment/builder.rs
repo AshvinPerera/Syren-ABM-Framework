@@ -13,7 +13,7 @@
 //! ```
 //!
 //! When constructing an environment as part of a larger model that already
-//! owns a [`ChannelAllocator`], use [`build_with_allocator`] instead so that
+//! owns a [`ChannelAllocator`], use [`EnvironmentBuilder::build_with_allocator`] instead so that
 //! the environment's channel IDs do not collide with those assigned to other
 //! subsystems:
 //!
@@ -29,12 +29,13 @@
 //!
 //! The builder collects schema entries as a `Vec` in declaration order.
 //! If the same key is registered more than once with the same type, the last
-//! default value wins. Re-registering a key with a different type panics
-//! immediately - this catches configuration bugs at setup time rather than
+//! default value wins. Re-registering a key with a different type returns an
+//! [`EnvironmentError::TypeMismatch`]
+//! immediately, catching configuration bugs at setup time rather than
 //! producing silent runtime type-mismatch errors later.
 //!
 //! Each key is assigned a monotonically increasing [`ChannelID`] during
-//! [`build`] / [`build_with_allocator`]. The IDs are stored inside the
+//! [`EnvironmentBuilder::build`] / [`EnvironmentBuilder::build_with_allocator`]. The IDs are stored inside the
 //! environment's entries and are used by the scheduler to order writers before
 //! readers of the same key.
 //!
@@ -52,6 +53,14 @@ use crate::engine::types::ChannelID;
 use super::error::{EnvironmentError, EnvironmentResult};
 use super::store::Environment;
 
+type EnvironmentSchemaEntry = (
+    String,
+    Box<dyn Any + Send + Sync>,
+    TypeId,
+    &'static str,
+    Option<ChannelID>,
+);
+
 /// Fluent builder for [`Environment`].
 ///
 /// Call [`register`](Self::register) for each simulation parameter, then
@@ -62,13 +71,7 @@ pub struct EnvironmentBuilder {
     ///
     /// Stored as a `Vec` (not a `HashMap`) to preserve declaration order,
     /// which matters for deterministic unit tests and for GPU struct layout.
-    schema: Vec<(
-        String,
-        Box<dyn Any + Send + Sync>,
-        TypeId,
-        &'static str,
-        Option<ChannelID>,
-    )>,
+    schema: Vec<EnvironmentSchemaEntry>,
 }
 
 impl EnvironmentBuilder {
@@ -90,12 +93,11 @@ impl EnvironmentBuilder {
     ///
     /// `T` must be `Any + Clone + Send + Sync + 'static`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - Panics if the same key was previously registered with a **different
-    ///   type**. Changing a key's type during the build phase is almost
-    ///   certainly a bug and is caught eagerly here rather than at runtime.
-    /// - Panics in debug mode if `key` is empty.
+    /// - [`EnvironmentError::TypeMismatch`] if the same key was previously
+    ///   registered with a **different type**.
+    /// - [`EnvironmentError::EmptyKey`] if `key` is empty.
     pub fn register<T>(mut self, key: impl Into<String>, default: T) -> EnvironmentResult<Self>
     where
         T: Any + Clone + Send + Sync + 'static,
@@ -174,7 +176,7 @@ impl EnvironmentBuilder {
 
     /// Freezes the schema and returns a shared [`Environment`].
     ///
-    /// Each registered key is assigned a [`ChannelID`](crate::engine::types::ChannelID)
+    /// Each registered key is assigned a [`ChannelID`]
     /// from a freshly created [`ChannelAllocator`] starting at `0`. This is
     /// suitable for tests and standalone environments that do not share a
     /// channel namespace with other subsystems.
@@ -191,7 +193,7 @@ impl EnvironmentBuilder {
     }
 
     /// Freezes the schema and returns a shared [`Environment`], drawing
-    /// [`ChannelID`](crate::engine::types::ChannelID)s from a caller-supplied
+    /// [`ChannelID`]s from a caller-supplied
     /// [`ChannelAllocator`].
     ///
     /// Each registered key consumes exactly one ID from `allocator` in

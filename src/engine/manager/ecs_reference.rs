@@ -6,10 +6,12 @@
 //! # Boundary Resource Access
 //!
 //! [`ECSReference::boundary`] provides typed access to boundary resources
-//! registered on the `ECSManager`. The returned [`BoundaryHandle`] holds the
-//! boundary registry mutex for its lifetime - keep it short. Systems that
-//! acquire a `BoundaryHandle` must not be co-scheduled in the same parallel
-//! stage (they would deadlock on the mutex).
+//! registered on the `ECSManager`. The method clones the target resource slot
+//! while briefly holding the boundary registry mutex, then drops that mutex
+//! before returning a [`crate::BoundaryHandle`]. The handle holds a per-resource read
+//! guard, so systems using different boundary resources do not contend on the
+//! registry mutex; lifecycle hooks wait for readers of their own resource to
+//! drop.
 //!
 //! # Access modes
 //!
@@ -62,6 +64,7 @@ impl<'a> ECSReference<'a> {
     }
 
     #[inline]
+    #[allow(clippy::result_large_err)]
     pub(crate) fn apply_deferred_commands_with_events(
         &self,
     ) -> Result<CommandEvents, CommandDrainError> {
@@ -104,7 +107,7 @@ impl<'a> ECSReference<'a> {
 
     /// Returns a typed handle to a registered boundary resource.
     ///
-    /// The returned [`BoundaryHandle`] owns a clone of the resource's `Arc`
+    /// The returned [`crate::BoundaryHandle`] owns a clone of the resource's `Arc`
     /// and a per-resource read guard. The outer registry mutex is dropped
     /// before the handle is returned, so two systems holding handles to
     /// different resources never contend, and two systems holding handles
@@ -162,6 +165,11 @@ impl<'a> ECSReference<'a> {
     }
 
     /// Generic parallel chunk-oriented ECS query.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `query`'s read and write component order matches
+    /// the raw byte-slice contract expected by `f`.
     pub unsafe fn for_each_abstraction(
         &self,
         query: BuiltQuery,
@@ -180,12 +188,17 @@ impl<'a> ECSReference<'a> {
 
     /// Parallel chunk iteration whose closure may return an error.
     ///
-    /// Same semantics as [`for_each_abstraction`] for borrow checking, phase
+    /// Same semantics as [`Self::for_each_abstraction`] for borrow checking, phase
     /// discipline, and chunk-disjoint parallel execution. The closure
     /// returns [`ECSResult<()>`]; on the first error the iteration short-
     /// circuits and that error is returned. When two chunks fail
     /// concurrently the lower-indexed chunk's error wins, so the surfaced
     /// error is deterministic across thread counts.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `query`'s read and write component order matches
+    /// the raw byte-slice contract expected by `f`.
     pub unsafe fn for_each_abstraction_fallible(
         &self,
         query: BuiltQuery,
@@ -201,6 +214,11 @@ impl<'a> ECSReference<'a> {
     }
 
     /// Generic parallel read-only reduction over ECS data.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `query`'s read component order matches the raw
+    /// byte-slice contract expected by `fold_chunk`.
     pub unsafe fn reduce_abstraction<R>(
         &self,
         query: BuiltQuery,

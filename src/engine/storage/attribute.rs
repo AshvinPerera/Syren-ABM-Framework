@@ -1,4 +1,4 @@
-/// A chunked, contiguous, column-oriented storage container for elements of type `T`.
+﻿/// A chunked, contiguous, column-oriented storage container for elements of type `T`.
 ///
 /// `Attribute<T>` stores elements in fixed-size chunks of capacity `CHUNK_CAP`,
 /// each chunk represented as an array of `MaybeUninit<T>`. All elements are stored
@@ -89,6 +89,7 @@
 use std::{convert::TryInto, fmt, mem::MaybeUninit, ptr};
 
 use crate::engine::error::{AttributeError, AttributeInvariantViolation, PositionOutOfBoundsError};
+use crate::engine::storage::PushFromOutcome;
 use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
 
 /// Typed, chunked storage for a single component column in an archetype.
@@ -127,7 +128,6 @@ impl<T> Attribute<T> {
     ///
     /// This function does **not** modify `length`; it only guarantees that
     /// writes to `(last_chunk, last_chunk_length)` are valid.
-
     #[inline]
     fn ensure_last_chunk(&mut self) {
         if self.chunks.is_empty() || self.last_chunk_length == CHUNK_CAP {
@@ -136,7 +136,6 @@ impl<T> Attribute<T> {
             let chunk: Box<[MaybeUninit<T>; CHUNK_CAP]> = chunk
                 .into_boxed_slice()
                 .try_into()
-                .ok()
                 .expect("chunk length is fixed to CHUNK_CAP");
             self.chunks.push(chunk);
             self.last_chunk_length = 0;
@@ -147,7 +146,6 @@ impl<T> Attribute<T> {
     ///
     /// For all chunks **except the last**, all rows `< CHUNK_CAP` are valid.
     /// For the last chunk, only rows `< last_chunk_length` are initialized.
-
     #[inline]
     pub(crate) fn valid_position(&self, chunk: ChunkID, row: RowID) -> bool {
         let chunk = chunk as usize;
@@ -192,7 +190,6 @@ impl<T> Attribute<T> {
     ///   initialization and aliasing rules.
     ///
     /// Debug asserts fire in debug mode, but no runtime checks exist in release.
-
     #[inline]
     pub(crate) unsafe fn get_slot_unchecked(
         &mut self,
@@ -210,7 +207,6 @@ impl<T> Attribute<T> {
     /// the allocation capacity of the internal `Vec<Box<[MaybeUninit<T>; CHUNK_CAP]>>`.
     ///
     /// Useful for amortizing allocation cost before large inserts or bulk loads.
-
     pub fn reserve_chunks(&mut self, additional: usize) {
         self.chunks.reserve(additional);
     }
@@ -221,7 +217,6 @@ impl<T> Attribute<T> {
     ///
     /// # Precondition
     /// `self.length` must already reflect the post-removal count.
-
     fn fixup_after_length_decrement(&mut self) {
         if self.length == 0 {
             self.chunks.clear();
@@ -240,7 +235,6 @@ impl<T> Attribute<T> {
 
     /// Returns a shared reference to an initialized element at `(chunk, row)`,
     /// or `None` if the position is invalid.
-
     pub fn get(&self, chunk: ChunkID, row: RowID) -> Option<&T> {
         if !self.valid_position(chunk, row) {
             return None;
@@ -253,7 +247,6 @@ impl<T> Attribute<T> {
 
     /// Returns a mutable reference to an initialized element at `(chunk, row)`,
     /// or `None` if the position is invalid.
-
     pub fn get_mut(&mut self, chunk: ChunkID, row: RowID) -> Option<&mut T> {
         if !self.valid_position(chunk, row) {
             return None;
@@ -271,7 +264,6 @@ impl<T> Attribute<T> {
     /// the uninitialized tail of the final chunk is skipped.
     ///
     /// Returns an empty iterator if the attribute contains no elements.
-
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         let last_chunk_length = self.last_chunk_length;
         let chunk_count = self.chunks.len();
@@ -303,7 +295,6 @@ impl<T> Attribute<T> {
     /// # Errors
     /// Returns [`AttributeError::IndexOverflow`] if the computed chunk or row
     /// index cannot be represented in their respective ID types.
-
     pub fn push(&mut self, value: T) -> Result<(ChunkID, RowID), AttributeError> {
         self.ensure_last_chunk();
         let chunk_index = self.chunks.len() - 1;
@@ -356,7 +347,6 @@ impl<T> Attribute<T> {
     ///
     /// # Complexity
     /// Constant time: `O(1)`.
-
     pub fn swap_remove(
         &mut self,
         chunk: ChunkID,
@@ -633,13 +623,12 @@ impl<T> Attribute<T> {
     ///
     /// # Complexity
     /// `O(1)` for both the transfer and the source swap-remove.
-
     pub fn push_from(
         &mut self,
         source: &mut Attribute<T>,
         source_chunk: ChunkID,
         source_row: RowID,
-    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError> {
+    ) -> Result<PushFromOutcome, AttributeError> {
         let source_chunk_count = source.chunks.len();
         if !source.valid_position(source_chunk, source_row) {
             return Err(AttributeError::Position(PositionOutOfBoundsError {
@@ -764,7 +753,6 @@ impl<T> Attribute<T> {
     ///
     /// Bulk extension is simply repeated calls to `push`.
     /// If any insert fails, the function returns the error immediately.
-
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, iterator: I) -> Result<(), AttributeError> {
         for v in iterator {
             self.push(v)?;
@@ -776,7 +764,6 @@ impl<T> Attribute<T> {
     /// structure.
     ///
     /// This is used internally by [`clear`] and during destruction.
-
     fn drop_all_initialized_elements(&mut self) {
         if self.length == 0 {
             return;
@@ -820,7 +807,6 @@ impl<T> Attribute<T> {
     /// - `last_chunk_length == 0`.
     ///
     /// Equivalent to resetting the attribute to its initial state.
-
     pub fn clear(&mut self) {
         if self.length == 0 {
             return;

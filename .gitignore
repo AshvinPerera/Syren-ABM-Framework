@@ -1,5 +1,7 @@
 /target
 /profile/*.etl
 /profile/*.csv
+/profile/*.json
 .vs/
-/CODE_REVIEW_FINDINGS.md
+.idea/
+.vscode/

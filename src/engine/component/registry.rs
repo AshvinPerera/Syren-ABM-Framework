@@ -1,4 +1,4 @@
-//! Instance-owned registry mapping Rust component types to compact runtime identifiers.
+﻿//! Instance-owned registry mapping Rust component types to compact runtime identifiers.
 //!
 //! # Overview
 //!
@@ -60,7 +60,6 @@ pub type FactoryFn = fn() -> Box<dyn TypeErasedAttribute>;
 ///
 /// ## Purpose
 /// Used as the registered factory for a component ID.
-
 fn new_attribute_storage<T: 'static + Send + Sync>() -> Box<dyn TypeErasedAttribute> {
     Box::new(Attribute::<T>::default())
 }
@@ -93,7 +92,6 @@ fn new_attribute_storage<T: 'static + Send + Sync>() -> Box<dyn TypeErasedAttrib
 /// - Every entry in `by_type` has a matching `by_id[id]` and `factories[id]`.
 /// - IDs are always in bounds of `COMPONENT_CAP`.
 /// - When a component is registered, its storage factory is installed.
-
 pub struct ComponentRegistry {
     next_id: ComponentID,
     by_type: HashMap<TypeId, ComponentID>,
@@ -119,7 +117,6 @@ impl ComponentRegistry {
     ///
     /// ## Errors
     /// Returns `RegistryError::CapacityExceeded` if `COMPONENT_CAP` is reached.
-
     fn alloc_id(&mut self) -> Result<ComponentID, RegistryError> {
         let component_id = self.next_id;
         if (component_id as usize) >= COMPONENT_CAP {
@@ -134,7 +131,6 @@ impl ComponentRegistry {
     /// ## Purpose
     /// Locks component identity and storage layout so archetypes can assume IDs
     /// are complete and stable.
-
     pub fn freeze(&mut self) {
         self.frozen = true;
     }
@@ -205,7 +201,6 @@ impl ComponentRegistry {
     /// ## Errors
     /// - Returns `RegistryError::Frozen` if the registry is frozen.
     /// - Returns `RegistryError::CapacityExceeded` if `COMPONENT_CAP` is exceeded.
-
     pub fn register<T: 'static + Send + Sync>(&mut self) -> Result<ComponentID, RegistryError> {
         let type_id = TypeId::of::<T>();
         if let Some(&existing) = self.by_type.get(&type_id) {
@@ -301,7 +296,6 @@ impl ComponentRegistry {
     ///
     /// ## Errors
     /// Returns `RegistryError::NotRegistered` if `T` was not registered.
-
     pub fn require_id_of<T: 'static>(&self) -> Result<ComponentID, RegistryError> {
         self.id_of::<T>().ok_or(RegistryError::NotRegistered {
             type_id: TypeId::of::<T>(),

@@ -156,6 +156,10 @@ impl Specialisation {
 // Type-erased function pointers
 // -----------------------------------------------------------------------------
 
+type BucketKeyFn = unsafe fn(*const u8) -> u32;
+type PositionFn = unsafe fn(*const u8) -> (f32, f32);
+type RecipientFn = unsafe fn(*const u8) -> Entity;
+
 /// Type-erased function pointers captured at registration time where the
 /// concrete type `M` is known, used during the counting-sort scatter pass.
 ///
@@ -166,11 +170,11 @@ impl Specialisation {
 /// module are responsible for ensuring this invariant.
 pub(crate) struct ErasedFns {
     /// For `BucketMessage`: extracts the integer bucket key from a raw item.
-    pub bucket_key: Option<unsafe fn(*const u8) -> u32>,
+    pub bucket_key: Option<BucketKeyFn>,
     /// For `SpatialMessage`: extracts the `(x, y)` world position.
-    pub position: Option<unsafe fn(*const u8) -> (f32, f32)>,
+    pub position: Option<PositionFn>,
     /// For `TargetedMessage`: extracts the recipient [`Entity`].
-    pub recipient: Option<unsafe fn(*const u8) -> Entity>,
+    pub recipient: Option<RecipientFn>,
 }
 
 // -----------------------------------------------------------------------------
@@ -212,9 +216,9 @@ pub struct MessageDescriptor {
 /// The compile-time catalogue of message types.
 ///
 /// Once [`freeze`](MessageRegistry::freeze) is called no further registrations
-/// are accepted.  The registry is typically wrapped in an [`Arc`] and shared
+/// are accepted. The registry is typically wrapped in an [`std::sync::Arc`] and shared
 /// between [`MessageBufferSet`](crate::messaging::MessageBufferSet) and any
-/// system that needs to look up [`MessageTypeID`]s.
+/// system that needs to look up `MessageTypeID`s.
 pub struct MessageRegistry {
     registry_id: u64,
     descriptors: Vec<MessageDescriptor>,

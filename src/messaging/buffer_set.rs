@@ -289,18 +289,13 @@ impl MessageBufferSet {
             let cpu_raw_bytes_for_gpu = raw.as_bytes().to_vec();
 
             #[cfg(feature = "messaging_gpu")]
-            if let Some(route) = Self::try_gpu_route(ctx, channel_id, desc, &mut raw)? {
-                if let GpuRoute::GpuFinalised(output) = route {
-                    if let Some(output) = output {
-                        Self::apply_gpu_finalised(
-                            &mut self.inner,
-                            idx,
-                            desc.specialisation,
-                            output,
-                        );
-                    }
-                    continue;
+            if let Some(GpuRoute::GpuFinalised(output)) =
+                Self::try_gpu_route(ctx, channel_id, desc, &mut raw)?
+            {
+                if let Some(output) = output {
+                    Self::apply_gpu_finalised(&mut self.inner, idx, desc.specialisation, output);
                 }
+                continue;
             }
 
             #[cfg(feature = "messaging_gpu")]

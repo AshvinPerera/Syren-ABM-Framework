@@ -86,8 +86,8 @@ impl SpatialBuffer {
 
         // -- 2. Prefix-sum -----------------------------------------------------
         self.cell_starts[0] = 0;
-        for c in 0..total_cells {
-            self.cell_starts[c + 1] = self.cell_starts[c] + counts[c];
+        for (c, count) in counts.iter().enumerate().take(total_cells) {
+            self.cell_starts[c + 1] = self.cell_starts[c] + *count;
         }
 
         // -- 3. Scatter --------------------------------------------------------

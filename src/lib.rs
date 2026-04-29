@@ -23,7 +23,7 @@ pub mod gpu;
 /// This module provides a feature-gated, zero-overhead (when disabled)
 /// profiling API that emits Chrome Trace JSON compatible with:
 /// - chrome://tracing
-/// - https://ui.perfetto.dev
+/// - <https://ui.perfetto.dev>
 ///
 /// Enable with `--features profiling`.
 pub(crate) mod profiling;
@@ -34,7 +34,7 @@ pub(crate) mod profiling;
 
 // Core ECS manager and world access
 
-pub use engine::manager::{ECSManager, ECSReference, Read, Write};
+pub use engine::manager::{BoundaryHandle, ECSManager, ECSReference, Read, Write};
 
 // Entity types
 
@@ -53,7 +53,7 @@ pub use engine::reduce::{Count, MinMax, Sum, Welford};
 
 // Query construction
 
-pub use engine::query::QueryBuilder;
+pub use engine::query::{BuiltQuery, QueryBuilder, QueryComponent, QuerySignature};
 
 // Systems and scheduling
 
@@ -83,7 +83,9 @@ pub use engine::error::BoundaryAccessFailure;
 
 // Primitive type aliases and constants
 
-pub use engine::types::{ArchetypeID, ChunkID, ComponentID, EntityID, SystemID, CHUNK_CAP};
+pub use engine::types::{
+    AgentTemplateId, ArchetypeID, ChunkID, ComponentID, EntityID, SystemID, CHUNK_CAP,
+};
 
 // Opaque scheduling identifiers.
 pub use engine::types::{BoundaryID, ChannelID};
@@ -139,7 +141,7 @@ pub mod model;
 /// ```
 pub mod prelude {
     pub use crate::{
-        ComponentRegistry, ECSManager, ECSReference, Entity, FnSystem, QueryBuilder, Signature,
-        System, SystemBackend,
+        BuiltQuery, ComponentRegistry, ECSManager, ECSReference, Entity, FnSystem, QueryBuilder,
+        QueryComponent, QuerySignature, Signature, System, SystemBackend,
     };
 }

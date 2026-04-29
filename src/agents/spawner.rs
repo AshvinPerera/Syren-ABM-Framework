@@ -64,7 +64,12 @@ impl<'t> AgentSpawner<'t> {
     /// If `set` is called multiple times with the same `id`, the last value
     /// wins.
     pub fn set<T: Any + Send + 'static>(mut self, id: ComponentID, value: T) -> AgentResult<Self> {
-        if !self.template.signature.has(id) {
+        if !self
+            .template
+            .signature
+            .try_has(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?
+        {
             return Err(AgentError::MissingComponent(id));
         }
         self.overrides.retain(|(cid, _)| *cid != id);
@@ -116,6 +121,7 @@ impl<'t> AgentSpawner<'t> {
 mod tests {
     use crate::agents::error::AgentError;
     use crate::agents::template::AgentTemplate;
+    use crate::engine::types::ComponentID;
 
     #[derive(Default, Clone)]
     struct Wealth {
@@ -160,5 +166,21 @@ mod tests {
             .build();
         let result = tmpl.spawner().set::<Wealth>(99, Wealth { _value: 1.0 });
         assert!(matches!(result, Err(AgentError::MissingComponent(99))));
+    }
+
+    #[test]
+    fn spawner_rejects_invalid_component_id() {
+        let tmpl = AgentTemplate::builder("C")
+            .with_component::<Wealth>(0)
+            .unwrap()
+            .build();
+        let invalid = crate::engine::types::COMPONENT_CAP as ComponentID;
+        let result = tmpl
+            .spawner()
+            .set::<Wealth>(invalid, Wealth { _value: 1.0 });
+        match result {
+            Err(err) => assert_eq!(err, AgentError::invalid_component_id(invalid)),
+            Ok(_) => panic!("expected invalid component id error"),
+        }
     }
 }

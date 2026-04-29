@@ -1,4 +1,4 @@
-//! Low-level structural error types.
+﻿//! Low-level structural error types.
 //!
 //! These are the foundational, self-contained error structs used throughout
 //! the ECS. They have no dependencies on other error types within this module
@@ -36,7 +36,6 @@ use crate::engine::types::{ChunkID, RowID, ShardID};
 ///     return Err(CapacityError { entities_needed: requested as u64, capacity: shard.capacity() as u64 }.into());
 /// }
 /// ```
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityError {
     /// Total entities the operation attempted to allocate.
@@ -72,7 +71,6 @@ impl std::error::Error for CapacityError {}
 ///     return Err(ShardBoundsError { index: idx, max_index: max }.into());
 /// }
 /// ```
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardBoundsError {
     /// Offending shard index that was requested.
@@ -105,7 +103,6 @@ impl std::error::Error for ShardBoundsError {}
 ///     return Err(StaleEntityError.into());
 /// }
 /// ```
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StaleEntityError;
 
@@ -127,7 +124,6 @@ impl std::error::Error for StaleEntityError {}
 /// ## Invariants
 /// - `chunk < chunks`
 /// - `row < capacity` for all but the last chunk
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionOutOfBoundsError {
     /// Chunk index that was addressed.
@@ -183,7 +179,6 @@ impl std::error::Error for PositionOutOfBoundsError {}
 ///     }.into());
 /// }
 /// ```
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeMismatchError {
     /// Destination storage's declared element type.

@@ -55,8 +55,8 @@
 //! use abm_framework::environment::uniform::EnvUniformBuffer;
 //!
 //! let ubuf = EnvUniformBuffer::builder(Arc::clone(&env))
-//!     .include::<f32>("interest_rate")
-//!     .include::<u32>("world_width")
+//!     .include::<f32>("interest_rate")?
+//!     .include::<u32>("world_width")?
 //!     .build();
 //! ```
 //!

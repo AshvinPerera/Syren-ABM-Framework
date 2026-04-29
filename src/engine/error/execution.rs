@@ -135,7 +135,7 @@ pub enum ExecutionError {
     /// was out of range or the stored resource's concrete type did not
     /// match the requested type.
     ///
-    /// Distinct from [`InternalExecutionError`] because boundary-access
+    /// Distinct from [`ExecutionError::InternalExecutionError`] because boundary-access
     /// failures are caller-attributable: passing the wrong `BoundaryID` or
     /// the wrong type parameter `R` is a user-level bug, not an engine
     /// invariant violation.

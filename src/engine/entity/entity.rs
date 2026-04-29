@@ -1,4 +1,4 @@
-//! Opaque, versioned entity identifier and bit-packing helpers.
+﻿//! Opaque, versioned entity identifier and bit-packing helpers.
 //!
 //! This module defines [`Entity`], the primary handle type used throughout the
 //! ECS engine to refer to live entities, along with the low-level bit-packing
@@ -79,7 +79,6 @@ use crate::engine::types::{
 /// ## Notes
 /// `Entity` values are cheap to copy and compare and are safe to pass
 /// across threads.
-
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[must_use]

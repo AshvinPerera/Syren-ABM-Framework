@@ -45,12 +45,13 @@
 //!
 //! # Reentrancy
 //!
-//! Lifecycle hooks must not call
-//! [`ECSReference::boundary`](crate::engine::manager::ECSReference::boundary)
-//! to acquire a handle on any other boundary resource - including
-//! themselves. The engine holds the boundary registry mutex while
-//! dispatching lifecycle calls; re-entering would deadlock. Cross-resource
-//! coordination must go through ECS components or channel dependencies.
+//! Lifecycle hooks run while the engine holds the current resource's
+//! per-resource write lock. They must not try to acquire a system-facing
+//! handle to the same resource through
+//! [`ECSReference::boundary`](crate::engine::manager::ECSReference::boundary),
+//! because that handle takes a read lock and would block behind the active
+//! lifecycle call. Cross-resource coordination should go through ECS
+//! components or channel dependencies.
 
 use std::any::Any;
 

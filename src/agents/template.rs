@@ -10,7 +10,7 @@
 //! * optional lifecycle [`SpawnHook`] and [`DespawnHook`] callbacks.
 //!
 //! Templates are constructed with [`AgentTemplateBuilder`] (via
-//! [`AgentTemplate::builder`]) and registered in an [`AgentRegistry`] before
+//! [`AgentTemplate::builder`]) and registered in an [`crate::agents::AgentRegistry`] before
 //! simulation start. After registration the template is treated as immutable.
 //!
 //! ## No new storage
@@ -25,11 +25,11 @@ use std::collections::HashMap;
 use crate::engine::component::Signature;
 use crate::engine::error::ECSResult;
 use crate::engine::manager::ECSReference;
-use crate::engine::types::ComponentID;
+use crate::engine::types::{AgentTemplateId, ComponentID};
 use crate::Entity;
 
 use super::error::{AgentError, AgentResult};
-use super::hooks::{DespawnHook, SpawnHook};
+use super::hooks::{DespawnBatchHook, DespawnHook, SpawnBatchHook, SpawnHook};
 
 /// Factory closure that produces a heap-allocated default component value.
 ///
@@ -50,8 +50,9 @@ pub type DefaultFactory = Box<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>;
 ///
 /// * Every [`ComponentID`] set in `signature` has a corresponding entry in
 ///   `defaults`.
-/// * `name` is unique within an [`AgentRegistry`] (enforced by the registry).
+/// * `name` is unique within an [`crate::agents::AgentRegistry`] (enforced by the registry).
 pub struct AgentTemplate {
+    pub(crate) id: Option<AgentTemplateId>,
     pub(crate) name: String,
     pub(crate) signature: Signature,
     /// Maps each `ComponentID` in `signature` to a factory that produces the
@@ -59,6 +60,9 @@ pub struct AgentTemplate {
     pub(crate) defaults: HashMap<ComponentID, DefaultFactory>,
     pub(crate) on_spawn: Option<SpawnHook>,
     pub(crate) on_despawn: Option<DespawnHook>,
+    pub(crate) on_spawn_batch: Option<SpawnBatchHook>,
+    pub(crate) on_despawn_batch: Option<DespawnBatchHook>,
+    pub(crate) capacity: Option<usize>,
 }
 
 impl AgentTemplate {
@@ -72,6 +76,9 @@ impl AgentTemplate {
             defaults: HashMap::new(),
             on_spawn: None,
             on_despawn: None,
+            on_spawn_batch: None,
+            on_despawn_batch: None,
+            capacity: None,
         }
     }
 
@@ -82,6 +89,20 @@ impl AgentTemplate {
     /// `Command::Spawn`.
     pub fn spawner(&self) -> super::spawner::AgentSpawner<'_> {
         super::spawner::AgentSpawner::new(self)
+    }
+
+    /// Returns an [`AgentBatch`](super::batch::AgentBatch) seeded with this template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::UnregisteredTemplate`] if this template has not
+    /// been registered and therefore has no stable template id for lifecycle
+    /// hook routing.
+    pub fn batch(&self, count: usize) -> AgentResult<super::batch::AgentBatch<'_>> {
+        let id = self
+            .id
+            .ok_or_else(|| AgentError::UnregisteredTemplate(self.name.clone()))?;
+        Ok(super::batch::AgentBatch::new(self, id, count))
     }
 
     /// Enqueues a tagged despawn for an entity that belongs to this template.
@@ -111,8 +132,10 @@ impl AgentTemplate {
 
     /// Returns `true` if `component_id` is part of this template's signature.
     #[inline]
-    pub fn has_component(&self, component_id: ComponentID) -> bool {
-        self.signature.has(component_id)
+    pub fn has_component(&self, component_id: ComponentID) -> AgentResult<bool> {
+        self.signature
+            .try_has(component_id)
+            .map_err(|_| AgentError::invalid_component_id(component_id))
     }
 
     /// Returns the spawn hook, if one was registered.
@@ -125,6 +148,30 @@ impl AgentTemplate {
     #[inline]
     pub fn on_despawn(&self) -> Option<&DespawnHook> {
         self.on_despawn.as_ref()
+    }
+
+    /// Returns the batch spawn hook, if one was registered.
+    #[inline]
+    pub fn on_spawn_batch(&self) -> Option<&SpawnBatchHook> {
+        self.on_spawn_batch.as_ref()
+    }
+
+    /// Returns the batch despawn hook, if one was registered.
+    #[inline]
+    pub fn on_despawn_batch(&self) -> Option<&DespawnBatchHook> {
+        self.on_despawn_batch.as_ref()
+    }
+
+    /// Returns the registry-assigned template id, if registered.
+    #[inline]
+    pub fn id(&self) -> Option<AgentTemplateId> {
+        self.id
+    }
+
+    /// Returns the optional expected population capacity.
+    #[inline]
+    pub fn capacity(&self) -> Option<usize> {
+        self.capacity
     }
 }
 
@@ -149,6 +196,9 @@ pub struct AgentTemplateBuilder {
     defaults: HashMap<ComponentID, DefaultFactory>,
     on_spawn: Option<SpawnHook>,
     on_despawn: Option<DespawnHook>,
+    on_spawn_batch: Option<SpawnBatchHook>,
+    on_despawn_batch: Option<DespawnBatchHook>,
+    capacity: Option<usize>,
 }
 
 impl AgentTemplateBuilder {
@@ -163,10 +213,16 @@ impl AgentTemplateBuilder {
     where
         T: Any + Default + Send + 'static,
     {
-        if self.signature.has(id) {
+        if self
+            .signature
+            .try_has(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?
+        {
             return Err(AgentError::DuplicateComponent(id));
         }
-        self.signature.set(id);
+        self.signature
+            .try_set(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?;
         self.defaults.insert(
             id,
             Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>),
@@ -188,10 +244,16 @@ impl AgentTemplateBuilder {
         id: ComponentID,
         factory: DefaultFactory,
     ) -> AgentResult<Self> {
-        if self.signature.has(id) {
+        if self
+            .signature
+            .try_has(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?
+        {
             return Err(AgentError::DuplicateComponent(id));
         }
-        self.signature.set(id);
+        self.signature
+            .try_set(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?;
         self.defaults.insert(id, factory);
         Ok(self)
     }
@@ -210,14 +272,36 @@ impl AgentTemplateBuilder {
         self
     }
 
+    /// Attaches a batch spawn hook invoked once per template-id grouped spawn.
+    pub fn on_spawn_batch(mut self, hook: SpawnBatchHook) -> Self {
+        self.on_spawn_batch = Some(hook);
+        self
+    }
+
+    /// Attaches a batch despawn hook invoked once per template-id grouped despawn.
+    pub fn on_despawn_batch(mut self, hook: DespawnBatchHook) -> Self {
+        self.on_despawn_batch = Some(hook);
+        self
+    }
+
+    /// Records an expected population size for this template.
+    pub fn with_capacity(mut self, expected_count: usize) -> Self {
+        self.capacity = Some(expected_count);
+        self
+    }
+
     /// Consumes the builder and returns the completed [`AgentTemplate`].
     pub fn build(self) -> AgentTemplate {
         AgentTemplate {
+            id: None,
             name: self.name,
             signature: self.signature,
             defaults: self.defaults,
             on_spawn: self.on_spawn,
             on_despawn: self.on_despawn,
+            on_spawn_batch: self.on_spawn_batch,
+            on_despawn_batch: self.on_despawn_batch,
+            capacity: self.capacity,
         }
     }
 }
@@ -253,9 +337,9 @@ mod tests {
             .build();
 
         assert_eq!(tmpl.name(), "Sheep");
-        assert!(tmpl.has_component(0));
-        assert!(tmpl.has_component(1));
-        assert!(!tmpl.has_component(2));
+        assert!(tmpl.has_component(0).unwrap());
+        assert!(tmpl.has_component(1).unwrap());
+        assert!(!tmpl.has_component(2).unwrap());
         assert_eq!(tmpl.defaults.len(), 2);
     }
 
@@ -288,7 +372,7 @@ mod tests {
             )
             .unwrap()
             .build();
-        assert!(tmpl.has_component(7));
+        assert!(tmpl.has_component(7).unwrap());
         let boxed = (tmpl.defaults[&7])();
         let h = boxed.downcast::<Health>().unwrap();
         assert!((h.0 - 42.0).abs() < f32::EPSILON);
@@ -302,5 +386,29 @@ mod tests {
             .build();
         // Just check it constructs without panicking.
         let _ = tmpl.spawner();
+    }
+
+    #[test]
+    fn batch_requires_registered_template_id() {
+        let tmpl = AgentTemplate::builder("Fox").build();
+        match tmpl.batch(4) {
+            Err(err) => assert_eq!(err, AgentError::UnregisteredTemplate("Fox".into())),
+            Ok(_) => panic!("expected unregistered template error"),
+        }
+    }
+
+    #[test]
+    fn invalid_component_id_returns_error() {
+        let invalid = crate::engine::types::COMPONENT_CAP as ComponentID;
+        let err = AgentTemplate::builder("Fox")
+            .with_component::<u32>(invalid)
+            .unwrap_err();
+        assert_eq!(err, AgentError::invalid_component_id(invalid));
+
+        let tmpl = AgentTemplate::builder("Fox").build();
+        assert_eq!(
+            tmpl.has_component(invalid).unwrap_err(),
+            AgentError::invalid_component_id(invalid)
+        );
     }
 }

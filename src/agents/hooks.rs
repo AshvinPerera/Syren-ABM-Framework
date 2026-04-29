@@ -2,7 +2,7 @@
 //!
 //! ## Design
 //!
-//! Hooks are Boxed closures stored inside [`AgentTemplate`]. They are
+//! Hooks are Boxed closures stored inside [`crate::agents::AgentTemplate`]. They are
 //! **never** called inside `System::run`. Instead, they are invoked by the
 //! model orchestration layer (e.g. `Model::tick`) after
 //! `apply_deferred_commands` completes and the resolved entity handles are
@@ -17,9 +17,9 @@
 //!
 //! * Hooks **must not** be called while a query iteration is live.
 //! * Hooks receive an [`ECSReference`] and an [`Entity`]; they may enqueue
-//!   further [`Command`]s via [`ECSReference::defer`] but must not call
+//!   further [`crate::Command`]s via [`ECSReference::defer`] but must not call
 //!   [`ECSReference::with_exclusive`].
-//! * Both hook types are `Send + Sync` so that [`AgentTemplate`] remains
+//! * Both hook types are `Send + Sync` so that [`crate::agents::AgentTemplate`] remains
 //!   `Send + Sync`.
 
 use crate::engine::entity::Entity;
@@ -36,6 +36,9 @@ use crate::engine::manager::ECSReference;
 /// `apply_deferred_commands` returns.  Never called inside a running system.
 pub type SpawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
 
+/// Called after a batch of agent entities is resolved from a batch spawn.
+pub type SpawnBatchHook = Box<dyn Fn(ECSReference<'_>, &[Entity]) + Send + Sync>;
+
 /// Called after a tagged despawn command is applied.
 ///
 /// Receives an [`ECSReference`] and the entity that was destroyed. The hook may
@@ -48,3 +51,6 @@ pub type SpawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
 /// `apply_deferred_commands` reports a tagged despawn. Never called inside a
 /// running system.
 pub type DespawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
+
+/// Called after a batch of tagged agent despawns is applied.
+pub type DespawnBatchHook = Box<dyn Fn(ECSReference<'_>, &[Entity]) + Send + Sync>;

@@ -12,8 +12,8 @@
 //! ## Schema immutability
 //!
 //! The schema is frozen by construction: [`Environment`] exposes no method to
-//! add new keys. After [`EnvironmentBuilder::build`] returns, only existing
-//! keys may be read or written. Calling [`set`](Environment::set) with an
+//! add new keys. After [`crate::environment::EnvironmentBuilder::build`] returns, only existing
+//! keys may be read or written. Calling [`Environment::set`] with an
 //! unregistered key returns [`EnvironmentError::KeyNotFound`].
 //!
 //! ## Thread safety
@@ -25,7 +25,7 @@
 //! ## Dirty tracking
 //!
 //! Every successful call to [`set`](Environment::set) inserts the entry's
-//! [`ChannelID`](crate::engine::types::ChannelID) into a shared
+//! [`ChannelID`] into a shared
 //! `dirty_channels` set. Using a [`HashSet`] ensures repeated mutations of the
 //! same key do not cause unbounded growth. The dirty set is consumed by
 //! [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary) at the end of
@@ -238,10 +238,8 @@ impl Environment {
     /// - [`EnvironmentError::TypeMismatch`] - the key exists but was registered
     ///   with a different type.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal [`RwLock`] is poisoned (a thread panicked while
-    /// holding a write lock on this entry).
+    /// - [`EnvironmentError::LockPoisoned`] - the internal [`RwLock`] was
+    ///   poisoned by a panic while held.
     pub fn get<T: Any + Clone + Send + Sync>(&self, key: &str) -> EnvironmentResult<T> {
         let slot = self
             .entries
@@ -287,9 +285,8 @@ impl Environment {
     /// - [`EnvironmentError::TypeMismatch`] - the key exists but was registered
     ///   with a different type.
     ///
-    /// # Panics
-    ///
-    /// Panics if any internal [`RwLock`] is poisoned.
+    /// - [`EnvironmentError::LockPoisoned`] - an internal [`RwLock`] was
+    ///   poisoned by a panic while held.
     pub fn set<T: Any + Clone + Send + Sync>(&self, key: &str, value: T) -> EnvironmentResult<()> {
         let slot = self
             .entries

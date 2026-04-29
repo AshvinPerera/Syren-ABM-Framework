@@ -1,4 +1,4 @@
-//! Runtime borrow tracking for ECS component access.
+﻿//! Runtime borrow tracking for ECS component access.
 //!
 //! This module implements [`BorrowTracker`], a lock-free spinlock-based
 //! structure that enforces Rust's aliasing rules across systems executing
@@ -52,7 +52,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 pub const DEFAULT_SPIN_LIMIT: u32 = 100_000;
 
 /// Number of `AtomicU64` words needed to cover `COMPONENT_CAP` bits.
-const DIRTY_WORDS: usize = (COMPONENT_CAP + 63) / 64;
+const DIRTY_WORDS: usize = COMPONENT_CAP.div_ceil(64);
 
 /// Tracks runtime read/write borrows for each component type.
 ///
@@ -63,7 +63,6 @@ const DIRTY_WORDS: usize = (COMPONENT_CAP + 63) / 64;
 ///
 /// A configurable `spin_limit` controls how many iterations the acquire
 /// methods will attempt before returning an error.
-
 pub struct BorrowTracker {
     /// Per-component atomic borrow state.
     ///
@@ -82,7 +81,6 @@ pub struct BorrowTracker {
 impl BorrowTracker {
     /// Creates a new `BorrowTracker` with all components unlocked and the
     /// default spin limit ([`DEFAULT_SPIN_LIMIT`]).
-
     pub fn new() -> Self {
         Self::with_spin_limit(DEFAULT_SPIN_LIMIT)
     }
@@ -134,7 +132,6 @@ impl BorrowTracker {
     ///
     /// Called at stage boundaries by the scheduler to ensure no stale borrow
     /// state leaks across execution phases.
-
     #[inline]
     pub fn clear(&self) {
         for word_idx in 0..DIRTY_WORDS {
@@ -171,7 +168,6 @@ impl BorrowTracker {
     ///
     /// - `0 -> 2` : first reader
     /// - `N -> N+1` : additional reader (where `N >= 2`)
-
     pub fn acquire_read(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
         let state = &self.states[component_id as usize];
         let mut spins = 0u32;
@@ -239,7 +235,6 @@ impl BorrowTracker {
     /// This method assumes a matching `acquire_read` call was made previously.
     /// Calling without a corresponding 'acquire' is a logic error and will
     /// trigger a `debug_assert` failure.
-
     pub fn release_read(&self, component_id: ComponentID) {
         let state = &self.states[component_id as usize];
 
@@ -284,7 +279,6 @@ impl BorrowTracker {
     /// ## State Transition
     ///
     /// - `0 -> 1`
-
     pub fn acquire_write(&self, component_id: ComponentID) -> Result<(), ExecutionError> {
         let state = &self.states[component_id as usize];
         let mut spins = 0u32;
@@ -345,7 +339,6 @@ impl BorrowTracker {
     ///
     /// This must only be called by the thread that successfully
     /// acquired the write lock.
-
     pub fn release_write(&self, component_id: ComponentID) {
         let state = &self.states[component_id as usize];
         let previous = state.swap(0, Ordering::AcqRel);

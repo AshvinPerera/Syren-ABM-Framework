@@ -1,4 +1,4 @@
-//! ECS query description and construction.
+﻿//! ECS query description and construction.
 //!
 //! This module defines data structures and a builder-style API for
 //! *describing* ECS queries: which components are required, which are read,
@@ -112,7 +112,6 @@ impl QueryComponent {
 /// `QueryBuilder::write::<T>()`. The byte slice arrays passed to
 /// iteration callbacks use this same ordering: `cols[0]` corresponds
 /// to the first declared read component, `cols[1]` to the second, etc.
-
 #[derive(Clone, Debug)]
 pub struct BuiltQuery {
     signature: QuerySignature,
@@ -256,13 +255,12 @@ impl RegistrySource {
 /// - which components must be absent.
 ///
 /// The builder follows a *builder-style* API and is typically consumed
-/// by calling [`build`](Self::build) to produce a [`BuiltQuery`].
+/// by calling [`build`](Self::build) to produce a [`crate::BuiltQuery`].
 ///
 /// Dual construction modes
 ///
 /// Use `QueryBuilder::new()` for the global registry (default), or
 /// `QueryBuilder::with_registry(registry)` for an instance-owned registry.
-
 pub struct QueryBuilder {
     /// Structural and access-level query signature.
     signature: QuerySignature,
@@ -312,7 +310,6 @@ impl QueryBuilder {
     /// - marks `T` as a required component in the query signature,
     /// - records `T` as read-access for conflict analysis,
     /// - appends `T`'s component ID to the read list.
-
     pub fn read<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
         let id = self.registry_source.resolve::<T>()?;
         self.signature.read.set(id);
@@ -326,7 +323,6 @@ impl QueryBuilder {
     /// - marks `T` as a required component in the query signature,
     /// - records `T` as write-access for conflict analysis,
     /// - appends `T`'s component ID to the write list.
-
     pub fn write<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
         let id = self.registry_source.resolve::<T>()?;
         self.signature.write.set(id);
@@ -341,7 +337,7 @@ impl QueryBuilder {
         Ok(self)
     }
 
-    /// Finalizes the query description and returns an immutable [`BuiltQuery`].
+    /// Finalizes the query description and returns an immutable [`crate::BuiltQuery`].
     pub fn build(self) -> ECSResult<BuiltQuery> {
         let read_ids: Vec<ComponentID> = self
             .reads

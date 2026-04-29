@@ -155,7 +155,7 @@ impl BoundaryResource for EnvironmentBoundary {
     ///    three-way intersection prevents spurious uploads when a system
     ///    over-declares its `produces` set.
     /// 3. Removes `channels` from the environment's dirty set via
-    ///    [`Environment::clear_dirty_for_channels`]. IDs that are not in the
+    ///    `Environment::clear_dirty_for_channels`. IDs that are not in the
     ///    dirty set are silently ignored.
     fn finalise(
         &mut self,
@@ -408,6 +408,7 @@ mod gpu_tests {
 
         let uniform = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .build();
         let boundary = EnvironmentBoundary::new(Arc::clone(&env)).with_uniform(uniform);
 

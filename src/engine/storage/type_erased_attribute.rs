@@ -1,4 +1,4 @@
-//! Type-erased interface for chunked attribute storage.
+﻿//! Type-erased interface for chunked attribute storage.
 //!
 //! This module defines the [`TypeErasedAttribute`] trait and its blanket
 //! implementation for [`Attribute<T>`], allowing attribute containers to be
@@ -61,6 +61,7 @@ use std::mem::size_of;
 
 use crate::engine::error::{AttributeError, TypeMismatchError};
 use crate::engine::storage::attribute::Attribute;
+use crate::engine::storage::{PushFromOutcome, TakeSwapRemoveOutcome};
 use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
 
 /// Type-erased interface for a component column, enabling archetype storage
@@ -69,6 +70,9 @@ use crate::engine::types::{ChunkID, RowID, CHUNK_CAP};
 pub trait TypeErasedAttribute: Any + Send + Sync {
     /// Returns the number of allocated chunks in this attribute.
     fn chunk_count(&self) -> usize;
+
+    /// Reserves additional chunk slots in the backing storage vector.
+    fn reserve_chunks(&mut self, additional: usize);
 
     /// Returns the total number of initialised elements stored.
     fn length(&self) -> usize;
@@ -128,7 +132,7 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
         source: &mut dyn TypeErasedAttribute,
         source_chunk: ChunkID,
         source_row: RowID,
-    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError>;
+    ) -> Result<PushFromOutcome, AttributeError>;
 
     /// Removes a value with swap-remove and returns the removed value.
     ///
@@ -138,7 +142,7 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
         &mut self,
         chunk: ChunkID,
         row: RowID,
-    ) -> Result<(Box<dyn Any>, Option<(ChunkID, RowID)>), AttributeError>;
+    ) -> Result<TakeSwapRemoveOutcome, AttributeError>;
 
     /// Reverses a previous [`take_swap_remove_dyn`](Self::take_swap_remove_dyn).
     ///
@@ -184,6 +188,9 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
 impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+    fn reserve_chunks(&mut self, additional: usize) {
+        Attribute::reserve_chunks(self, additional);
     }
     fn length(&self) -> usize {
         self.length
@@ -254,7 +261,6 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     /// # Returns
     /// - `Some(&[U])` if `U == T` and `chunk_id` is a valid chunk index.
     /// - `None` if the type does not match or the chunk index is out of bounds.
-
     fn chunk_slice<U: 'static>(&self, chunk_id: ChunkID, valid_length: usize) -> Option<&[U]> {
         if TypeId::of::<U>() != TypeId::of::<T>() {
             return None;
@@ -287,7 +293,6 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     /// # Returns
     /// - `Some(&mut [U])` if `U == T` and `chunk_id` is a valid chunk index.
     /// - `None` if the type does not match or the chunk index is out of bounds.
-
     fn chunk_slice_mut<U: 'static>(
         &mut self,
         chunk_id: ChunkID,
@@ -320,7 +325,6 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     ///
     /// # Errors
     /// - [`AttributeError::Position`] if the `(chunk, row)` position is invalid.
-
     fn swap_remove_dyn(
         &mut self,
         chunk: ChunkID,
@@ -339,7 +343,6 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     ///
     /// # Errors
     /// - [`AttributeError::TypeMismatch`] if the dynamic value has the wrong type.
-
     fn push_dyn(&mut self, value: Box<dyn Any>) -> Result<(ChunkID, RowID), AttributeError> {
         let actual = value.as_ref().type_id();
         if let Ok(v) = value.downcast::<T>() {
@@ -367,13 +370,12 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     ///   the same element type as this attribute.
     /// - [`AttributeError::Position`] if the `(source_chunk, source_row)` position
     ///   is invalid in the source attribute.
-
     fn push_from_dyn(
         &mut self,
         source: &mut dyn TypeErasedAttribute,
         source_chunk: ChunkID,
         source_row: RowID,
-    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), AttributeError> {
+    ) -> Result<PushFromOutcome, AttributeError> {
         // Capture immutable info FIRST before taking the mutable borrow
         let actual_type = source.element_type_id();
         let actual_name = source.element_type_name();
@@ -397,7 +399,7 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
         &mut self,
         chunk: ChunkID,
         row: RowID,
-    ) -> Result<(Box<dyn Any>, Option<(ChunkID, RowID)>), AttributeError> {
+    ) -> Result<TakeSwapRemoveOutcome, AttributeError> {
         let (value, moved_from) = self.take_swap_remove(chunk, row)?;
         Ok((Box::new(value), moved_from))
     }

@@ -1,4 +1,4 @@
-//! Metadata descriptor for ECS component types.
+﻿//! Metadata descriptor for ECS component types.
 //!
 //! This module defines [`ComponentDesc`], a lightweight, copyable struct that captures
 //! static type information about a registered component - including its runtime [`TypeId`],
@@ -52,7 +52,6 @@ use crate::engine::types::ComponentID;
 ///
 /// ## Notes
 /// `ComponentDesc` is `Copy` and safe to clone freely for reporting and diagnostics.
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ComponentDesc {
     /// Runtime identifier assigned to this component type by the registry.
@@ -101,7 +100,6 @@ impl ComponentDesc {
     /// ## Notes
     /// The returned descriptor has `component_id: None` and must be finalized via
     /// [`ComponentDesc::with_id`] before use in a registry context.
-
     #[inline]
     pub fn of<T: 'static>() -> Self {
         Self {

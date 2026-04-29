@@ -424,8 +424,6 @@ fn run_chunks(
         let mut start = 0usize;
         while start < chunk_order.len() {
             let end = (start + grainsize).min(chunk_order.len());
-            let views = views;
-            let query = query;
             let chunks = &chunk_order[start..end];
 
             s.spawn(move |_| {
@@ -473,6 +471,9 @@ fn run_chunks(
     });
 }
 
+// Keep the hot-path helper flat: grouping these parameters obscures the two
+// closure shapes and the GPU-only dirty-tracking slice.
+#[allow(clippy::too_many_arguments)]
 fn run_chunks_fallible(
     views: &ChunkView,
     query: &BuiltQuery,
@@ -493,8 +494,6 @@ fn run_chunks_fallible(
             let end = (start + grainsize).min(chunk_order.len());
             let abort = Arc::clone(abort);
             let err = Arc::clone(err);
-            let views = views;
-            let query = query;
             let chunks = &chunk_order[start..end];
 
             s.spawn(move |_| {
@@ -508,7 +507,7 @@ fn run_chunks_fallible(
                             .lock()
                             .map(|g| g.as_ref().map(|(c, _)| *c))
                             .unwrap_or(None);
-                        if latched.map_or(false, |c| c <= ordinal) {
+                        if latched.is_some_and(|c| c <= ordinal) {
                             return;
                         }
                     }

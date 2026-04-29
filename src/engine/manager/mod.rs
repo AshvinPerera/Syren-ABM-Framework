@@ -54,5 +54,5 @@ mod query_param;
 
 pub use data::ECSData;
 pub use ecs_manager::ECSManager;
-pub use ecs_reference::ECSReference;
+pub use ecs_reference::{BoundaryHandle, ECSReference};
 pub use query_param::{Read, Write};

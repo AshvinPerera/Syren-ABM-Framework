@@ -1,4 +1,4 @@
-//! Error types for entity spawning and structural world mutations.
+﻿//! Error types for entity spawning and structural world mutations.
 //!
 //! The central type is [`SpawnError`], a non-exhaustive enum that aggregates
 //! the failure modes encountered when creating entities, attaching components,
@@ -77,7 +77,6 @@ use super::registry::RegistryError;
 ///
 /// ### Display
 /// Human-readable, single-line messages suitable for logs.
-
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
@@ -87,7 +86,7 @@ pub enum SpawnError {
     /// A shard index was outside the valid range.
     ShardBounds(ShardBoundsError),
 
-    /// Returned by [`EntityShards::new`] when `n_shards` is zero or exceeds
+    /// Returned by `EntityShards::new` when `n_shards` is zero or exceeds
     /// the maximum representable count given `SHARD_BITS`.
     InvalidShardCount {
         /// Number of shards that was requested.

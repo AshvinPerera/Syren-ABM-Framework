@@ -1,4 +1,4 @@
-//! Scoped borrow guard for coordinating component access across systems.
+﻿//! Scoped borrow guard for coordinating component access across systems.
 //!
 //! This module provides [`BorrowGuard`], a RAII type that acquires and releases
 //! read/write borrows on [`ComponentID`]s through a shared [`BorrowTracker`].
@@ -48,7 +48,6 @@ use crate::engine::types::ComponentID;
 ///
 /// Component IDs are sorted before acquisition to reduce deadlock risk.
 /// Writes are always acquired before reads.
-
 pub struct BorrowGuard<'a> {
     tracker: &'a BorrowTracker,
     reads: Vec<ComponentID>,
@@ -84,7 +83,6 @@ impl<'a> BorrowGuard<'a> {
     ///
     /// If acquisition fails partway through, all borrows that were
     /// successfully acquired are released before the error is returned.
-
     pub fn new(
         tracker: &'a BorrowTracker,
         reads: &[ComponentID],

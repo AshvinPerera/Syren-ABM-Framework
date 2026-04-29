@@ -1,4 +1,4 @@
-//! ECS System Abstractions
+﻿//! ECS System Abstractions
 //!
 //! This module defines the core *system execution model* used by the engine.
 //!
@@ -123,7 +123,7 @@ impl ChannelSet {
         let bit = (id as usize) % 64;
         self.bits
             .get(word)
-            .map_or(false, |w| (w & (1u64 << bit)) != 0)
+            .is_some_and(|w| (w & (1u64 << bit)) != 0)
     }
 
     /// Returns `true` if this set is empty (no channels present).
@@ -359,7 +359,6 @@ pub enum SystemBackend {
 
 /// GPU capability trait (feature-gated).
 /// A GPU system is still a `System`, but additionally provides WGSL.
-
 #[cfg(feature = "gpu")]
 pub trait GpuSystem {
     /// WGSL source
@@ -395,7 +394,6 @@ pub trait GpuSystem {
 ///
 /// Systems must be `Send + Sync` so they can be scheduled and executed
 /// in parallel across threads.
-
 pub trait System: Send + Sync {
     /// Human-readable name (used for debugging/profiling).
     ///

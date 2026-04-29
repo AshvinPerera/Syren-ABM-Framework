@@ -51,7 +51,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::engine::archetype::Archetype;
-use crate::engine::commands::{Command, CommandEvents, DespawnEvent, SpawnEvent};
+use crate::engine::commands::{
+    Command, CommandEvents, DespawnEvent, SpawnEvent, TemplateLifecycleBatch,
+};
 use crate::engine::component::{ComponentRegistry, Signature};
 use crate::engine::entity::{Entity, EntityShards};
 use crate::engine::error::{
@@ -351,11 +353,11 @@ impl ECSData {
             .into());
         }
 
-        let mut new_signature = self.archetypes[source_id as usize].signature().clone();
+        let mut new_signature = *self.archetypes[source_id as usize].signature();
         new_signature.try_set(added_component_id)?;
 
         let destination_id = self.get_or_create_archetype(&new_signature)?;
-        let source_sig = self.archetypes[source_id as usize].signature().clone();
+        let source_sig = *self.archetypes[source_id as usize].signature();
         let shards = &self.shards;
 
         let (source, destination) =
@@ -432,16 +434,16 @@ impl ECSData {
             return Ok(());
         }
 
-        let mut new_signature = self.archetypes[source_id as usize].signature().clone();
+        let mut new_signature = *self.archetypes[source_id as usize].signature();
         new_signature.try_clear(removed_component_id)?;
 
         if new_signature.components.iter().all(|&bits| bits == 0) {
-            self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity)?;
+            self.archetypes[source_id as usize].despawn_on(&self.shards, entity)?;
             return Ok(());
         }
 
         let destination_id = self.get_or_create_archetype(&new_signature)?;
-        let source_sig = self.archetypes[source_id as usize].signature().clone();
+        let source_sig = *self.archetypes[source_id as usize].signature();
         let shards = &self.shards;
 
         let (source_arch, dest_arch) =
@@ -565,6 +567,7 @@ impl ECSData {
     ///
     /// On error, commands that were never attempted are returned so the manager
     /// can preserve their relative order in the deferred queue.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn apply_deferred_commands_partial(
         &mut self,
         commands: Vec<Command>,
@@ -592,7 +595,7 @@ impl ECSData {
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
                     archetype
-                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .spawn_on(&self.shards, shard_id, bundle)
                         .map(|entity| {
                             events.spawned.push(SpawnEvent::untagged(entity));
                         })
@@ -614,10 +617,80 @@ impl ECSData {
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
                     archetype
-                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .spawn_on(&self.shards, shard_id, bundle)
                         .map(|entity| {
                             events.spawned.push(SpawnEvent::tagged(entity, tag));
                         })
+                }
+
+                Command::SpawnBatchTagged { batch, template_id } => {
+                    let archetype_id = self.get_or_create_archetype(&batch.signature);
+                    let archetype_id = match archetype_id {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return Err(CommandDrainFailure {
+                                error,
+                                unapplied: iter.collect(),
+                                events,
+                            });
+                        }
+                    };
+
+                    let mut spawned = Vec::with_capacity(batch.count);
+                    let mut columns: Vec<_> = batch
+                        .columns
+                        .into_iter()
+                        .map(|column| (column.component_id, column.values.into_iter()))
+                        .collect();
+                    if let Err(error) =
+                        self.archetypes[archetype_id as usize].reserve_additional_rows(batch.count)
+                    {
+                        return Err(CommandDrainFailure {
+                            error,
+                            unapplied: iter.collect(),
+                            events,
+                        });
+                    }
+
+                    for _ in 0..batch.count {
+                        let mut bundle = crate::engine::component::Bundle::new();
+                        for (component_id, values) in &mut columns {
+                            let Some(value) = values.next() else {
+                                return Err(CommandDrainFailure {
+                                    error: ECSError::from(SpawnError::MissingComponent {
+                                        type_id: std::any::TypeId::of::<()>(),
+                                        name: "batch column value",
+                                    }),
+                                    unapplied: iter.collect(),
+                                    events,
+                                });
+                            };
+                            bundle.insert_boxed(*component_id, value);
+                        }
+
+                        let shard_id = self.pick_spawn_shard();
+                        let archetype = &mut self.archetypes[archetype_id as usize];
+                        match archetype.spawn_on(&self.shards, shard_id, bundle) {
+                            Ok(entity) => {
+                                events
+                                    .spawned
+                                    .push(SpawnEvent::template_tagged(entity, template_id));
+                                spawned.push(entity);
+                            }
+                            Err(error) => {
+                                return Err(CommandDrainFailure {
+                                    error,
+                                    unapplied: iter.collect(),
+                                    events,
+                                });
+                            }
+                        }
+                    }
+                    events.spawned_batches.push(TemplateLifecycleBatch {
+                        template_id,
+                        entities: spawned,
+                    });
+                    Ok(())
                 }
 
                 Command::Despawn { entity } => {
@@ -631,7 +704,7 @@ impl ECSData {
                     match loc {
                         Ok(loc) => {
                             let archetype = &mut self.archetypes[loc.archetype as usize];
-                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                            archetype.despawn_on(&self.shards, entity).map(|()| {
                                 events.despawned.push(DespawnEvent::untagged(entity));
                             })
                         }
@@ -650,12 +723,56 @@ impl ECSData {
                     match loc {
                         Ok(loc) => {
                             let archetype = &mut self.archetypes[loc.archetype as usize];
-                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                            archetype.despawn_on(&self.shards, entity).map(|()| {
                                 events.despawned.push(DespawnEvent::tagged(entity, tag));
                             })
                         }
                         Err(error) => Err(error),
                     }
+                }
+
+                Command::DespawnBatchTagged {
+                    entities,
+                    template_id,
+                } => {
+                    let mut despawned = Vec::with_capacity(entities.len());
+                    for entity in entities {
+                        let loc = self
+                            .shards
+                            .get_location(entity)
+                            .map_err(ECSError::from)
+                            .and_then(|loc| {
+                                loc.ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))
+                            });
+                        match loc {
+                            Ok(loc) => {
+                                let archetype = &mut self.archetypes[loc.archetype as usize];
+                                if let Err(error) = archetype.despawn_on(&self.shards, entity) {
+                                    return Err(CommandDrainFailure {
+                                        error,
+                                        unapplied: iter.collect(),
+                                        events,
+                                    });
+                                }
+                                events
+                                    .despawned
+                                    .push(DespawnEvent::template_tagged(entity, template_id));
+                                despawned.push(entity);
+                            }
+                            Err(error) => {
+                                return Err(CommandDrainFailure {
+                                    error,
+                                    unapplied: iter.collect(),
+                                    events,
+                                });
+                            }
+                        }
+                    }
+                    events.despawned_batches.push(TemplateLifecycleBatch {
+                        template_id,
+                        entities: despawned,
+                    });
+                    Ok(())
                 }
 
                 Command::Add {
