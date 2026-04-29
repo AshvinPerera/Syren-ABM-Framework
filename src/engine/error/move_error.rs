@@ -1,4 +1,4 @@
-//! Error types for archetype-to-archetype entity migration.
+﻿//! Error types for archetype-to-archetype entity migration.
 //!
 //! This module defines [`MoveError`], which is returned by archetype migration
 //! logic when transferring component rows between archetypes during add/remove
@@ -23,7 +23,6 @@ use super::attribute::AttributeError;
 /// ## Notes
 /// These errors generally indicate internal inconsistencies or violated
 /// invariants rather than recoverable user-facing failures.
-
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {

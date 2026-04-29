@@ -5,7 +5,7 @@ use crate::engine::types::ChannelID;
 /// Errors that can occur during messaging registration or runtime use.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MessagingError {
-    /// A message type with the same [`TypeId`] has already been registered.
+    /// A message type with the same [`std::any::TypeId`] has already been registered.
     #[error("message type already registered: {0}")]
     AlreadyRegistered(&'static str),
 

@@ -1,4 +1,4 @@
-//! Typed enumeration of internal ECS framework invariant violations.
+﻿//! Typed enumeration of internal ECS framework invariant violations.
 //!
 //! This module defines [`InternalViolation`], a structured error type that
 //! represents bugs in the ECS engine or its scheduling layer - not recoverable
@@ -41,7 +41,6 @@ use std::fmt;
 ///
 /// ## Design
 /// Variants are grouped by originating module for clarity.
-
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalViolation {

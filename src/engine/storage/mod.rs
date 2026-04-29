@@ -85,6 +85,13 @@ mod slice;
 mod tests;
 mod type_erased_attribute;
 
+use crate::engine::types::{ChunkID, RowID};
+
+pub(crate) type StoragePosition = (ChunkID, RowID);
+pub(crate) type MovedStoragePosition = Option<StoragePosition>;
+pub(crate) type PushFromOutcome = (StoragePosition, MovedStoragePosition);
+pub(crate) type TakeSwapRemoveOutcome = (Box<dyn std::any::Any>, MovedStoragePosition);
+
 pub use attribute::Attribute;
 pub use locked_attribute::LockedAttribute;
 pub use slice::{cast_slice, cast_slice_mut};

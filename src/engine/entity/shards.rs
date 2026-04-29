@@ -1,4 +1,4 @@
-//! Sharded entity manager: thread-safe allocation, destruction, and lookup.
+﻿//! Sharded entity manager: thread-safe allocation, destruction, and lookup.
 //!
 //! # Overview
 //!
@@ -62,7 +62,6 @@ use super::location::EntityLocation;
 /// ## Invariants
 /// - All entities stored in this shard have matching shard IDs.
 /// - Atomic counters are approximate and used only for heuristics.
-
 pub struct Shard {
     /// Entity pool protected by a mutex.
     pub(crate) entities: Mutex<Entities>,
@@ -116,7 +115,6 @@ impl Shard {
 /// ## Concurrency
 /// - Shards operate independently and synchronize internally.
 /// - Public methods are thread-safe.
-
 pub struct EntityShards {
     shards: Vec<Shard>,
 }
@@ -171,7 +169,6 @@ impl EntityShards {
     /// ## Notes
     /// The shard count is fixed for the lifetime of the ECS world and
     /// cannot be changed after initialization.
-
     pub fn new(n_shards: usize) -> Result<Self, SpawnError> {
         let max_shards = 1usize << SHARD_BITS;
         if n_shards == 0 || n_shards > max_shards {
@@ -200,7 +197,6 @@ impl EntityShards {
     ///
     /// ## Invariants
     /// The returned entity is alive and has a valid location.
-
     pub fn spawn_on(
         &self,
         shard_id: ShardID,
@@ -242,7 +238,6 @@ impl EntityShards {
     ///
     /// ## Errors
     /// - `SpawnError::ShardLockPoisoned` if the shard mutex is poisoned.
-
     pub fn is_alive(&self, entity: Entity) -> Result<bool, SpawnError> {
         let shard_id = entity.shard() as usize;
         if shard_id >= self.shard_count() {
@@ -261,7 +256,6 @@ impl EntityShards {
     ///
     /// ## Errors
     /// - `SpawnError::ShardLockPoisoned` if the shard mutex is poisoned.
-
     pub fn get_location(&self, entity: Entity) -> Result<Option<EntityLocation>, SpawnError> {
         let shard_id = entity.shard() as usize;
         if shard_id >= self.shard_count() {
@@ -290,7 +284,6 @@ impl EntityShards {
     /// Caller must ensure:
     /// - The entity is alive.
     /// - The provided location matches actual component storage.
-
     pub(crate) fn set_location(
         &self,
         entity: Entity,
@@ -321,7 +314,6 @@ impl EntityShards {
     ///
     /// ## Errors
     /// - `SpawnError::ShardLockPoisoned` if the shard mutex is poisoned.
-
     pub fn despawn(&self, entity: Entity) -> Result<bool, SpawnError> {
         let shard_id = entity.shard() as usize;
         if shard_id >= self.shard_count() {

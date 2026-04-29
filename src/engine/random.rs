@@ -1,4 +1,4 @@
-//! Fast thread-local pseudo-random number generation utilities.
+﻿//! Fast thread-local pseudo-random number generation utilities.
 //!
 //! This module provides a lightweight, lock-free source of pseudo-random
 //! numbers intended for performance-critical paths such as simulations,
@@ -81,7 +81,6 @@ thread_local! {static TL_RNG: Cell<u64> = Cell::new(0x9E37_79B9_7F4A_7C15);}
 /// let y = tl_rand_u64();
 /// assert_ne!(x, y);
 /// ```
-
 #[inline]
 pub fn tl_rand_u64() -> u64 {
     TL_RNG.with(|c| {

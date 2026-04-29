@@ -1,4 +1,4 @@
-//! Spawn and despawn operations for [`Archetype`].
+﻿//! Spawn and despawn operations for [`Archetype`].
 //!
 //! This module implements [`Archetype::spawn_on`] and [`Archetype::despawn_on`],
 //! the two mutating entry points for adding and removing entities from an archetype.
@@ -74,7 +74,6 @@ impl Archetype {
     /// Column locks are acquired and released per-component during the push
     /// loop. The metadata lock is acquired only *after* all column writes
     /// have completed, respecting the global lock ordering contract.
-
     pub fn spawn_on(
         &mut self,
         shards: &EntityShards,
@@ -219,7 +218,6 @@ impl Archetype {
     /// Column locks are acquired and released per-component during the
     /// removal loop. The metadata lock is acquired only *after* all column
     /// removals and the entity despawn have completed.
-
     pub fn despawn_on(&mut self, shards: &EntityShards, entity: Entity) -> ECSResult<()> {
         let Some(location) = shards.get_location(entity)? else {
             return Err(SpawnError::StaleEntity(StaleEntityError).into());

@@ -1,4 +1,4 @@
-//! Fluent builder for [`Model`](crate::model::Model).
+//! Fluent builder for [`Model`].
 
 use std::any::Any;
 use std::collections::HashSet;

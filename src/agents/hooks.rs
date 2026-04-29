@@ -2,7 +2,7 @@
 //!
 //! ## Design
 //!
-//! Hooks are Boxed closures stored inside [`AgentTemplate`]. They are
+//! Hooks are Boxed closures stored inside [`crate::agents::AgentTemplate`]. They are
 //! **never** called inside `System::run`. Instead, they are invoked by the
 //! model orchestration layer (e.g. `Model::tick`) after
 //! `apply_deferred_commands` completes and the resolved entity handles are
@@ -17,9 +17,9 @@
 //!
 //! * Hooks **must not** be called while a query iteration is live.
 //! * Hooks receive an [`ECSReference`] and an [`Entity`]; they may enqueue
-//!   further [`Command`]s via [`ECSReference::defer`] but must not call
+//!   further [`crate::Command`]s via [`ECSReference::defer`] but must not call
 //!   [`ECSReference::with_exclusive`].
-//! * Both hook types are `Send + Sync` so that [`AgentTemplate`] remains
+//! * Both hook types are `Send + Sync` so that [`crate::agents::AgentTemplate`] remains
 //!   `Send + Sync`.
 
 use crate::engine::entity::Entity;

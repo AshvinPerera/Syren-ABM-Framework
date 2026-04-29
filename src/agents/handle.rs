@@ -94,8 +94,8 @@ impl AgentHandle {
     ///
     /// # Errors
     ///
-    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] - `id` not
-    ///   in template signature.
+    /// * `AgentHandleError::Agent(AgentError::MissingComponent)` - `id` not
+    ///   in the template signature.
     /// * [`AgentHandleError::ECS`] - entity is stale, component is missing
     ///   from the archetype, the column is currently write-locked by the
     ///   calling system, the requested type does not match the stored type,
@@ -119,7 +119,7 @@ impl AgentHandle {
     ///
     /// # Errors
     ///
-    /// * [`AgentHandleError::Agent(AgentError::MissingComponent)`] - `id` is
+    /// * `AgentHandleError::Agent(AgentError::MissingComponent)` - `id` is
     ///   not in the template signature cached by this handle.
     /// * [`AgentHandleError::ECS`] - the deferred command queue lock is
     ///   poisoned.

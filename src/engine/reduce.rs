@@ -1,8 +1,8 @@
-//! Reduction primitives for global ECS observations.
+﻿//! Reduction primitives for global ECS observations.
 //!
 //! This module defines **pure, thread-local accumulator types** intended for
-//! use with the ECS reduction APIs (e.g. [`ECSReference::reduce_abstraction`]
-//! and [`ECSReference::reduce_read`]).
+//! use with the ECS reduction APIs (e.g. [`crate::ECSReference::reduce_abstraction`]
+//! and [`crate::ECSReference::reduce_read`]).
 //!
 //! ## Purpose
 //! Reductions compute **summary statistics** over large populations of entities
@@ -81,7 +81,6 @@
 /// * Population size
 /// * Cardinality of a query
 /// * Participation counts
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Count(pub u64);
 
@@ -96,7 +95,6 @@ pub struct Count(pub u64);
 /// * Total wealth
 /// * Aggregate production
 /// * Market volume
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Sum(pub f64);
 
@@ -113,7 +111,6 @@ pub struct Sum(pub f64);
 /// ## Typical use cases
 /// * Price ranges
 /// * Income bounds
-
 #[derive(Clone, Copy, Debug)]
 pub struct MinMax {
     /// Smallest observed value.
@@ -153,7 +150,6 @@ impl Default for MinMax {
 ///   squares and products*.
 /// * Chan, T. F., Golub, G. H., LeVeque, R. J. (1979). *Updating formulae and a
 ///   pairwise algorithm for computing sample variances*.
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Welford {
     /// Number of samples processed.
@@ -192,7 +188,7 @@ impl Welford {
     ///
     /// ## Usage
     /// This method is intended to be used as the `combine` function in
-    /// [`ECSReference::reduce_read`] and [`ECSReference::reduce_abstraction`]:
+    /// [`crate::ECSReference::reduce_read`] and [`crate::ECSReference::reduce_abstraction`]:
     ///
     /// ```text
     /// ecs.reduce_read::<Value, Welford>(

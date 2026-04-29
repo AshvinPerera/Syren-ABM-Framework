@@ -102,8 +102,8 @@ impl BucketBuffer {
 
         // -- 2. Prefix-sum into bucket_starts ---------------------------------
         self.bucket_starts[0] = 0;
-        for k in 0..max {
-            self.bucket_starts[k + 1] = self.bucket_starts[k] + counts[k];
+        for (k, count) in counts.iter().enumerate().take(max) {
+            self.bucket_starts[k + 1] = self.bucket_starts[k] + *count;
         }
 
         // -- 3. Scatter --------------------------------------------------------
@@ -130,7 +130,7 @@ impl BucketBuffer {
 // Iterator
 // -----------------------------------------------------------------------------
 
-/// An iterator over all messages in a single bucket of a [`BucketBuffer`].
+/// An iterator over all messages in a single bucket of a `BucketBuffer`.
 pub struct BucketIter<'a, M> {
     slice: &'a [M],
     index: usize,

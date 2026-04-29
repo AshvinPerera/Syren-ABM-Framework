@@ -130,7 +130,7 @@ pub enum ECSError {
     /// Internal framework invariant violation.
     ///
     /// These indicate bugs in the ECS engine itself, not user-recoverable
-    /// conditions. Each variant of [`InternalViolation`] maps to a specific
+    /// conditions. Each `InternalViolation` variant maps to a specific
     /// invariant that was broken.
     Internal(InternalViolation),
 

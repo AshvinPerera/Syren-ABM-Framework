@@ -30,15 +30,19 @@
 //!
 //! # Errors
 //!
-//! Lock-poisoning - caused by a thread panicking while holding the write lock
-//! - is treated as an unrecoverable internal invariant violation and surfaces
-//! as [`AttributeError::InternalInvariant`].
+//! Lock-poisoning caused by a thread panicking while holding the write lock is
+//! treated as an unrecoverable internal invariant violation and surfaces as
+//! [`AttributeError::InternalInvariant`].
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::engine::error::AttributeError;
 use crate::engine::error::AttributeInvariantViolation;
 use crate::engine::storage::type_erased_attribute::TypeErasedAttribute;
+
+type AttributeReadGuard<'a> = RwLockReadGuard<'a, Box<dyn TypeErasedAttribute>>;
+type AttributeWriteGuard<'a> = RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>;
+type TryAttributeReadError<'a> = std::sync::TryLockError<AttributeReadGuard<'a>>;
 
 /// A thread-safe wrapper around a type-erased attribute.
 #[derive(Clone)]
@@ -56,9 +60,7 @@ impl LockedAttribute {
 
     /// Returns a read guard to the inner attribute.
     #[inline]
-    pub fn read(
-        &self,
-    ) -> Result<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
+    pub fn read(&self) -> Result<AttributeReadGuard<'_>, AttributeError> {
         self.inner.read().map_err(|_| {
             AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned)
         })
@@ -66,9 +68,7 @@ impl LockedAttribute {
 
     /// Returns a write guard to the inner attribute.
     #[inline]
-    pub fn write(
-        &self,
-    ) -> Result<RwLockWriteGuard<'_, Box<dyn TypeErasedAttribute>>, AttributeError> {
+    pub fn write(&self) -> Result<AttributeWriteGuard<'_>, AttributeError> {
         self.inner.write().map_err(|_| {
             AttributeError::InternalInvariant(AttributeInvariantViolation::LockPoisoned)
         })
@@ -99,12 +99,7 @@ impl LockedAttribute {
     /// lock, preventing same-thread deadlocks when called from inside a
     /// `for_each` callback.
     #[inline]
-    pub fn try_read(
-        &self,
-    ) -> Result<
-        RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>,
-        std::sync::TryLockError<RwLockReadGuard<'_, Box<dyn TypeErasedAttribute>>>,
-    > {
+    pub fn try_read(&self) -> Result<AttributeReadGuard<'_>, TryAttributeReadError<'_>> {
         self.inner.try_read()
     }
 }

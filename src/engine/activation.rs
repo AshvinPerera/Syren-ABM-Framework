@@ -31,7 +31,7 @@
 
 /// Controls the order in which entities are visited by a system's iteration.
 ///
-/// See the [module-level documentation](self) for a comparison of variants.
+/// See the module-level documentation for a comparison of variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ActivationOrder {
     /// Entities are processed in natural archetype/chunk storage order.
@@ -75,11 +75,11 @@ impl Default for ActivationContext {
 
 thread_local! {
     static CURRENT_ACTIVATION: std::cell::Cell<ActivationContext> =
-        std::cell::Cell::new(ActivationContext {
+        const { std::cell::Cell::new(ActivationContext {
             order: ActivationOrder::Sequential,
             seed: 0,
             system_id: 0,
-        });
+        }) };
 }
 
 pub(crate) fn current_activation_context() -> ActivationContext {

@@ -1,4 +1,4 @@
-//! Component registry errors and result types.
+﻿//! Component registry errors and result types.
 //!
 //! This module defines [`RegistryError`], the error type returned by the global
 //! component registry and its associated factories, along with the
@@ -27,7 +27,6 @@ use crate::engine::types::ComponentID;
 /// - exceeding the component ID capacity
 /// - missing registrations / factories
 /// - lock poisoning within the registry internals
-
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {

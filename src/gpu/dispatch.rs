@@ -207,7 +207,7 @@ impl FrameworkPipelineCache {
             hash_str(entry_point),
             hash_framework_layout(bindings),
         );
-        if !self.map.contains_key(&key) {
+        self.map.entry(key).or_insert_with(|| {
             let mut entries = Vec::with_capacity(bindings.len());
             for (binding, desc) in bindings.iter().enumerate() {
                 entries.push(wgpu::BindGroupLayoutEntry {
@@ -254,8 +254,8 @@ impl FrameworkPipelineCache {
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                         cache: None,
                     });
-            self.map.insert(key, (pipeline, bgl));
-        }
+            (pipeline, bgl)
+        });
 
         let (pipeline, bgl) = self.map.get(&key).unwrap();
         Ok((pipeline, bgl))
@@ -364,7 +364,7 @@ pub(crate) fn with_boundary_dispatch<R>(
     gpu_resources.ensure_created(&run_time.context)?;
     gpu_resources.upload_dirty(&run_time.context)?;
     let mut dispatch = BoundaryGpuDispatch {
-        runtime: &mut *run_time,
+        runtime: &mut run_time,
     };
     f(&mut dispatch, gpu_resources)
 }
@@ -388,7 +388,7 @@ pub fn sync_pending_to_cpu(
         }
 
         let pending = {
-            let p = data.gpu_world_state().pending_download.clone();
+            let p = data.gpu_world_state().pending_download;
             if is_signature_empty(&p) {
                 return Ok(());
             }
@@ -465,7 +465,7 @@ pub fn execute_gpu_system(
                 &registry,
             )?;
             dispatch_over_archetypes(
-                &mut *run_time,
+                &mut run_time,
                 world_state,
                 system.id(),
                 gpu,
@@ -730,7 +730,7 @@ fn dispatch_over_archetypes(
             }
 
             let workgroup = gpu.workgroup_size().max(1);
-            let groups = (entity_len + workgroup - 1) / workgroup;
+            let groups = entity_len.div_ceil(workgroup);
             pass.dispatch_workgroups(groups, 1, 1);
             archetype_base = archetype_base.saturating_add(entity_len);
         }

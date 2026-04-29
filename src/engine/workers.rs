@@ -83,7 +83,7 @@ mod tests {
             .unwrap();
         let observed: Mutex<HashSet<u32>> = Mutex::new(HashSet::new());
         pool.install(|| {
-            (0..1024usize).into_iter().for_each(|_| {
+            (0..1024usize).for_each(|_| {
                 observed.lock().unwrap().insert(worker_id());
             });
         });

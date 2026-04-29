@@ -12,7 +12,7 @@
 //! The buffer maintains an internal `cpu_dirty` flag that is independent of the
 //! environment's dirty channel set. The flag is set to `true` by
 //! [`mark_cpu_dirty`](EnvUniformBuffer::mark_cpu_dirty), which is called by
-//! [`EnvironmentBoundary::finalise`](super::boundary::EnvironmentBoundary) when
+//! `EnvironmentBoundary::finalise` when
 //! it detects that at least one channel owned by this buffer appears in the
 //! environment's dirty set.
 //!
@@ -21,7 +21,7 @@
 //! written to the GPU buffer, then the flag is cleared.
 //!
 //! The decoupling between the environment dirty set and the `cpu_dirty` flag
-//! ensures that [`EnvironmentBoundary::finalise`] can clear the environment's
+//! ensures that `EnvironmentBoundary::finalise` can clear the environment's
 //! dirty channels immediately (preventing double-marking) without racing with
 //! the GPU upload path, which may execute later in the same tick.
 //!
@@ -31,7 +31,7 @@
 //! [`EnvUniformBufferBuilder::include`] time by querying
 //! [`Environment::channel_of`]. [`EnvUniformBuffer::owns_channel`] performs a
 //! linear scan over the included packers to answer ownership queries from
-//! [`EnvironmentBoundary`](super::boundary::EnvironmentBoundary).
+//! [`crate::environment::EnvironmentBoundary`].
 //!
 //! ### Struct layout
 //!
@@ -42,11 +42,11 @@
 //!
 //! ### Alignment
 //!
-//! [`repack`](EnvUniformBuffer::repack) concatenates field bytes with **no
+//! `EnvUniformBuffer::repack` concatenates field bytes with **no
 //! padding**. WGSL uniform structs may insert implicit padding between fields
 //! depending on their alignment requirements. Callers must either declare fields
 //! in an order that produces matching layout (e.g. largest-alignment fields
-//! first), or use [`EnvUniformBufferBuilder::expect_byte_size`] to catch
+//! first), or use [`EnvUniformBufferBuilder::validate_byte_size`] to catch
 //! mismatches at build time. For most scalar-only environments (`f32`, `u32`),
 //! natural 4-byte alignment matches and no padding is needed.
 //!
@@ -61,8 +61,6 @@
 //!
 //! This entire module is gated behind the `gpu` feature.
 
-#![cfg(feature = "gpu")]
-
 use std::any::Any;
 use std::sync::Arc;
 
@@ -72,6 +70,7 @@ use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::types::ChannelID;
 use crate::gpu::{GPUBindingDesc, GPUContext, GPUResource};
 
+use super::error::{EnvironmentError, EnvironmentResult};
 use super::store::Environment;
 
 // -----------------------------------------------------------------------------
@@ -113,11 +112,13 @@ unsafe impl EnvPod for i8 {}
 
 /// A type-erased closure that reads one environment key and appends its raw
 /// bytes to a `Vec<u8>`.
+type PackerFn = dyn Fn(&Environment, &mut Vec<u8>) -> Result<(), String> + Send + Sync;
+
 struct Packer {
     key: String,
     channel_id: ChannelID,
     byte_size: usize,
-    pack: Box<dyn Fn(&Environment, &mut Vec<u8>) -> Result<(), String> + Send + Sync>,
+    pack: Box<PackerFn>,
 }
 
 impl Packer {
@@ -156,9 +157,9 @@ impl Packer {
 ///
 /// ```text
 /// let buf = EnvUniformBuffer::builder(Arc::clone(&env))
-///     .include::<f32>("interest_rate")
-///     .include::<u32>("world_width")
-///     .expect_byte_size(8)  // optional: catch layout mismatches early
+///     .include::<f32>("interest_rate")?
+///     .include::<u32>("world_width")?
+///     .validate_byte_size(8)?  // optional: catch layout mismatches early
 ///     .build();
 /// ```
 pub struct EnvUniformBuffer {
@@ -280,7 +281,7 @@ impl GPUResource for EnvUniformBuffer {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The GPU buffer has not been created yet (call [`create_gpu`] first).
+    /// - The GPU buffer has not been created yet (call [`GPUResource::create_gpu`] first).
     /// - A tracked key cannot be read from the environment.
     fn upload(&mut self, ctx: &GPUContext) -> ECSResult<()> {
         if !self.cpu_dirty {
@@ -344,7 +345,7 @@ impl EnvUniformBuffer {
     ///
     /// The [`GPUResourceRegistry`](crate::gpu::GPUResourceRegistry) tracks its
     /// own per-resource dirty flag. The owning layer must query this method and
-    /// call [`GPUResourceRegistry::mark_cpu_dirty`] to bridge the two when
+    /// call [`crate::gpu::GPUResourceRegistry::mark_cpu_dirty`] to bridge the two when
     /// integrating the uniform buffer into a registry-based upload pipeline:
     ///
     /// ```text
@@ -380,18 +381,18 @@ impl EnvUniformBufferBuilder {
     /// [`EnvUniformBuffer::owns_channel`] can answer ownership queries without
     /// a string comparison.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `key` is not registered in the environment. This is a build-
-    /// time misconfiguration and is always checked regardless of the `debug`
-    /// profile.
-    pub fn include<T: EnvPod>(mut self, key: impl Into<String>) -> Self {
+    /// Returns [`EnvironmentError::KeyNotFound`] if `key` is not registered in
+    /// the environment.
+    pub fn include<T: EnvPod>(mut self, key: impl Into<String>) -> EnvironmentResult<Self> {
         let key = key.into();
-        let channel_id = self.env.channel_of(&key).unwrap_or_else(|| {
-            panic!("EnvUniformBuffer: key '{key}' is not registered in the environment")
-        });
+        let channel_id = self
+            .env
+            .channel_of(&key)
+            .ok_or_else(|| EnvironmentError::KeyNotFound(key.clone()))?;
         self.packers.push(Packer::new::<T>(key, channel_id));
-        self
+        Ok(self)
     }
 
     /// Asserts that the total packed byte size matches the expected WGSL
@@ -402,27 +403,26 @@ impl EnvUniformBufferBuilder {
     /// WGSL struct at build time, rather than producing silent data corruption
     /// at runtime.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the computed byte size does not match `expected`.
+    /// Returns [`EnvironmentError::UniformLayoutMismatch`] if the computed byte
+    /// size does not match `expected`.
     ///
     /// # Example
     ///
     /// ```text
     /// let buf = EnvUniformBuffer::builder(env)
-    ///     .include::<f32>("rate")   // 4 bytes
-    ///     .include::<u32>("width")  // 4 bytes
-    ///     .expect_byte_size(8)      // catches mismatches early
+    ///     .include::<f32>("rate")?   // 4 bytes
+    ///     .include::<u32>("width")?  // 4 bytes
+    ///     .validate_byte_size(8)?    // catches mismatches early
     ///     .build();
     /// ```
-    pub fn expect_byte_size(self, expected: usize) -> Self {
+    pub fn validate_byte_size(self, expected: usize) -> EnvironmentResult<Self> {
         let actual: usize = self.packers.iter().map(|p| p.byte_size).sum();
-        assert_eq!(
-            actual, expected,
-            "EnvUniformBuffer: packed {actual} bytes but expected {expected}. \
-             Check WGSL struct alignment and field order."
-        );
-        self
+        if actual != expected {
+            return Err(EnvironmentError::UniformLayoutMismatch { expected, actual });
+        }
+        Ok(self)
     }
 
     /// Finalises and returns an [`EnvUniformBuffer`].
@@ -461,7 +461,9 @@ mod tests {
         let env = make_env();
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .include::<u32>("size")
+            .unwrap()
             .build();
         let keys: Vec<&str> = buf.keys().collect();
         assert_eq!(keys, ["rate", "size"]);
@@ -472,30 +474,56 @@ mod tests {
         let env = make_env();
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate") // 4 bytes
+            .unwrap()
             .include::<u32>("size") // 4 bytes
+            .unwrap()
             .build();
         assert_eq!(buf.byte_size(), 8);
     }
 
     #[test]
-    fn expect_byte_size_passes_on_match() {
+    fn validate_byte_size_passes_on_match() {
         let env = make_env();
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .include::<u32>("size")
-            .expect_byte_size(8)
+            .unwrap()
+            .validate_byte_size(8)
+            .unwrap()
             .build();
         assert_eq!(buf.byte_size(), 8);
     }
 
     #[test]
-    #[should_panic(expected = "packed 8 bytes but expected 16")]
-    fn expect_byte_size_panics_on_mismatch() {
+    fn validate_byte_size_reports_mismatch() {
         let env = make_env();
-        EnvUniformBuffer::builder(Arc::clone(&env))
+        let result = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .include::<u32>("size")
-            .expect_byte_size(16);
+            .unwrap()
+            .validate_byte_size(16);
+        match result {
+            Err(err) => assert_eq!(
+                err,
+                EnvironmentError::UniformLayoutMismatch {
+                    expected: 16,
+                    actual: 8,
+                }
+            ),
+            Ok(_) => panic!("expected uniform layout mismatch"),
+        }
+    }
+
+    #[test]
+    fn include_reports_missing_key() {
+        let env = make_env();
+        let result = EnvUniformBuffer::builder(Arc::clone(&env)).include::<f32>("missing");
+        match result {
+            Err(err) => assert_eq!(err, EnvironmentError::KeyNotFound("missing".into())),
+            Ok(_) => panic!("expected missing key error"),
+        }
     }
 
     #[test]
@@ -503,6 +531,7 @@ mod tests {
         let env = make_env();
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .build();
         assert!(!buf.is_cpu_dirty());
     }
@@ -512,6 +541,7 @@ mod tests {
         let env = make_env();
         let mut buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .build();
         assert!(!buf.is_cpu_dirty());
         buf.mark_cpu_dirty();
@@ -526,6 +556,7 @@ mod tests {
 
         let buf = EnvUniformBuffer::builder(Arc::clone(&env))
             .include::<f32>("rate")
+            .unwrap()
             .build();
 
         assert!(buf.owns_channel(id_rate));

@@ -1,4 +1,4 @@
-//! Aggregate error type for component column (attribute) storage operations.
+﻿//! Aggregate error type for component column (attribute) storage operations.
 //!
 //! This module defines [`AttributeError`], a unified error enum that surfaces
 //! precise, low-level failures arising from pushing or writing component data
@@ -117,7 +117,6 @@ impl fmt::Display for AttributeInvariantViolation {
 ///     Ok(())
 /// }
 /// ```
-
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeError {

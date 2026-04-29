@@ -46,6 +46,7 @@ pub trait DynamicBundle {
 }
 
 /// Concrete implementation of a dynamic component bundle.
+#[derive(Default)]
 pub struct Bundle {
     /// Component presence signature
     signature: Signature,
@@ -142,15 +143,6 @@ impl Bundle {
             self.values.push((id, value));
         }
         Ok(())
-    }
-}
-
-impl Default for Bundle {
-    fn default() -> Self {
-        Self {
-            signature: Signature::default(),
-            values: Vec::new(),
-        }
     }
 }
 

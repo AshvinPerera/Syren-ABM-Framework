@@ -1,4 +1,4 @@
-//! GPU resource ownership, registration, and synchronization for the ECS world.
+﻿//! GPU resource ownership, registration, and synchronization for the ECS world.
 //!
 //! This module provides the [`GPUResource`] trait and [`GPUResourceRegistry`], which together
 //! manage the full lifecycle of persistent GPU-side state (buffers, bindable storage) owned
@@ -128,7 +128,6 @@ struct GPUResourceEntry {
 /// * Assigns stable `GPUResourceID`s.
 /// * Tracks CPU to GPU dirtiness and GPU to CPU pending downloads.
 /// * Enforces explicit synchronization.
-
 #[cfg(feature = "gpu")]
 #[derive(Default)]
 pub struct GPUResourceRegistry {

@@ -125,7 +125,7 @@ fn attribute_crosses_chunk_boundary_as_expected() {
 
     // chunk 1 has only 1 initialized element; request length=1
     let (_p1, b1) = attr.chunk_bytes(1, 1).unwrap();
-    assert_eq!(b1, 1 * size_of::<u64>());
+    assert_eq!(b1, size_of::<u64>());
 }
 
 #[test]

@@ -126,7 +126,7 @@ pub struct AgentTemplateId(pub u32);
 /// word (8 bytes) to every signature, so increases should be made deliberately.
 pub const COMPONENT_CAP: usize = 256;
 /// Number of `u64` words required to represent a full component signature.
-pub const SIGNATURE_SIZE: usize = (COMPONENT_CAP + 63) / 64;
+pub const SIGNATURE_SIZE: usize = COMPONENT_CAP.div_ceil(64);
 
 /// Opaque identifier for a non-component scheduling channel.
 ///

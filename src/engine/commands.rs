@@ -1,4 +1,4 @@
-//! # Commands
+﻿//! # Commands
 //!
 //! This module defines deferred commands used to mutate the ECS world.
 //!
@@ -194,7 +194,6 @@ impl CommandEvents {
 /// - Commands must be applied in the order they are issued.
 /// - Entity and component identifiers must be valid at execution time.
 /// - Component values must match the registered component type.
-
 pub enum Command {
     /// Spawns a new entity into a specific archetype.
     Spawn {
@@ -204,7 +203,7 @@ pub enum Command {
 
     /// Spawns a new entity and records a logical producer tag.
     ///
-    /// The tag is returned in [`SpawnEvent`] after the command is applied. The
+    /// The tag is returned in `SpawnEvent` after the command is applied. The
     /// core ECS does not interpret it; model-level code may use it to
     /// dispatch lifecycle hooks.
     SpawnTagged {
@@ -235,7 +234,7 @@ pub enum Command {
 
     /// Despawns an existing entity and records a logical producer tag.
     ///
-    /// The tag is returned in [`DespawnEvent`] after the command is applied.
+    /// The tag is returned in `DespawnEvent` after the command is applied.
     /// The core ECS does not interpret it; model-level code may use it to
     /// dispatch lifecycle hooks.
     DespawnTagged {

@@ -245,7 +245,7 @@ impl ECSManager {
         self.begin_tick()?;
 
         let world = self.world_ref();
-        scheduler.run(world).map_err(ECSError::from)?;
+        scheduler.run(world)?;
         world.clear_borrows();
         let _spawned = self.apply_deferred_commands()?;
 
@@ -263,6 +263,9 @@ impl ECSManager {
             .map_err(|failure| failure.error)
     }
 
+    // CommandDrainError intentionally carries committed lifecycle events so
+    // model code can flush hooks before surfacing the original drain failure.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn apply_deferred_commands_with_events(
         &self,
     ) -> Result<CommandEvents, CommandDrainError> {
@@ -529,6 +532,7 @@ impl ECSManager {
     /// The caller must hold the exclusive phase lock. This is enforced at
     /// compile time by requiring a `&PhaseWrite<'_>` token.
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn data_mut_unchecked(&self, _phase: &PhaseWrite<'_>) -> &mut ECSData {
         unsafe { &mut *self.inner.get() }
     }

@@ -1,4 +1,4 @@
-//! # GPU Compute Pipeline Cache
+﻿//! # GPU Compute Pipeline Cache
 //!
 //! This module provides a **compute pipeline cache** for the GPU execution backend.
 //! It is responsible for creating, storing, and reusing `wgpu::ComputePipeline`
@@ -56,6 +56,18 @@ use crate::engine::types::SystemID;
 use crate::gpu::GPUBindingDesc;
 use crate::gpu::GPUContext;
 
+type PipelineKey = (SystemID, u64, u64, usize, usize, usize, u64);
+type PipelineEntry = (
+    wgpu::ComputePipeline,
+    wgpu::BindGroupLayout,
+    Option<wgpu::BindGroupLayout>,
+);
+type PipelineRefs<'a> = (
+    &'a wgpu::ComputePipeline,
+    &'a wgpu::BindGroupLayout,
+    Option<&'a wgpu::BindGroupLayout>,
+);
+
 #[inline]
 pub(crate) fn hash_str(s: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -88,17 +100,9 @@ fn hash_resource_layout(descriptions: &[GPUBindingDesc]) -> u64 {
 /// ## Thread safety
 /// This type is not thread-safe by itself and must be externally synchronized
 /// by the GPU runtime.
-
 #[derive(Debug)]
 pub struct PipelineCache {
-    map: HashMap<
-        (SystemID, u64, u64, usize, usize, usize, u64),
-        (
-            wgpu::ComputePipeline,
-            wgpu::BindGroupLayout,
-            Option<wgpu::BindGroupLayout>,
-        ),
-    >,
+    map: HashMap<PipelineKey, PipelineEntry>,
 }
 
 impl PipelineCache {
@@ -127,7 +131,9 @@ impl PipelineCache {
     /// * invalid WGSL source
     /// * binding layout mismatch
     /// * GPU driver or device errors
-
+    // The cache key is intentionally supplied as separate dispatch facts at
+    // call sites; bundling them obscures the shader/resource identity contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_create(
         &mut self,
         context: &GPUContext,
@@ -137,11 +143,7 @@ impl PipelineCache {
         read_count: usize,
         write_count: usize,
         resource_layout: &[GPUBindingDesc],
-    ) -> ECSResult<(
-        &wgpu::ComputePipeline,
-        &wgpu::BindGroupLayout,
-        Option<&wgpu::BindGroupLayout>,
-    )> {
+    ) -> ECSResult<PipelineRefs<'_>> {
         let shader_hash = hash_str(shader_wgsl);
         let entry_hash = hash_str(entry_point);
 
@@ -158,7 +160,7 @@ impl PipelineCache {
             group1_sig,
         );
 
-        if !self.map.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.map.entry(key) {
             let (pipeline, bgl0, bgl1) = create_pipeline(
                 context,
                 shader_wgsl,
@@ -169,7 +171,7 @@ impl PipelineCache {
             )
             .map_err(|e| ECSError::from(ExecutionError::GpuDispatchFailed { message: e.into() }))?;
 
-            self.map.insert(key, (pipeline, bgl0, bgl1));
+            e.insert((pipeline, bgl0, bgl1));
         }
 
         let (pipeline, bgl0, bgl1) = self.map.get(&key).unwrap();
@@ -191,7 +193,6 @@ impl PipelineCache {
 ///
 /// ## Errors
 /// Returns an error string if pipeline creation fails.
-
 fn create_pipeline(
     context: &GPUContext,
     shader_wgsl: &'static str,

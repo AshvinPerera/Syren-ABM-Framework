@@ -1,4 +1,4 @@
-//! Entity migration between archetypes.
+﻿//! Entity migration between archetypes.
 //!
 //! This module implements [`Archetype::move_row_to_archetype`], the single
 //! production migration surface used when an entity's signature changes - i.e.
@@ -54,24 +54,28 @@ use crate::engine::entity::{Entity, EntityLocation, EntityShards};
 use crate::engine::component::iter_bits_from_words;
 
 use crate::engine::error::{ECSError, ECSResult, InternalViolation, MoveError};
+use crate::engine::storage::{MovedStoragePosition, StoragePosition};
 
 use super::core::Archetype;
 
+#[cfg(test)]
+type MoveRowOutcome = (StoragePosition, MovedStoragePosition);
+
 struct SharedMoveRecord {
     component_id: ComponentID,
-    destination_position: (ChunkID, RowID),
-    source_moved_from: Option<(ChunkID, RowID)>,
+    destination_position: StoragePosition,
+    source_moved_from: MovedStoragePosition,
 }
 
 struct DestinationPushRecord {
     component_id: ComponentID,
-    destination_position: (ChunkID, RowID),
+    destination_position: StoragePosition,
 }
 
 struct SourceRemovalRecord {
     component_id: ComponentID,
     value: Option<Box<dyn Any>>,
-    source_moved_from: Option<(ChunkID, RowID)>,
+    source_moved_from: MovedStoragePosition,
 }
 
 impl Archetype {
@@ -113,17 +117,16 @@ impl Archetype {
     /// (c) Within each archetype the sorted `components` vec naturally
     ///     ensures ascending `ComponentID` order when iterated, matching
     ///     the global lock-ordering contract.
-
     #[cfg(test)]
     pub fn move_row_across_shared_components(
         &mut self,
         destination: &mut Archetype,
         source_position: (ChunkID, RowID),
         shared_components: Vec<ComponentID>,
-    ) -> Result<((ChunkID, RowID), Option<(ChunkID, RowID)>), MoveError> {
+    ) -> Result<MoveRowOutcome, MoveError> {
         let (source_chunk, source_row) = source_position;
-        let mut destination_position: Option<(ChunkID, RowID)> = None;
-        let mut swap_information: Option<(ChunkID, RowID)> = None;
+        let mut destination_position: Option<StoragePosition> = None;
+        let mut swap_information: MovedStoragePosition = None;
 
         for component_id in shared_components {
             if !self.signature.has(component_id) || !destination.signature.has(component_id) {
@@ -189,7 +192,6 @@ impl Archetype {
     /// - `InconsistentStorage` if a required component column is missing.
     /// - `PushFailed` if backend storage insertion fails.
     /// - `RowMisalignment` if component columns disagree on row placement.
-
     #[cfg(test)]
     pub fn add_row_in_components_at_destination(
         &mut self,
@@ -245,7 +247,6 @@ impl Archetype {
     /// - `InconsistentStorage` if a component column is missing.
     /// - `SwapRemoveError` if storage removal fails.
     /// - `InconsistentSwapInfo` if component columns disagree on swap behavior.
-
     #[cfg(test)]
     pub fn remove_row_in_components_at_source(
         &mut self,
@@ -299,7 +300,6 @@ impl Archetype {
     ///
     /// ## Errors
     /// - `MetadataFailure` if internal entity tracking is inconsistent.
-
     pub fn update_entity_on_row_move(
         &mut self,
         destination: &mut Archetype,
@@ -460,7 +460,6 @@ impl Archetype {
     /// Component moves are transactional at the storage level. If any storage
     /// phase fails before metadata commit, every moved or appended value is
     /// rolled back before the error is returned.
-
     pub fn move_row_to_archetype(
         &mut self,
         destination: &mut Archetype,

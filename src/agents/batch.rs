@@ -21,7 +21,11 @@ pub struct AgentBatch<'t> {
 
 impl<'t> AgentBatch<'t> {
     /// Creates a new batch builder.
-    pub fn new(template: &'t AgentTemplate, template_id: AgentTemplateId, count: usize) -> Self {
+    pub(crate) fn new(
+        template: &'t AgentTemplate,
+        template_id: AgentTemplateId,
+        count: usize,
+    ) -> Self {
         Self {
             template,
             template_id,
@@ -36,7 +40,12 @@ impl<'t> AgentBatch<'t> {
         component_id: ComponentID,
         values: Vec<T>,
     ) -> AgentResult<Self> {
-        if !self.template.signature.has(component_id) {
+        if !self
+            .template
+            .signature
+            .try_has(component_id)
+            .map_err(|_| AgentError::invalid_component_id(component_id))?
+        {
             return Err(AgentError::MissingComponent(component_id));
         }
         if values.len() != self.count {
@@ -61,7 +70,12 @@ impl<'t> AgentBatch<'t> {
         component_id: ComponentID,
         values: Vec<Box<dyn Any + Send>>,
     ) -> AgentResult<Self> {
-        if !self.template.signature.has(component_id) {
+        if !self
+            .template
+            .signature
+            .try_has(component_id)
+            .map_err(|_| AgentError::invalid_component_id(component_id))?
+        {
             return Err(AgentError::MissingComponent(component_id));
         }
         if values.len() != self.count {
@@ -102,5 +116,35 @@ impl<'t> AgentBatch<'t> {
             batch: self.into_spawn_batch(),
             template_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::registry::AgentRegistry;
+
+    #[test]
+    fn set_column_rejects_invalid_component_id() {
+        let mut registry = AgentRegistry::new();
+        registry
+            .register(
+                AgentTemplate::builder("Sheep")
+                    .with_component::<u32>(0)
+                    .unwrap()
+                    .build(),
+            )
+            .unwrap();
+        let template = registry.get("Sheep").unwrap();
+        let invalid = crate::engine::types::COMPONENT_CAP as ComponentID;
+        let result = template
+            .batch(1)
+            .unwrap()
+            .set_column::<u32>(invalid, vec![1]);
+
+        match result {
+            Err(err) => assert_eq!(err, AgentError::invalid_component_id(invalid)),
+            Ok(_) => panic!("expected invalid component id error"),
+        }
     }
 }

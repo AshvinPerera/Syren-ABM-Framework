@@ -10,7 +10,7 @@
 //! * optional lifecycle [`SpawnHook`] and [`DespawnHook`] callbacks.
 //!
 //! Templates are constructed with [`AgentTemplateBuilder`] (via
-//! [`AgentTemplate::builder`]) and registered in an [`AgentRegistry`] before
+//! [`AgentTemplate::builder`]) and registered in an [`crate::agents::AgentRegistry`] before
 //! simulation start. After registration the template is treated as immutable.
 //!
 //! ## No new storage
@@ -50,7 +50,7 @@ pub type DefaultFactory = Box<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>;
 ///
 /// * Every [`ComponentID`] set in `signature` has a corresponding entry in
 ///   `defaults`.
-/// * `name` is unique within an [`AgentRegistry`] (enforced by the registry).
+/// * `name` is unique within an [`crate::agents::AgentRegistry`] (enforced by the registry).
 pub struct AgentTemplate {
     pub(crate) id: Option<AgentTemplateId>,
     pub(crate) name: String,
@@ -92,8 +92,17 @@ impl AgentTemplate {
     }
 
     /// Returns an [`AgentBatch`](super::batch::AgentBatch) seeded with this template.
-    pub fn batch(&self, count: usize) -> super::batch::AgentBatch<'_> {
-        super::batch::AgentBatch::new(self, self.id.unwrap_or(AgentTemplateId(u32::MAX)), count)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::UnregisteredTemplate`] if this template has not
+    /// been registered and therefore has no stable template id for lifecycle
+    /// hook routing.
+    pub fn batch(&self, count: usize) -> AgentResult<super::batch::AgentBatch<'_>> {
+        let id = self
+            .id
+            .ok_or_else(|| AgentError::UnregisteredTemplate(self.name.clone()))?;
+        Ok(super::batch::AgentBatch::new(self, id, count))
     }
 
     /// Enqueues a tagged despawn for an entity that belongs to this template.
@@ -123,8 +132,10 @@ impl AgentTemplate {
 
     /// Returns `true` if `component_id` is part of this template's signature.
     #[inline]
-    pub fn has_component(&self, component_id: ComponentID) -> bool {
-        self.signature.has(component_id)
+    pub fn has_component(&self, component_id: ComponentID) -> AgentResult<bool> {
+        self.signature
+            .try_has(component_id)
+            .map_err(|_| AgentError::invalid_component_id(component_id))
     }
 
     /// Returns the spawn hook, if one was registered.
@@ -202,10 +213,16 @@ impl AgentTemplateBuilder {
     where
         T: Any + Default + Send + 'static,
     {
-        if self.signature.has(id) {
+        if self
+            .signature
+            .try_has(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?
+        {
             return Err(AgentError::DuplicateComponent(id));
         }
-        self.signature.set(id);
+        self.signature
+            .try_set(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?;
         self.defaults.insert(
             id,
             Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>),
@@ -227,10 +244,16 @@ impl AgentTemplateBuilder {
         id: ComponentID,
         factory: DefaultFactory,
     ) -> AgentResult<Self> {
-        if self.signature.has(id) {
+        if self
+            .signature
+            .try_has(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?
+        {
             return Err(AgentError::DuplicateComponent(id));
         }
-        self.signature.set(id);
+        self.signature
+            .try_set(id)
+            .map_err(|_| AgentError::invalid_component_id(id))?;
         self.defaults.insert(id, factory);
         Ok(self)
     }
@@ -314,9 +337,9 @@ mod tests {
             .build();
 
         assert_eq!(tmpl.name(), "Sheep");
-        assert!(tmpl.has_component(0));
-        assert!(tmpl.has_component(1));
-        assert!(!tmpl.has_component(2));
+        assert!(tmpl.has_component(0).unwrap());
+        assert!(tmpl.has_component(1).unwrap());
+        assert!(!tmpl.has_component(2).unwrap());
         assert_eq!(tmpl.defaults.len(), 2);
     }
 
@@ -349,7 +372,7 @@ mod tests {
             )
             .unwrap()
             .build();
-        assert!(tmpl.has_component(7));
+        assert!(tmpl.has_component(7).unwrap());
         let boxed = (tmpl.defaults[&7])();
         let h = boxed.downcast::<Health>().unwrap();
         assert!((h.0 - 42.0).abs() < f32::EPSILON);
@@ -363,5 +386,29 @@ mod tests {
             .build();
         // Just check it constructs without panicking.
         let _ = tmpl.spawner();
+    }
+
+    #[test]
+    fn batch_requires_registered_template_id() {
+        let tmpl = AgentTemplate::builder("Fox").build();
+        match tmpl.batch(4) {
+            Err(err) => assert_eq!(err, AgentError::UnregisteredTemplate("Fox".into())),
+            Ok(_) => panic!("expected unregistered template error"),
+        }
+    }
+
+    #[test]
+    fn invalid_component_id_returns_error() {
+        let invalid = crate::engine::types::COMPONENT_CAP as ComponentID;
+        let err = AgentTemplate::builder("Fox")
+            .with_component::<u32>(invalid)
+            .unwrap_err();
+        assert_eq!(err, AgentError::invalid_component_id(invalid));
+
+        let tmpl = AgentTemplate::builder("Fox").build();
+        assert_eq!(
+            tmpl.has_component(invalid).unwrap_err(),
+            AgentError::invalid_component_id(invalid)
+        );
     }
 }

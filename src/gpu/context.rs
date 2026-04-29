@@ -1,4 +1,4 @@
-//! # GPU Context
+﻿//! # GPU Context
 //!
 //! This module provides a minimal, centralized abstraction for initializing and
 //! owning the GPU device state used by the ECS GPU backend.
@@ -63,7 +63,6 @@ use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 /// ## Thread safety
 /// Both fields are safe to share across threads. The ECS runtime is responsible
 /// for ensuring correct usage ordering and synchronization.
-
 #[derive(Debug)]
 pub struct GPUContext {
     /// The GPU device used for GPU path execution
@@ -98,7 +97,6 @@ impl GPUContext {
     /// * no compatible adapter is found,
     /// * device creation fails,
     /// * or the GPU backend cannot be initialized.
-
     pub fn new() -> ECSResult<Self> {
         let instance = Instance::default();
 

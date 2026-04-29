@@ -1,4 +1,4 @@
-//! Raw byte slice reinterpretation utilities.
+﻿//! Raw byte slice reinterpretation utilities.
 //!
 //! This module provides two `unsafe` helper functions - [`cast_slice`] and
 //! [`cast_slice_mut`] - for reinterpreting a raw byte pointer and length as a
@@ -45,7 +45,6 @@ use std::slice;
 /// - `bytes` must be a multiple of `size_of::<T>()`.
 /// - The memory region must contain fully initialized `T` values.
 /// - The returned slice must not outlive the backing storage.
-
 #[inline]
 pub unsafe fn cast_slice<'a, T>(pointer: *const u8, bytes: usize) -> &'a [T] {
     let size = size_of::<T>();
@@ -72,7 +71,6 @@ pub unsafe fn cast_slice<'a, T>(pointer: *const u8, bytes: usize) -> &'a [T] {
 /// - `bytes` must be a multiple of `size_of::<T>()`.
 /// - The memory region must contain fully initialized `T` values.
 /// - No aliasing mutable references may exist.
-
 #[inline]
 pub unsafe fn cast_slice_mut<'a, T>(pointer: *mut u8, bytes: usize) -> &'a mut [T] {
     let size = size_of::<T>();

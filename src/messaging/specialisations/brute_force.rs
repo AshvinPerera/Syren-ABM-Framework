@@ -47,7 +47,7 @@ impl BruteForceBuffer {
 // Iterator
 // -----------------------------------------------------------------------------
 
-/// An iterator over all messages in a [`BruteForceBuffer`].
+/// An iterator over all messages in a `BruteForceBuffer`.
 ///
 /// Produced by [`MessageBufferSet::brute_force`](crate::messaging::MessageBufferSet::brute_force).
 pub struct BruteForceIter<'a, M> {

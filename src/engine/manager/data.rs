@@ -353,11 +353,11 @@ impl ECSData {
             .into());
         }
 
-        let mut new_signature = self.archetypes[source_id as usize].signature().clone();
+        let mut new_signature = *self.archetypes[source_id as usize].signature();
         new_signature.try_set(added_component_id)?;
 
         let destination_id = self.get_or_create_archetype(&new_signature)?;
-        let source_sig = self.archetypes[source_id as usize].signature().clone();
+        let source_sig = *self.archetypes[source_id as usize].signature();
         let shards = &self.shards;
 
         let (source, destination) =
@@ -434,16 +434,16 @@ impl ECSData {
             return Ok(());
         }
 
-        let mut new_signature = self.archetypes[source_id as usize].signature().clone();
+        let mut new_signature = *self.archetypes[source_id as usize].signature();
         new_signature.try_clear(removed_component_id)?;
 
         if new_signature.components.iter().all(|&bits| bits == 0) {
-            self.archetypes[source_id as usize].despawn_on(&mut self.shards, entity)?;
+            self.archetypes[source_id as usize].despawn_on(&self.shards, entity)?;
             return Ok(());
         }
 
         let destination_id = self.get_or_create_archetype(&new_signature)?;
-        let source_sig = self.archetypes[source_id as usize].signature().clone();
+        let source_sig = *self.archetypes[source_id as usize].signature();
         let shards = &self.shards;
 
         let (source_arch, dest_arch) =
@@ -567,6 +567,7 @@ impl ECSData {
     ///
     /// On error, commands that were never attempted are returned so the manager
     /// can preserve their relative order in the deferred queue.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn apply_deferred_commands_partial(
         &mut self,
         commands: Vec<Command>,
@@ -594,7 +595,7 @@ impl ECSData {
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
                     archetype
-                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .spawn_on(&self.shards, shard_id, bundle)
                         .map(|entity| {
                             events.spawned.push(SpawnEvent::untagged(entity));
                         })
@@ -616,7 +617,7 @@ impl ECSData {
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
                     archetype
-                        .spawn_on(&mut self.shards, shard_id, bundle)
+                        .spawn_on(&self.shards, shard_id, bundle)
                         .map(|entity| {
                             events.spawned.push(SpawnEvent::tagged(entity, tag));
                         })
@@ -669,7 +670,7 @@ impl ECSData {
 
                         let shard_id = self.pick_spawn_shard();
                         let archetype = &mut self.archetypes[archetype_id as usize];
-                        match archetype.spawn_on(&mut self.shards, shard_id, bundle) {
+                        match archetype.spawn_on(&self.shards, shard_id, bundle) {
                             Ok(entity) => {
                                 events
                                     .spawned
@@ -703,7 +704,7 @@ impl ECSData {
                     match loc {
                         Ok(loc) => {
                             let archetype = &mut self.archetypes[loc.archetype as usize];
-                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                            archetype.despawn_on(&self.shards, entity).map(|()| {
                                 events.despawned.push(DespawnEvent::untagged(entity));
                             })
                         }
@@ -722,7 +723,7 @@ impl ECSData {
                     match loc {
                         Ok(loc) => {
                             let archetype = &mut self.archetypes[loc.archetype as usize];
-                            archetype.despawn_on(&mut self.shards, entity).map(|()| {
+                            archetype.despawn_on(&self.shards, entity).map(|()| {
                                 events.despawned.push(DespawnEvent::tagged(entity, tag));
                             })
                         }
@@ -746,7 +747,7 @@ impl ECSData {
                         match loc {
                             Ok(loc) => {
                                 let archetype = &mut self.archetypes[loc.archetype as usize];
-                                if let Err(error) = archetype.despawn_on(&mut self.shards, entity) {
+                                if let Err(error) = archetype.despawn_on(&self.shards, entity) {
                                     return Err(CommandDrainFailure {
                                         error,
                                         unapplied: iter.collect(),

@@ -1,4 +1,4 @@
-//! Archetype storage and query-matching primitives for the ECS engine.
+﻿//! Archetype storage and query-matching primitives for the ECS engine.
 //!
 //! An [`Archetype`] groups entities that share an identical component
 //! [`Signature`]. Component data is stored column-major in chunked, densely
@@ -11,6 +11,7 @@
 //!   position maps) guarded by its own `RwLock`.
 //! - [`Archetype`] - owns the component columns and exposes spawn, move, and
 //!   query operations.
+//!
 //! Query matching returns cached archetype IDs from `ECSData`; chunk lengths
 //! stay live and are read from each archetype during iteration.
 //!
@@ -92,7 +93,6 @@ pub(super) struct ArchetypeMeta {
 /// the metadata lock, and always in ascending `ComponentID` order.
 /// The sorted `components` vec naturally enforces ascending order when
 /// iterating, which simplifies lock-ordering compliance.
-
 pub struct Archetype {
     pub(super) archetype_id: ArchetypeID,
 
@@ -125,7 +125,6 @@ impl Archetype {
     /// ## Invariants
     /// The archetype contains no entities upon creation.
     /// The `components` vec is sorted by `ComponentID`.
-
     pub fn new(
         archetype_id: ArchetypeID,
         signature: Signature,
@@ -160,7 +159,6 @@ impl Archetype {
     ///
     /// ## Notes
     /// This reflects logical count only; physical chunk storage may contain unused rows.
-
     pub fn length(&self) -> ECSResult<usize> {
         Ok(self
             .meta
@@ -173,7 +171,6 @@ impl Archetype {
     ///
     /// ## Notes
     /// This value is stable for the lifetime of the archetype.
-
     pub fn archetype_id(&self) -> ArchetypeID {
         self.archetype_id
     }
@@ -182,7 +179,6 @@ impl Archetype {
     ///
     /// ## Notes
     /// Used by query and filtering logic.
-
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
@@ -191,7 +187,6 @@ impl Archetype {
     ///
     /// ## Notes
     /// This performs a subset check using signature bits.
-
     pub fn matches_all(&self, need: &Signature) -> bool {
         self.signature.contains_all(need)
     }
@@ -200,7 +195,6 @@ impl Archetype {
     ///
     /// ## Notes
     /// This checks the signature only; does not inspect the attribute buffer.
-
     #[inline]
     pub fn has(&self, component_id: ComponentID) -> bool {
         self.signature.has(component_id)
@@ -214,7 +208,6 @@ impl Archetype {
     /// ## Invariants
     /// - Each added chunk contains exactly `CHUNK_CAP` rows.
     /// - Does not allocate component data; only entity metadata.
-
     pub(super) fn ensure_capacity(meta: &mut ArchetypeMeta, chunk_count: usize) {
         while meta.entity_positions.len() < chunk_count {
             meta.entity_positions.push(vec![None; CHUNK_CAP]);
@@ -313,7 +306,6 @@ impl Archetype {
     /// ## Behaviour
     /// - Returns `0` if no entities exist.
     /// - Otherwise computes `(length - 1) / CHUNK_CAP + 1`.
-
     pub fn chunk_count(&self) -> ECSResult<usize> {
         let len = self.length()?;
         if len == 0 {
@@ -332,7 +324,6 @@ impl Archetype {
     ///
     /// ## Invariants
     /// Must reflect row count across all component attributes.
-
     pub fn chunk_valid_length(&self, chunk_index: usize) -> ECSResult<usize> {
         let max_chunk = self.chunk_count()?.saturating_sub(1);
         if chunk_index > max_chunk {

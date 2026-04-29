@@ -2,7 +2,7 @@
 //!
 //! ## Design
 //!
-//! [`AgentRegistry`] is owned by the model (not by [`ECSManager`]). It stores
+//! [`AgentRegistry`] is owned by the model (not by [`crate::ECSManager`]). It stores
 //! one [`AgentTemplate`] per agent class, keyed by name. It is sealed before
 //! simulation start to prevent accidental runtime registration.
 //!
@@ -16,7 +16,7 @@
 //! `AgentRegistry` is **not** `Sync` and is intended for single-threaded
 //! ownership by the model. Do not share across threads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::engine::manager::ECSReference;
 use crate::{AgentTemplateId, Entity};
@@ -193,7 +193,8 @@ impl AgentRegistry {
         &mut self,
         template_id: AgentTemplateId,
         entities: Vec<Entity>,
-    ) {
+    ) -> AgentResult<()> {
+        self.get_by_id(template_id)?;
         for entity in &entities {
             self.template_by_entity.insert(*entity, template_id);
         }
@@ -202,18 +203,26 @@ impl AgentRegistry {
             .or_default()
             .extend(entities.iter().copied());
         self.pending_spawn_batch_hooks.push((template_id, entities));
+        Ok(())
     }
 
     /// Enqueues per-agent spawn hooks for an already-indexed template-id batch.
-    pub fn enqueue_spawn_hooks_by_id(&mut self, template_id: AgentTemplateId, entities: &[Entity]) {
-        if let Some(name) = self.names_by_id.get(template_id.0 as usize) {
-            self.pending_spawn_hooks.extend(
-                entities
-                    .iter()
-                    .copied()
-                    .map(|entity| (name.clone(), entity)),
-            );
-        }
+    pub fn enqueue_spawn_hooks_by_id(
+        &mut self,
+        template_id: AgentTemplateId,
+        entities: &[Entity],
+    ) -> AgentResult<()> {
+        let name = self
+            .names_by_id
+            .get(template_id.0 as usize)
+            .ok_or_else(|| AgentError::TemplateNotFound(format!("#{}", template_id.0)))?;
+        self.pending_spawn_hooks.extend(
+            entities
+                .iter()
+                .copied()
+                .map(|entity| (name.clone(), entity)),
+        );
+        Ok(())
     }
 
     /// Enqueues a pending despawn-hook invocation.
@@ -236,15 +245,18 @@ impl AgentRegistry {
         &mut self,
         template_id: AgentTemplateId,
         entities: Vec<Entity>,
-    ) {
+    ) -> AgentResult<()> {
+        self.get_by_id(template_id)?;
         for entity in &entities {
             self.template_by_entity.remove(entity);
         }
         if let Some(live) = self.entities_by_template.get_mut(&template_id) {
-            live.retain(|entity| !entities.contains(entity));
+            let despawned: HashSet<Entity> = entities.iter().copied().collect();
+            live.retain(|entity| !despawned.contains(entity));
         }
         self.pending_despawn_batch_hooks
             .push((template_id, entities));
+        Ok(())
     }
 
     /// Enqueues per-agent despawn hooks for an already-indexed template-id batch.
@@ -252,15 +264,18 @@ impl AgentRegistry {
         &mut self,
         template_id: AgentTemplateId,
         entities: &[Entity],
-    ) {
-        if let Some(name) = self.names_by_id.get(template_id.0 as usize) {
-            self.pending_despawn_hooks.extend(
-                entities
-                    .iter()
-                    .copied()
-                    .map(|entity| (name.clone(), entity)),
-            );
-        }
+    ) -> AgentResult<()> {
+        let name = self
+            .names_by_id
+            .get(template_id.0 as usize)
+            .ok_or_else(|| AgentError::TemplateNotFound(format!("#{}", template_id.0)))?;
+        self.pending_despawn_hooks.extend(
+            entities
+                .iter()
+                .copied()
+                .map(|entity| (name.clone(), entity)),
+        );
+        Ok(())
     }
 
     /// Invokes all pending `on_spawn` hooks and clears the queue.
@@ -418,5 +433,38 @@ mod tests {
         // can verify the queue is drained by taking it manually.
         let _ = std::mem::take(&mut reg.pending_spawn_hooks);
         assert!(reg.pending_spawn_hooks.is_empty());
+    }
+
+    #[test]
+    fn batch_enqueue_rejects_unknown_template_without_mutating_indexes() {
+        let mut reg = AgentRegistry::new();
+        let entity = Entity::from_raw(1);
+        let invalid = AgentTemplateId(99);
+
+        assert_eq!(
+            reg.enqueue_spawn_batch_hook(invalid, vec![entity])
+                .unwrap_err(),
+            AgentError::TemplateNotFound("#99".into())
+        );
+        assert!(reg.entity_template(entity).is_none());
+        assert!(reg.entities(invalid).is_empty());
+        assert!(reg.pending_spawn_batch_hooks.is_empty());
+    }
+
+    #[test]
+    fn batch_despawn_removes_entities_with_set_lookup() {
+        let mut reg = AgentRegistry::new();
+        reg.register(make_template("Sheep")).unwrap();
+        let template_id = reg.id("Sheep").unwrap();
+        let live: Vec<Entity> = (1..=5).map(Entity::from_raw).collect();
+        reg.enqueue_spawn_batch_hook(template_id, live.clone())
+            .unwrap();
+
+        reg.enqueue_despawn_batch_hook(template_id, vec![live[1], live[3], live[1]])
+            .unwrap();
+
+        assert_eq!(reg.entities(template_id), &[live[0], live[2], live[4]]);
+        assert!(reg.entity_template(live[1]).is_none());
+        assert!(reg.entity_template(live[3]).is_none());
     }
 }

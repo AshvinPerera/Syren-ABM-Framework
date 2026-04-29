@@ -27,17 +27,12 @@ use crate::engine::types::GPUResourceID;
 #[cfg(feature = "gpu")]
 use crate::gpu;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum StageType {
     Boundary,
+    #[default]
     Cpu,
     Gpu,
-}
-
-impl Default for StageType {
-    fn default() -> Self {
-        StageType::Cpu
-    }
 }
 
 /// A logical execution stage used by [`Scheduler`] during planning.
@@ -559,7 +554,7 @@ impl Scheduler {
 
         match max_predecessor_stage {
             None => true,
-            Some(max_stage) => last_boundary.map_or(false, |boundary| boundary > max_stage),
+            Some(max_stage) => last_boundary.is_some_and(|boundary| boundary > max_stage),
         }
     }
 
@@ -766,13 +761,11 @@ impl Scheduler {
     }
 
     /// Runs the schedule once.
-    #[allow(clippy::duplicated_code)]
     pub fn run(&mut self, ecs: ECSReference<'_>) -> ECSResult<()> {
         self.run_with_lifecycle_events(ecs, |_| Ok(()))
     }
 
     /// Runs the schedule once and reports lifecycle events after each command drain.
-    #[allow(clippy::duplicated_code)]
     pub fn run_with_lifecycle_events(
         &mut self,
         ecs: ECSReference<'_>,

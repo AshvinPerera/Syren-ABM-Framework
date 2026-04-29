@@ -1,4 +1,4 @@
-//! Global convenience API for the component registry.
+﻿//! Global convenience API for the component registry.
 //!
 //! Provides a set of free functions that delegate to a single, process-wide
 //! [`ComponentRegistry`] instance, making it straightforward to register
@@ -74,7 +74,6 @@ fn global_registry() -> &'static RwLock<ComponentRegistry> {
 /// - `COMPONENT_CAP` is exceeded,
 /// - the component is zero-sized,
 /// - the registry lock is poisoned.
-
 pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> {
     let registry = global_registry();
     let mut registry = registry.write().map_err(|_| RegistryError::PoisonedLock)?;
@@ -124,20 +123,19 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
 /// unsafe impl GPUPod for Position {}
 /// # }
 /// ```
-
 #[cfg(feature = "gpu")]
 pub unsafe trait GPUPod: Copy + Send + Sync + 'static {}
 
 /// Registers a component type as GPU-safe and eligible for GPU execution.
 ///
 /// ## Purpose
-/// This function is a GPU-aware extension of [`register_component`] that
+/// This function is a GPU-aware extension of `register_component` that
 /// explicitly marks the component as safe to:
 /// * mirror into GPU buffers,
 /// * be bound as a storage buffer in compute shaders,
 ///
 /// Internally, this delegates to [`ComponentRegistry::register_gpu`], which
-/// sets the `gpu_usage` flag on the component's [`ComponentDesc`].
+/// sets the `gpu_usage` flag on the component's [`crate::ComponentDesc`].
 ///
 /// ## Requirements
 /// * The component type must implement [`GPUPod`].
@@ -149,7 +147,7 @@ pub unsafe trait GPUPod: Copy + Send + Sync + 'static {}
 /// of [`GPUPod`] being upheld by the caller.
 ///
 /// ## Freezing behaviour
-/// This function must be called **before** [`freeze_components`].
+/// This function must be called **before** `freeze_components`.
 /// Calling it after the registry is frozen will return an error.
 ///
 /// ## Returns
@@ -160,7 +158,6 @@ pub unsafe trait GPUPod: Copy + Send + Sync + 'static {}
 /// * the component registry is frozen,
 /// * the registry lock is poisoned,
 /// * the component violates ECS registration constraints.
-
 #[cfg(feature = "gpu")]
 pub fn register_gpu_component<T: GPUPod + 'static + Send + Sync>() -> ECSResult<ComponentID> {
     let registry = global_registry();
@@ -177,7 +174,6 @@ pub fn register_gpu_component<T: GPUPod + 'static + Send + Sync>() -> ECSResult<
 ///
 /// ## Errors
 /// Returns `RegistryError::PoisonedLock` if the registry lock is poisoned.
-
 pub fn freeze_components() -> ECSResult<()> {
     let registry = global_registry();
     let mut registry = registry.write().map_err(|_| RegistryError::PoisonedLock)?;
@@ -190,7 +186,6 @@ pub fn freeze_components() -> ECSResult<()> {
 /// ## Errors
 /// Returns `RegistryError::NotRegistered` if `T` is not registered.
 /// Returns `RegistryError::PoisonedLock` if the registry lock is poisoned.
-
 pub fn component_id_of<T: 'static>() -> ECSResult<ComponentID> {
     let registry = global_registry();
     let registry = registry.read().map_err(|_| RegistryError::PoisonedLock)?;

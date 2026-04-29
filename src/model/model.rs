@@ -67,8 +67,7 @@ impl Model {
                 let agents = &mut self.agents;
                 sub.scheduler_mut()
                     .run_with_lifecycle_events(ecs, |events| {
-                        Self::flush_agent_hooks(agents, ecs, events);
-                        Ok(())
+                        Self::flush_agent_hooks(agents, ecs, events)
                     })?;
             }
 
@@ -85,13 +84,12 @@ impl Model {
             let ecs = self.ecs.world_ref();
             let agents = &mut self.agents;
             self.scheduler.run_with_lifecycle_events(ecs, |events| {
-                Self::flush_agent_hooks(agents, ecs, events);
-                Ok(())
+                Self::flush_agent_hooks(agents, ecs, events)
             })?;
             self.ecs.world_ref().clear_borrows();
             match self.ecs.apply_deferred_commands_with_events() {
                 Ok(events) => {
-                    Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events);
+                    Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events)?;
                     Ok(())
                 }
                 Err(failure) => {
@@ -99,7 +97,7 @@ impl Model {
                         &mut self.agents,
                         self.ecs.world_ref(),
                         &failure.events,
-                    );
+                    )?;
                     Err(failure.error)
                 }
             }
@@ -121,14 +119,14 @@ impl Model {
         agents: &mut AgentRegistry,
         ecs: ECSReference<'_>,
         events: &CommandEvents,
-    ) {
+    ) -> ECSResult<()> {
         for batch in &events.spawned_batches {
-            agents.enqueue_spawn_batch_hook(batch.template_id, batch.entities.clone());
-            agents.enqueue_spawn_hooks_by_id(batch.template_id, &batch.entities);
+            agents.enqueue_spawn_batch_hook(batch.template_id, batch.entities.clone())?;
+            agents.enqueue_spawn_hooks_by_id(batch.template_id, &batch.entities)?;
         }
         for batch in &events.despawned_batches {
-            agents.enqueue_despawn_batch_hook(batch.template_id, batch.entities.clone());
-            agents.enqueue_despawn_hooks_by_id(batch.template_id, &batch.entities);
+            agents.enqueue_despawn_batch_hook(batch.template_id, batch.entities.clone())?;
+            agents.enqueue_despawn_hooks_by_id(batch.template_id, &batch.entities)?;
         }
         for event in &events.spawned {
             if event.template_id.is_some() {
@@ -148,6 +146,7 @@ impl Model {
         }
         agents.flush_spawn_hooks(ecs);
         agents.flush_despawn_hooks(ecs);
+        Ok(())
     }
 
     /// Runs `n` ticks, stopping on the first error.
@@ -201,7 +200,7 @@ impl Model {
         let batch = self
             .agents
             .get(template_name)?
-            .batch(count)
+            .batch(count)?
             .set_boxed_column(component_id, values)?
             .into_spawn_batch();
         self.ecs
@@ -209,7 +208,7 @@ impl Model {
             .defer(Command::SpawnBatchTagged { batch, template_id })?;
         let events = self.ecs.apply_deferred_commands()?;
         let spawned = entities_for_template(&events.spawned_batches, template_id);
-        Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events);
+        Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events)?;
         Ok(spawned)
     }
 
@@ -225,7 +224,7 @@ impl Model {
             template_id,
         })?;
         let events = self.ecs.apply_deferred_commands()?;
-        Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events);
+        Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events)?;
         Ok(())
     }
 

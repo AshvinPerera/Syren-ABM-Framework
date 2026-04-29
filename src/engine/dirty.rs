@@ -10,8 +10,6 @@
 //! Writes occur inside parallel query execution (Rayon). This tracker is designed
 //! to be thread-safe with minimal contention.
 
-#![cfg(feature = "gpu")]
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -39,7 +37,7 @@ impl Words {
         if chunk_count <= 64 {
             Words::Inline(AtomicU64::new(0))
         } else {
-            let word_count = (chunk_count + 63) / 64;
+            let word_count = chunk_count.div_ceil(64);
             let mut words = Vec::with_capacity(word_count);
             for _ in 0..word_count {
                 words.push(AtomicU64::new(0));
@@ -209,10 +207,8 @@ impl DirtyChunks {
                 return; // No entries have been created for this archetype yet
             }
             let end = (base + COMPONENT_CAP).min(entries.len());
-            for slot in &entries[base..end] {
-                if let Some(entry) = slot {
-                    entry.mark_all_dirty();
-                }
+            for entry in entries[base..end].iter().flatten() {
+                entry.mark_all_dirty();
             }
         }
     }

@@ -29,6 +29,9 @@ use crate::engine::types::SystemID;
 
 use super::store::Environment;
 
+type EnvironmentSystemFn =
+    dyn Fn(Arc<Environment>, ECSReference<'_>) -> ECSResult<()> + Send + Sync;
+
 // -----------------------------------------------------------------------------
 // EnvironmentSystem
 // -----------------------------------------------------------------------------
@@ -60,7 +63,7 @@ pub struct EnvironmentSystem {
     name: String,
     access: AccessSets,
     env: Arc<Environment>,
-    func: Box<dyn Fn(Arc<Environment>, ECSReference<'_>) -> ECSResult<()> + Send + Sync>,
+    func: Box<EnvironmentSystemFn>,
 }
 
 impl EnvironmentSystem {

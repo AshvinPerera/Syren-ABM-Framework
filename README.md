@@ -1,24 +1,21 @@
 # Syren ABM Framework
 
-Syren is an experimental Rust framework for agent-based models. It combines a
-custom archetype ECS, declared system access sets, optional model-level
-composition, typed environments, typed per-tick messaging, and an optional
-`wgpu` compute backend.
+Syren is a Rust framework for agent-based models. It combines a custom
+archetype ECS, declared system access sets, optional model-level composition,
+typed environments, typed per-tick messaging, and an optional `wgpu` compute
+backend.
 
-This project is a hobby project. It is useful for exploring
-the internals of scalable ABM runtimes and for building early economic model
-experiments, but it should be treated as evolving infrastructure rather than a
-finished research platform.
+The crate is maintained with a documented public API, feature-gated subsystems,
+correctness-oriented integration tests, and explicit release validation gates.
 
 ## Status
 
 - Crate name: `abm_framework`
 - Rust edition: 2021
-- MSRV: 1.76
+- MSRV: 1.87
 - Library artifact: `rlib`
-- API stability: not guaranteed yet
 - Current focus: ECS storage, scheduler behavior, model composition,
-  messaging, GPU dispatch, and correctness-oriented model tests
+  messaging, GPU dispatch, documentation, and release hardening
 
 Determinism is provided by explicit scheduling and access declarations. Model
 determinism still depends on the systems you write, especially RNG and floating
@@ -269,19 +266,6 @@ abm_framework::init("profile/trace.json");
 // run simulation work
 abm_framework::shutdown();
 ```
-
-## Current Limitations
-
-- The public API is still changing.
-- The GPU backend is optional and depends on local adapter/driver support.
-- GPU and CPU paths are intended to be rule-equivalent where tests assert it,
-  but arbitrary user systems must still manage deterministic ordering carefully.
-- The example economy is deliberately small and closed. It is a correctness
-  fixture, not a macroeconomic model with credit, bankruptcy, unemployment
-  dynamics, or policy behavior.
-- Sugarscape coverage targets the Epstein-Axtell Chapter 2 wealth-distribution
-  mechanics used by the tests, not every later extension of the Sugarscape
-  family.
 
 ## Project Layout
 

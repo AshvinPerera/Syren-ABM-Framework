@@ -9,6 +9,7 @@ use abm_framework::{AccessSets, ComponentRegistry, FnSystem};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 const AGENTS: usize = 4096;
+const AGENTS_DESPAWN_LARGE: usize = 65_536;
 const AGENTS_LARGE: usize = 1_000_000;
 
 #[derive(Clone, Copy, Default)]
@@ -130,6 +131,23 @@ fn model_agent_benchmarks(c: &mut Criterion) {
                 black_box(model);
             },
             BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("model_agent/bulk_despawn_65536", |b| {
+        b.iter_batched(
+            || {
+                let mut model = build_model(agent_id);
+                let entities = model
+                    .spawn_agent_batch("bench_agent", agent_id, make_agents(AGENTS_DESPAWN_LARGE))
+                    .unwrap();
+                (model, entities)
+            },
+            |(mut model, entities)| {
+                model.despawn_agent_batch("bench_agent", entities).unwrap();
+                black_box(model);
+            },
+            BatchSize::LargeInput,
         );
     });
 
