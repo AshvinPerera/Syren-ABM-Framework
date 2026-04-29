@@ -46,6 +46,16 @@ pub enum AgentError {
 
     /// An attempt was made to register a template after the registry was sealed.
     RegistrySealed,
+
+    /// A batch column length did not match the declared batch size.
+    BatchLengthMismatch {
+        /// Component column with the mismatch.
+        component_id: ComponentID,
+        /// Expected row count.
+        expected: usize,
+        /// Actual row count.
+        actual: usize,
+    },
 }
 
 impl fmt::Display for AgentError {
@@ -65,6 +75,14 @@ impl fmt::Display for AgentError {
             AgentError::RegistrySealed => write!(
                 f,
                 "agent registry is sealed; no further templates may be registered"
+            ),
+            AgentError::BatchLengthMismatch {
+                component_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "batch column {component_id} has length {actual}, expected {expected}"
             ),
         }
     }

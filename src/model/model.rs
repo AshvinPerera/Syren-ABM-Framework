@@ -15,10 +15,12 @@
 //! 5. Drain tail deferred commands, flush agent hooks, then end root
 //!    boundaries.
 
+use std::any::Any;
 use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::agents::AgentRegistry;
+use crate::engine::commands::Command;
 use crate::engine::commands::CommandEvents;
 use crate::engine::dot_export::DotExport;
 use crate::engine::manager::ECSManager;
@@ -28,6 +30,7 @@ use crate::engine::scheduler::Scheduler;
 use crate::engine::types::BoundaryID;
 use crate::environment::Environment;
 use crate::ECSResult;
+use crate::{AgentTemplateId, Entity};
 
 use super::nested::NestedModel;
 use super::sub_scheduler::SubScheduler;
@@ -119,12 +122,26 @@ impl Model {
         ecs: ECSReference<'_>,
         events: &CommandEvents,
     ) {
+        for batch in &events.spawned_batches {
+            agents.enqueue_spawn_batch_hook(batch.template_id, batch.entities.clone());
+            agents.enqueue_spawn_hooks_by_id(batch.template_id, &batch.entities);
+        }
+        for batch in &events.despawned_batches {
+            agents.enqueue_despawn_batch_hook(batch.template_id, batch.entities.clone());
+            agents.enqueue_despawn_hooks_by_id(batch.template_id, &batch.entities);
+        }
         for event in &events.spawned {
+            if event.template_id.is_some() {
+                continue;
+            }
             if let Some(tag) = &event.tag {
                 agents.enqueue_spawn_hook(tag.clone(), event.entity);
             }
         }
         for event in &events.despawned {
+            if event.template_id.is_some() {
+                continue;
+            }
             if let Some(tag) = &event.tag {
                 agents.enqueue_despawn_hook(tag.clone(), event.entity);
             }
@@ -154,6 +171,62 @@ impl Model {
     /// Returns the agent registry.
     pub fn agents(&self) -> &AgentRegistry {
         &self.agents
+    }
+
+    /// Spawns a single-column batch of agents and returns the created entities.
+    pub fn spawn_agent_batch<T>(
+        &mut self,
+        template_name: &str,
+        component_id: crate::ComponentID,
+        values: Vec<T>,
+    ) -> Result<Vec<Entity>, super::error::ModelError>
+    where
+        T: Any + Send + 'static,
+    {
+        let values = values
+            .into_iter()
+            .map(|value| Box::new(value) as Box<dyn Any + Send>)
+            .collect();
+        self.spawn_agent_batch_boxed(template_name, component_id, values)
+    }
+
+    pub(crate) fn spawn_agent_batch_boxed(
+        &mut self,
+        template_name: &str,
+        component_id: crate::ComponentID,
+        values: Vec<Box<dyn Any + Send>>,
+    ) -> Result<Vec<Entity>, super::error::ModelError> {
+        let template_id = self.agents.id(template_name)?;
+        let count = values.len();
+        let batch = self
+            .agents
+            .get(template_name)?
+            .batch(count)
+            .set_boxed_column(component_id, values)?
+            .into_spawn_batch();
+        self.ecs
+            .world_ref()
+            .defer(Command::SpawnBatchTagged { batch, template_id })?;
+        let events = self.ecs.apply_deferred_commands()?;
+        let spawned = entities_for_template(&events.spawned_batches, template_id);
+        Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events);
+        Ok(spawned)
+    }
+
+    /// Despawns a batch of agents associated with one template.
+    pub fn despawn_agent_batch(
+        &mut self,
+        template_name: &str,
+        entities: Vec<Entity>,
+    ) -> Result<(), super::error::ModelError> {
+        let template_id = self.agents.id(template_name)?;
+        self.ecs.world_ref().defer(Command::DespawnBatchTagged {
+            entities,
+            template_id,
+        })?;
+        let events = self.ecs.apply_deferred_commands()?;
+        Self::flush_agent_hooks(&mut self.agents, self.ecs.world_ref(), &events);
+        Ok(())
     }
 
     /// Returns isolated nested child models.
@@ -235,6 +308,17 @@ impl Model {
         out.push_str("}\n");
         out
     }
+}
+
+fn entities_for_template(
+    batches: &[crate::engine::commands::TemplateLifecycleBatch],
+    template_id: AgentTemplateId,
+) -> Vec<Entity> {
+    batches
+        .iter()
+        .filter(|batch| batch.template_id == template_id)
+        .flat_map(|batch| batch.entities.iter().copied())
+        .collect()
 }
 
 fn dot_escape(input: &str) -> String {

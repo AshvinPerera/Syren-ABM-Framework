@@ -1,5 +1,6 @@
 //! Fluent builder for [`Model`](crate::model::Model).
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
@@ -56,6 +57,7 @@ pub struct ModelBuilder {
     nested_models: Vec<NestedModel>,
     environment_builder: Option<EnvironmentBuilder>,
     agents: AgentRegistry,
+    pending_agent_populations: Vec<PendingAgentPopulation>,
     #[cfg(feature = "messaging")]
     message_registry: MessageRegistry,
     #[cfg(feature = "messaging_gpu")]
@@ -97,6 +99,12 @@ struct PendingGpuMessageResource {
     resource: GpuMessageResource,
 }
 
+struct PendingAgentPopulation {
+    template_name: String,
+    component_id: crate::ComponentID,
+    values: Vec<Box<dyn Any + Send>>,
+}
+
 impl ModelBuilder {
     /// Creates a builder with empty defaults.
     pub fn new() -> Self {
@@ -110,6 +118,7 @@ impl ModelBuilder {
             nested_models: Vec::new(),
             environment_builder: None,
             agents: AgentRegistry::new(),
+            pending_agent_populations: Vec::new(),
             #[cfg(feature = "messaging")]
             message_registry: MessageRegistry::new(),
             #[cfg(feature = "messaging_gpu")]
@@ -177,6 +186,29 @@ impl ModelBuilder {
     /// Registers an agent template.
     pub fn with_agent_template(mut self, template: AgentTemplate) -> Result<Self, ModelError> {
         self.agents.register(template)?;
+        Ok(self)
+    }
+
+    /// Adds an initial single-column population to materialise during build.
+    pub fn with_agent_population<T>(
+        mut self,
+        template_name: impl Into<String>,
+        component_id: crate::ComponentID,
+        values: Vec<T>,
+    ) -> Result<Self, ModelError>
+    where
+        T: Any + Send + 'static,
+    {
+        let template_name = template_name.into();
+        self.agents.get(&template_name)?;
+        self.pending_agent_populations.push(PendingAgentPopulation {
+            template_name,
+            component_id,
+            values: values
+                .into_iter()
+                .map(|value| Box::new(value) as Box<dyn Any + Send>)
+                .collect(),
+        });
         Ok(self)
     }
 
@@ -510,7 +542,7 @@ impl ModelBuilder {
 
         self.agents.seal();
 
-        Ok(Model {
+        let mut model = Model {
             ecs,
             environment,
             agents: self.agents,
@@ -523,7 +555,17 @@ impl ModelBuilder {
             #[cfg(feature = "messaging")]
             message_registry,
             tick_count: 0,
-        })
+        };
+
+        for population in self.pending_agent_populations {
+            model.spawn_agent_batch_boxed(
+                &population.template_name,
+                population.component_id,
+                population.values,
+            )?;
+        }
+
+        Ok(model)
     }
 
     fn validate_unique_sub_scheduler_names(subs: &[SubScheduler]) -> Result<(), ModelError> {
@@ -802,6 +844,104 @@ mod tests {
         assert_eq!(*despawn_calls.lock().unwrap(), 0);
         model.tick().unwrap();
         assert_eq!(*despawn_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn builder_agent_population_materialises_and_indexes_entities() {
+        #[derive(Clone, Copy, Default, Debug, PartialEq)]
+        struct Household {
+            cash: u32,
+        }
+
+        let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+        let household_id = registry.write().unwrap().register::<Household>().unwrap();
+        let template = AgentTemplate::builder("household")
+            .with_component::<Household>(household_id)
+            .unwrap()
+            .with_capacity(3)
+            .build();
+
+        let model = ModelBuilder::new()
+            .with_component_registry(registry)
+            .with_agent_template(template)
+            .unwrap()
+            .with_agent_population(
+                "household",
+                household_id,
+                vec![
+                    Household { cash: 10 },
+                    Household { cash: 20 },
+                    Household { cash: 30 },
+                ],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let template_id = model.agents().id("household").unwrap();
+        let entities = model.agents().entities(template_id);
+        assert_eq!(entities.len(), 3);
+        assert_eq!(
+            model.agents().entity_template(entities[0]),
+            Some(template_id)
+        );
+        assert_eq!(
+            model
+                .ecs()
+                .world_ref()
+                .read_entity_component::<Household>(entities[1], household_id)
+                .unwrap(),
+            Household { cash: 20 }
+        );
+    }
+
+    #[test]
+    fn runtime_agent_batch_spawn_and_despawn_update_indexes_and_hooks() {
+        #[derive(Clone, Copy, Default)]
+        struct Firm {
+            _inventory: u32,
+        }
+
+        let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+        let firm_id = registry.write().unwrap().register::<Firm>().unwrap();
+        let spawn_batches = Arc::new(Mutex::new(0usize));
+        let despawn_batches = Arc::new(Mutex::new(0usize));
+        let spawn_batches_hook = Arc::clone(&spawn_batches);
+        let despawn_batches_hook = Arc::clone(&despawn_batches);
+
+        let template = AgentTemplate::builder("firm")
+            .with_component::<Firm>(firm_id)
+            .unwrap()
+            .on_spawn_batch(Box::new(move |_, entities| {
+                *spawn_batches_hook.lock().unwrap() += entities.len();
+            }))
+            .on_despawn_batch(Box::new(move |_, entities| {
+                *despawn_batches_hook.lock().unwrap() += entities.len();
+            }))
+            .build();
+
+        let mut model = ModelBuilder::new()
+            .with_component_registry(registry)
+            .with_agent_template(template)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let entities = model
+            .spawn_agent_batch(
+                "firm",
+                firm_id,
+                vec![Firm { _inventory: 1 }, Firm { _inventory: 2 }],
+            )
+            .unwrap();
+        let template_id = model.agents().id("firm").unwrap();
+        assert_eq!(entities.len(), 2);
+        assert_eq!(model.agents().entities(template_id).len(), 2);
+        assert_eq!(*spawn_batches.lock().unwrap(), 2);
+
+        model.despawn_agent_batch("firm", entities).unwrap();
+        assert!(model.agents().entities(template_id).is_empty());
+        assert_eq!(*despawn_batches.lock().unwrap(), 2);
     }
 
     #[test]

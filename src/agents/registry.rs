@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 
-use crate::engine::entity::Entity;
 use crate::engine::manager::ECSReference;
+use crate::{AgentTemplateId, Entity};
 
 use super::error::{AgentError, AgentResult};
 use super::template::AgentTemplate;
@@ -38,6 +38,10 @@ use super::template::AgentTemplate;
 ///    any tagged agent commands produced by that drain.
 pub struct AgentRegistry {
     templates: HashMap<String, AgentTemplate>,
+    ids: HashMap<String, AgentTemplateId>,
+    names_by_id: Vec<String>,
+    entities_by_template: HashMap<AgentTemplateId, Vec<Entity>>,
+    template_by_entity: HashMap<Entity, AgentTemplateId>,
     sealed: bool,
     /// Queue of `(template_name, entity)` pairs whose `on_spawn` hook is
     /// pending invocation.
@@ -48,6 +52,8 @@ pub struct AgentRegistry {
     /// Queue of `(template_name, entity)` pairs whose `on_despawn` hook is
     /// pending invocation.
     pending_despawn_hooks: Vec<(String, Entity)>,
+    pending_spawn_batch_hooks: Vec<(AgentTemplateId, Vec<Entity>)>,
+    pending_despawn_batch_hooks: Vec<(AgentTemplateId, Vec<Entity>)>,
 }
 
 impl AgentRegistry {
@@ -55,9 +61,15 @@ impl AgentRegistry {
     pub fn new() -> Self {
         Self {
             templates: HashMap::new(),
+            ids: HashMap::new(),
+            names_by_id: Vec::new(),
+            entities_by_template: HashMap::new(),
+            template_by_entity: HashMap::new(),
             sealed: false,
             pending_spawn_hooks: Vec::new(),
             pending_despawn_hooks: Vec::new(),
+            pending_spawn_batch_hooks: Vec::new(),
+            pending_despawn_batch_hooks: Vec::new(),
         }
     }
 
@@ -69,13 +81,18 @@ impl AgentRegistry {
     /// * [`AgentError::TemplateNotFound`] (repurposed as "already exists") - a
     ///   template with the same name is already present. The error message
     ///   clarifies this.
-    pub fn register(&mut self, template: AgentTemplate) -> AgentResult<()> {
+    pub fn register(&mut self, mut template: AgentTemplate) -> AgentResult<()> {
         if self.sealed {
             return Err(AgentError::RegistrySealed);
         }
         if self.templates.contains_key(&template.name) {
             return Err(AgentError::DuplicateTemplate(template.name.clone()));
         }
+        let id = AgentTemplateId(self.names_by_id.len() as u32);
+        template.id = Some(id);
+        self.ids.insert(template.name.clone(), id);
+        self.names_by_id.push(template.name.clone());
+        self.entities_by_template.entry(id).or_default();
         self.templates.insert(template.name.clone(), template);
         Ok(())
     }
@@ -90,6 +107,36 @@ impl AgentRegistry {
         self.templates
             .get(name)
             .ok_or_else(|| AgentError::TemplateNotFound(name.to_owned()))
+    }
+
+    /// Returns the compact ID for the named template.
+    pub fn id(&self, name: &str) -> AgentResult<AgentTemplateId> {
+        self.ids
+            .get(name)
+            .copied()
+            .ok_or_else(|| AgentError::TemplateNotFound(name.to_owned()))
+    }
+
+    /// Returns the template associated with a compact ID.
+    pub fn get_by_id(&self, id: AgentTemplateId) -> AgentResult<&AgentTemplate> {
+        let name = self
+            .names_by_id
+            .get(id.0 as usize)
+            .ok_or_else(|| AgentError::TemplateNotFound(format!("#{}", id.0)))?;
+        self.get(name)
+    }
+
+    /// Returns known live entities for a template.
+    pub fn entities(&self, id: AgentTemplateId) -> &[Entity] {
+        self.entities_by_template
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Returns the template ID currently associated with an entity.
+    pub fn entity_template(&self, entity: Entity) -> Option<AgentTemplateId> {
+        self.template_by_entity.get(&entity).copied()
     }
 
     /// Seals the registry, preventing further [`AgentRegistry::register`] calls.
@@ -130,8 +177,43 @@ impl AgentRegistry {
     ///
     /// Flushed by [`AgentRegistry::flush_spawn_hooks`].
     pub fn enqueue_spawn_hook(&mut self, template_name: impl Into<String>, entity: Entity) {
-        self.pending_spawn_hooks
-            .push((template_name.into(), entity));
+        let template_name = template_name.into();
+        if let Some(id) = self.ids.get(&template_name).copied() {
+            self.template_by_entity.insert(entity, id);
+            self.entities_by_template
+                .entry(id)
+                .or_default()
+                .push(entity);
+        }
+        self.pending_spawn_hooks.push((template_name, entity));
+    }
+
+    /// Enqueues a compact template-id spawn batch.
+    pub fn enqueue_spawn_batch_hook(
+        &mut self,
+        template_id: AgentTemplateId,
+        entities: Vec<Entity>,
+    ) {
+        for entity in &entities {
+            self.template_by_entity.insert(*entity, template_id);
+        }
+        self.entities_by_template
+            .entry(template_id)
+            .or_default()
+            .extend(entities.iter().copied());
+        self.pending_spawn_batch_hooks.push((template_id, entities));
+    }
+
+    /// Enqueues per-agent spawn hooks for an already-indexed template-id batch.
+    pub fn enqueue_spawn_hooks_by_id(&mut self, template_id: AgentTemplateId, entities: &[Entity]) {
+        if let Some(name) = self.names_by_id.get(template_id.0 as usize) {
+            self.pending_spawn_hooks.extend(
+                entities
+                    .iter()
+                    .copied()
+                    .map(|entity| (name.clone(), entity)),
+            );
+        }
     }
 
     /// Enqueues a pending despawn-hook invocation.
@@ -139,8 +221,46 @@ impl AgentRegistry {
     /// Called by the model after a tagged despawn command has been accepted
     /// and applied by the ECS command drain.
     pub fn enqueue_despawn_hook(&mut self, template_name: impl Into<String>, entity: Entity) {
-        self.pending_despawn_hooks
-            .push((template_name.into(), entity));
+        let template_name = template_name.into();
+        if let Some(id) = self.ids.get(&template_name).copied() {
+            self.template_by_entity.remove(&entity);
+            if let Some(live) = self.entities_by_template.get_mut(&id) {
+                live.retain(|candidate| *candidate != entity);
+            }
+        }
+        self.pending_despawn_hooks.push((template_name, entity));
+    }
+
+    /// Enqueues a compact template-id despawn batch.
+    pub fn enqueue_despawn_batch_hook(
+        &mut self,
+        template_id: AgentTemplateId,
+        entities: Vec<Entity>,
+    ) {
+        for entity in &entities {
+            self.template_by_entity.remove(entity);
+        }
+        if let Some(live) = self.entities_by_template.get_mut(&template_id) {
+            live.retain(|entity| !entities.contains(entity));
+        }
+        self.pending_despawn_batch_hooks
+            .push((template_id, entities));
+    }
+
+    /// Enqueues per-agent despawn hooks for an already-indexed template-id batch.
+    pub fn enqueue_despawn_hooks_by_id(
+        &mut self,
+        template_id: AgentTemplateId,
+        entities: &[Entity],
+    ) {
+        if let Some(name) = self.names_by_id.get(template_id.0 as usize) {
+            self.pending_despawn_hooks.extend(
+                entities
+                    .iter()
+                    .copied()
+                    .map(|entity| (name.clone(), entity)),
+            );
+        }
     }
 
     /// Invokes all pending `on_spawn` hooks and clears the queue.
@@ -152,6 +272,14 @@ impl AgentRegistry {
     /// Hooks for templates that cannot be found (e.g. removed between
     /// enqueue and flush) are silently skipped.
     pub fn flush_spawn_hooks(&mut self, ecs: ECSReference<'_>) {
+        let pending_batches = std::mem::take(&mut self.pending_spawn_batch_hooks);
+        for (id, entities) in pending_batches {
+            if let Ok(template) = self.get_by_id(id) {
+                if let Some(hook) = template.on_spawn_batch() {
+                    hook(ecs, &entities);
+                }
+            }
+        }
         let pending = std::mem::take(&mut self.pending_spawn_hooks);
         for (name, entity) in pending {
             if let Some(template) = self.templates.get(&name) {
@@ -168,6 +296,14 @@ impl AgentRegistry {
     /// despawn command. The entity may already be stale in the ECS; hooks
     /// should use it as an identity for cleanup messages or bookkeeping.
     pub fn flush_despawn_hooks(&mut self, ecs: ECSReference<'_>) {
+        let pending_batches = std::mem::take(&mut self.pending_despawn_batch_hooks);
+        for (id, entities) in pending_batches {
+            if let Ok(template) = self.get_by_id(id) {
+                if let Some(hook) = template.on_despawn_batch() {
+                    hook(ecs, &entities);
+                }
+            }
+        }
         let pending = std::mem::take(&mut self.pending_despawn_hooks);
         for (name, entity) in pending {
             if let Some(template) = self.templates.get(&name) {

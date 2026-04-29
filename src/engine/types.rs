@@ -113,6 +113,10 @@ pub const CHUNK_CAP: usize = 16_384;
 /// Unique identifier for a component type.
 pub type ComponentID = u16;
 
+/// Compact identifier for an agent template registered in an agent registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AgentTemplateId(pub u32);
+
 /// Maximum number of registered component types.
 ///
 /// This value controls the size of [`Signature`] bitsets: each 256-component

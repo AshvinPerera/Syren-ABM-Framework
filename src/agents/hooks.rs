@@ -36,6 +36,9 @@ use crate::engine::manager::ECSReference;
 /// `apply_deferred_commands` returns.  Never called inside a running system.
 pub type SpawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
 
+/// Called after a batch of agent entities is resolved from a batch spawn.
+pub type SpawnBatchHook = Box<dyn Fn(ECSReference<'_>, &[Entity]) + Send + Sync>;
+
 /// Called after a tagged despawn command is applied.
 ///
 /// Receives an [`ECSReference`] and the entity that was destroyed. The hook may
@@ -48,3 +51,6 @@ pub type SpawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
 /// `apply_deferred_commands` reports a tagged despawn. Never called inside a
 /// running system.
 pub type DespawnHook = Box<dyn Fn(ECSReference<'_>, Entity) + Send + Sync>;
+
+/// Called after a batch of tagged agent despawns is applied.
+pub type DespawnBatchHook = Box<dyn Fn(ECSReference<'_>, &[Entity]) + Send + Sync>;

@@ -70,6 +70,9 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// Returns the number of allocated chunks in this attribute.
     fn chunk_count(&self) -> usize;
 
+    /// Reserves additional chunk slots in the backing storage vector.
+    fn reserve_chunks(&mut self, additional: usize);
+
     /// Returns the total number of initialised elements stored.
     fn length(&self) -> usize;
 
@@ -184,6 +187,9 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
 impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
     fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+    fn reserve_chunks(&mut self, additional: usize) {
+        Attribute::reserve_chunks(self, additional);
     }
     fn length(&self) -> usize {
         self.length

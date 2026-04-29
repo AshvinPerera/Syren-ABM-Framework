@@ -221,6 +221,38 @@ impl Archetype {
         }
     }
 
+    /// Reserves storage for at least `additional_rows` more appended rows.
+    pub(crate) fn reserve_additional_rows(&mut self, additional_rows: usize) -> ECSResult<()> {
+        if additional_rows == 0 {
+            return Ok(());
+        }
+        let current_len = self.length()?;
+        let current_chunks = if current_len == 0 {
+            0
+        } else {
+            ((current_len - 1) / CHUNK_CAP) + 1
+        };
+        let needed_len = current_len.saturating_add(additional_rows);
+        let needed_chunks = if needed_len == 0 {
+            0
+        } else {
+            ((needed_len - 1) / CHUNK_CAP) + 1
+        };
+        let additional_chunks = needed_chunks.saturating_sub(current_chunks);
+
+        for (_, attr) in &self.components {
+            let mut guard = attr.write().map_err(ECSError::from)?;
+            guard.reserve_chunks(additional_chunks);
+        }
+
+        let mut meta = self
+            .meta
+            .write()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+        Self::ensure_capacity(&mut meta, needed_chunks);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Sparse component lookup helpers
     // -----------------------------------------------------------------------

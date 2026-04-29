@@ -83,7 +83,9 @@ pub use engine::error::BoundaryAccessFailure;
 
 // Primitive type aliases and constants
 
-pub use engine::types::{ArchetypeID, ChunkID, ComponentID, EntityID, SystemID, CHUNK_CAP};
+pub use engine::types::{
+    AgentTemplateId, ArchetypeID, ChunkID, ComponentID, EntityID, SystemID, CHUNK_CAP,
+};
 
 // Opaque scheduling identifiers.
 pub use engine::types::{BoundaryID, ChannelID};

@@ -9,6 +9,7 @@ use abm_framework::{AccessSets, ComponentRegistry, FnSystem};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 const AGENTS: usize = 4096;
+const AGENTS_LARGE: usize = 1_000_000;
 
 #[derive(Clone, Copy, Default)]
 struct BenchAgent {
@@ -55,6 +56,10 @@ fn spawn_agents(model: &mut abm_framework::model::Model, agent_id: abm_framework
     model.ecs().apply_deferred_commands().unwrap();
 }
 
+fn make_agents(count: usize) -> Vec<BenchAgent> {
+    (0..count).map(|i| BenchAgent { value: i as u32 }).collect()
+}
+
 fn model_agent_benchmarks(c: &mut Criterion) {
     let (registry, agent_id) = make_registry();
     drop(registry);
@@ -64,6 +69,64 @@ fn model_agent_benchmarks(c: &mut Criterion) {
             || build_model(agent_id),
             |mut model| {
                 spawn_agents(&mut model, agent_id);
+                black_box(model);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("model_agent/bulk_spawn_4096", |b| {
+        b.iter_batched(
+            || build_model(agent_id),
+            |mut model| {
+                model
+                    .spawn_agent_batch("bench_agent", agent_id, make_agents(AGENTS))
+                    .unwrap();
+                black_box(model);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("model_agent/builder_population_1M", |b| {
+        b.iter_batched(
+            || {
+                let (registry, agent_id) = make_registry();
+                (registry, agent_id, make_agents(AGENTS_LARGE))
+            },
+            |(registry, agent_id, agents)| {
+                let model = ModelBuilder::new()
+                    .with_component_registry(registry)
+                    .with_shards(EntityShards::new(4).unwrap())
+                    .with_agent_template(
+                        AgentTemplate::builder("bench_agent")
+                            .with_component::<BenchAgent>(agent_id)
+                            .unwrap()
+                            .with_capacity(AGENTS_LARGE)
+                            .build(),
+                    )
+                    .unwrap()
+                    .with_agent_population("bench_agent", agent_id, agents)
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                black_box(model);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    c.bench_function("model_agent/bulk_despawn_4096", |b| {
+        b.iter_batched(
+            || {
+                let mut model = build_model(agent_id);
+                let entities = model
+                    .spawn_agent_batch("bench_agent", agent_id, make_agents(AGENTS))
+                    .unwrap();
+                (model, entities)
+            },
+            |(mut model, entities)| {
+                model.despawn_agent_batch("bench_agent", entities).unwrap();
                 black_box(model);
             },
             BatchSize::SmallInput,
