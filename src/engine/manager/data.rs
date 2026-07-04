@@ -112,7 +112,9 @@ impl QueryMatchKey {
 #[derive(Clone, Debug)]
 struct QueryMatchEntry {
     generation: u64,
-    archetype_ids: Vec<ArchetypeID>,
+    /// Shared so cache hits hand out a refcount bump instead of cloning a
+    /// `Vec` on every query execution.
+    archetype_ids: Arc<[ArchetypeID]>,
 }
 
 /// Result of a deferred command drain that stopped before applying the whole batch.
@@ -248,7 +250,7 @@ impl ECSData {
     fn matching_archetype_ids(
         &self,
         query: &crate::engine::query::QuerySignature,
-    ) -> Result<Vec<ArchetypeID>, ExecutionError> {
+    ) -> Result<Arc<[ArchetypeID]>, ExecutionError> {
         let key = QueryMatchKey::from_signature(query);
         let generation = self.archetype_generation;
 
@@ -261,7 +263,7 @@ impl ECSData {
                     })?;
             if let Some(entry) = cache.get(&key) {
                 if entry.generation == generation {
-                    return Ok(entry.archetype_ids.clone());
+                    return Ok(Arc::clone(&entry.archetype_ids));
                 }
             }
         }
@@ -272,6 +274,7 @@ impl ECSData {
                 archetype_ids.push(archetype.archetype_id());
             }
         }
+        let archetype_ids: Arc<[ArchetypeID]> = archetype_ids.into();
 
         let mut cache =
             self.query_match_cache
@@ -283,7 +286,7 @@ impl ECSData {
             key,
             QueryMatchEntry {
                 generation,
-                archetype_ids: archetype_ids.clone(),
+                archetype_ids: Arc::clone(&archetype_ids),
             },
         );
         Ok(archetype_ids)
@@ -930,7 +933,7 @@ impl ECSData {
         {
             super::query_executor::for_each_unchecked(
                 &self.archetypes,
-                matches,
+                &matches,
                 query,
                 &self.gpu_dirty_chunks,
                 crate::engine::activation::current_activation_context(),
@@ -942,7 +945,37 @@ impl ECSData {
         {
             super::query_executor::for_each_unchecked(
                 &self.archetypes,
-                matches,
+                &matches,
+                query,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+    }
+
+    pub(crate) fn for_each_entity_abstraction_unchecked(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) + Send + Sync,
+    ) -> Result<(), ExecutionError> {
+        let matches = self.matching_archetype_ids(query.signature())?;
+        #[cfg(feature = "gpu")]
+        {
+            super::query_executor::for_each_entity_unchecked(
+                &self.archetypes,
+                &matches,
+                query,
+                &self.gpu_dirty_chunks,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+
+        #[cfg(not(feature = "gpu"))]
+        {
+            super::query_executor::for_each_entity_unchecked(
+                &self.archetypes,
+                &matches,
                 query,
                 crate::engine::activation::current_activation_context(),
                 f,
@@ -971,7 +1004,7 @@ impl ECSData {
         {
             super::query_executor::for_each_fallible_unchecked(
                 &self.archetypes,
-                matches,
+                &matches,
                 query,
                 &self.gpu_dirty_chunks,
                 crate::engine::activation::current_activation_context(),
@@ -983,7 +1016,41 @@ impl ECSData {
         {
             super::query_executor::for_each_fallible_unchecked(
                 &self.archetypes,
-                matches,
+                &matches,
+                query,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+    }
+
+    pub(crate) fn for_each_entity_abstraction_fallible_unchecked(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) -> crate::engine::error::ECSResult<()>
+            + Send
+            + Sync,
+    ) -> crate::engine::error::ECSResult<()> {
+        let matches = self
+            .matching_archetype_ids(query.signature())
+            .map_err(ECSError::from)?;
+        #[cfg(feature = "gpu")]
+        {
+            super::query_executor::for_each_entity_fallible_unchecked(
+                &self.archetypes,
+                &matches,
+                query,
+                &self.gpu_dirty_chunks,
+                crate::engine::activation::current_activation_context(),
+                f,
+            )
+        }
+
+        #[cfg(not(feature = "gpu"))]
+        {
+            super::query_executor::for_each_entity_fallible_unchecked(
+                &self.archetypes,
+                &matches,
                 query,
                 crate::engine::activation::current_activation_context(),
                 f,
@@ -1004,7 +1071,7 @@ impl ECSData {
         let matches = self.matching_archetype_ids(query.signature())?;
         super::query_executor::reduce_unchecked(
             &self.archetypes,
-            matches,
+            &matches,
             query,
             init,
             fold_chunk,

@@ -519,9 +519,13 @@ impl ECSManager {
     /// # Safety
     ///
     /// The caller must hold the shared phase lock. This is enforced at
-    /// compile time by requiring a `&PhaseRead<'_>` token.
+    /// compile time by requiring a `&PhaseRead<'_>` token; the returned
+    /// reference borrows that token, so it cannot outlive the guard.
     #[inline]
-    pub(super) unsafe fn data_ref_unchecked(&self, _phase: &PhaseRead<'_>) -> &ECSData {
+    pub(super) unsafe fn data_ref_unchecked<'a>(
+        &'a self,
+        _phase: &'a PhaseRead<'_>,
+    ) -> &'a ECSData {
         unsafe { &*self.inner.get() }
     }
 
@@ -530,10 +534,14 @@ impl ECSManager {
     /// # Safety
     ///
     /// The caller must hold the exclusive phase lock. This is enforced at
-    /// compile time by requiring a `&PhaseWrite<'_>` token.
+    /// compile time by requiring a `&PhaseWrite<'_>` token; the returned
+    /// reference borrows that token, so it cannot outlive the guard.
     #[inline]
     #[allow(clippy::mut_from_ref)]
-    pub(super) unsafe fn data_mut_unchecked(&self, _phase: &PhaseWrite<'_>) -> &mut ECSData {
+    pub(super) unsafe fn data_mut_unchecked<'a>(
+        &'a self,
+        _phase: &'a PhaseWrite<'_>,
+    ) -> &'a mut ECSData {
         unsafe { &mut *self.inner.get() }
     }
 }

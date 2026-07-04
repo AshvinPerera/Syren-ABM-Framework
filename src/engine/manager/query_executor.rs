@@ -11,8 +11,10 @@ use smallvec::SmallVec;
 
 use crate::engine::activation::{ActivationContext, ActivationOrder};
 use crate::engine::archetype::Archetype;
+use crate::engine::entity::Entity;
 use crate::engine::error::{ECSError, ECSResult, ExecutionError};
 use crate::engine::query::BuiltQuery;
+use crate::engine::random::splitmix64;
 use crate::engine::storage::TypeErasedAttribute;
 use crate::engine::types::{ArchetypeID, ChunkID, ComponentID};
 
@@ -32,7 +34,7 @@ type WriteGuard<'a> = (
 
 pub(super) fn for_each_unchecked(
     archetypes: &[Archetype],
-    matches: Vec<ArchetypeID>,
+    matches: &[ArchetypeID],
     query: BuiltQuery,
     #[cfg(feature = "gpu")] dirty_chunks: &DirtyChunks,
     activation: ActivationContext,
@@ -40,7 +42,7 @@ pub(super) fn for_each_unchecked(
 ) -> Result<(), ExecutionError> {
     let f = Arc::new(f);
 
-    for archetype_id in matches {
+    for &archetype_id in matches {
         let archetype = &archetypes[archetype_id as usize];
         let (read_guards, mut write_guards) = lock_columns(archetype, &query)?;
         let views = build_chunk_view(archetype, &query, &read_guards, &mut write_guards)?;
@@ -68,9 +70,58 @@ pub(super) fn for_each_unchecked(
     Ok(())
 }
 
+pub(super) fn for_each_entity_unchecked(
+    archetypes: &[Archetype],
+    matches: &[ArchetypeID],
+    query: BuiltQuery,
+    #[cfg(feature = "gpu")] dirty_chunks: &DirtyChunks,
+    activation: ActivationContext,
+    f: impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) + Send + Sync,
+) -> Result<(), ExecutionError> {
+    let f = Arc::new(f);
+
+    for &archetype_id in matches {
+        let archetype = &archetypes[archetype_id as usize];
+        let (read_guards, mut write_guards) = lock_columns(archetype, &query)?;
+        let views = build_chunk_view(archetype, &query, &read_guards, &mut write_guards)?;
+        let entity_chunks = archetype
+            .entity_chunks(&views.chunk_lens)
+            .map_err(|_| ExecutionError::InternalExecutionError)?;
+        #[cfg(feature = "gpu")]
+        let dirty_entries =
+            resolve_dirty_entries(archetype, &query, views.chunk_count, dirty_chunks);
+
+        #[cfg(feature = "gpu")]
+        run_chunks_entity(
+            &views,
+            &entity_chunks,
+            &query,
+            archetype_id,
+            activation,
+            &*f,
+            &dirty_entries,
+        );
+
+        #[cfg(not(feature = "gpu"))]
+        run_chunks_entity(
+            &views,
+            &entity_chunks,
+            &query,
+            archetype_id,
+            activation,
+            &*f,
+        );
+
+        drop(read_guards);
+        drop(write_guards);
+    }
+
+    Ok(())
+}
+
 pub(super) fn for_each_fallible_unchecked(
     archetypes: &[Archetype],
-    matches: Vec<ArchetypeID>,
+    matches: &[ArchetypeID],
     query: BuiltQuery,
     #[cfg(feature = "gpu")] dirty_chunks: &DirtyChunks,
     activation: ActivationContext,
@@ -80,7 +131,7 @@ pub(super) fn for_each_fallible_unchecked(
     let abort = Arc::new(AtomicBool::new(false));
     let err: Arc<Mutex<Option<(usize, ECSError)>>> = Arc::new(Mutex::new(None));
 
-    for archetype_id in matches {
+    for &archetype_id in matches {
         let archetype = &archetypes[archetype_id as usize];
         let (read_guards, mut write_guards) =
             lock_columns(archetype, &query).map_err(ECSError::from)?;
@@ -124,9 +175,76 @@ pub(super) fn for_each_fallible_unchecked(
     Ok(())
 }
 
+pub(super) fn for_each_entity_fallible_unchecked(
+    archetypes: &[Archetype],
+    matches: &[ArchetypeID],
+    query: BuiltQuery,
+    #[cfg(feature = "gpu")] dirty_chunks: &DirtyChunks,
+    activation: ActivationContext,
+    f: impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) -> ECSResult<()> + Send + Sync,
+) -> ECSResult<()> {
+    let f = Arc::new(f);
+    let abort = Arc::new(AtomicBool::new(false));
+    let err: Arc<Mutex<Option<(usize, ECSError)>>> = Arc::new(Mutex::new(None));
+
+    for &archetype_id in matches {
+        let archetype = &archetypes[archetype_id as usize];
+        let (read_guards, mut write_guards) =
+            lock_columns(archetype, &query).map_err(ECSError::from)?;
+        let views = build_chunk_view(archetype, &query, &read_guards, &mut write_guards)
+            .map_err(ECSError::from)?;
+        let entity_chunks = archetype.entity_chunks(&views.chunk_lens)?;
+        #[cfg(feature = "gpu")]
+        let dirty_entries =
+            resolve_dirty_entries(archetype, &query, views.chunk_count, dirty_chunks);
+
+        #[cfg(feature = "gpu")]
+        run_chunks_entity_fallible(
+            &views,
+            &entity_chunks,
+            &query,
+            archetype_id,
+            activation,
+            &*f,
+            &abort,
+            &err,
+            &dirty_entries,
+        );
+
+        #[cfg(not(feature = "gpu"))]
+        run_chunks_entity_fallible(
+            &views,
+            &entity_chunks,
+            &query,
+            archetype_id,
+            activation,
+            &*f,
+            &abort,
+            &err,
+        );
+
+        if abort.load(Ordering::Acquire) {
+            let guard = err.lock().map_err(|_| {
+                ECSError::from(ExecutionError::LockPoisoned {
+                    what: "job error latch",
+                })
+            })?;
+            return Err(guard
+                .as_ref()
+                .map(|(_, e)| e.clone())
+                .unwrap_or_else(|| ECSError::from(ExecutionError::InternalExecutionError)));
+        }
+
+        drop(read_guards);
+        drop(write_guards);
+    }
+
+    Ok(())
+}
+
 pub(super) fn reduce_unchecked<R>(
     archetypes: &[Archetype],
-    matches: Vec<ArchetypeID>,
+    matches: &[ArchetypeID],
     query: BuiltQuery,
     init: impl Fn() -> R + Send + Sync,
     fold_chunk: impl Fn(&mut R, &[&[u8]], usize) + Send + Sync,
@@ -139,8 +257,11 @@ where
     let fold_chunk = Arc::new(fold_chunk);
     let combine = Arc::new(combine);
     let partials: Arc<Mutex<Vec<(usize, usize, R)>>> = Arc::new(Mutex::new(Vec::new()));
+    // Set when a worker cannot record its partial because the mutex was
+    // poisoned by a panicking fold on another thread.
+    let partials_poisoned = Arc::new(AtomicBool::new(false));
 
-    for (archetype_order, archetype_id) in matches.into_iter().enumerate() {
+    for (archetype_order, &archetype_id) in matches.iter().enumerate() {
         let archetype = &archetypes[archetype_id as usize];
 
         let mut sorted_reads: Vec<ComponentID> = query.read_ids().to_vec();
@@ -208,7 +329,12 @@ where
                 &*fold_chunk,
                 &mut read_views,
             );
-            partials.lock().unwrap().push((archetype_order, 0, local));
+            partials
+                .lock()
+                .map_err(|_| ExecutionError::LockPoisoned {
+                    what: "reduce partials",
+                })?
+                .push((archetype_order, 0, local));
         } else {
             let views_ref = &views;
 
@@ -219,6 +345,7 @@ where
                     let init = init.clone();
                     let fold_chunk = fold_chunk.clone();
                     let partials = partials.clone();
+                    let partials_poisoned = partials_poisoned.clone();
                     let views = views_ref;
 
                     s.spawn(move |_| {
@@ -234,10 +361,10 @@ where
                             &mut read_views,
                         );
 
-                        partials
-                            .lock()
-                            .unwrap()
-                            .push((archetype_order, start, local));
+                        match partials.lock() {
+                            Ok(mut guard) => guard.push((archetype_order, start, local)),
+                            Err(_) => partials_poisoned.store(true, Ordering::Release),
+                        }
                     });
 
                     start = end;
@@ -248,7 +375,15 @@ where
         drop(read_guards);
     }
 
-    let mut parts = partials.lock().unwrap();
+    if partials_poisoned.load(Ordering::Acquire) {
+        return Err(ExecutionError::LockPoisoned {
+            what: "reduce partials",
+        });
+    }
+
+    let mut parts = partials.lock().map_err(|_| ExecutionError::LockPoisoned {
+        what: "reduce partials",
+    })?;
     parts.sort_by_key(|(archetype_order, start, _)| (*archetype_order, *start));
     let mut out = init();
     for (_, _, p) in parts.drain(..) {
@@ -471,6 +606,73 @@ fn run_chunks(
     });
 }
 
+fn run_chunks_entity(
+    views: &ChunkView,
+    entity_chunks: &[Vec<Entity>],
+    query: &BuiltQuery,
+    archetype_id: crate::engine::types::ArchetypeID,
+    activation: ActivationContext,
+    f: &(impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) + Send + Sync),
+    #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
+) {
+    let threads = rayon::current_num_threads().max(1);
+    let grainsize = (views.chunk_count / threads).max(8);
+    let chunk_order = chunk_order(views.chunk_count, activation, archetype_id);
+
+    rayon::scope(|s| {
+        let mut start = 0usize;
+        while start < chunk_order.len() {
+            let end = (start + grainsize).min(chunk_order.len());
+            let chunks = &chunk_order[start..end];
+
+            s.spawn(move |_| {
+                let mut row_entities: SmallVec<[Entity; 1]> = SmallVec::new();
+                let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
+                let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
+
+                for &chunk in chunks {
+                    let len = views.chunk_lens[chunk];
+                    if len == 0 {
+                        continue;
+                    }
+
+                    #[cfg(feature = "gpu")]
+                    mark_dirty_entries(dirty_entries, chunk);
+
+                    read_views.clear();
+                    write_views.clear();
+                    match activation.order {
+                        ActivationOrder::ShuffleFull => {
+                            let mut rows = row_order(len, activation, archetype_id, chunk);
+                            for row in rows.drain(..) {
+                                row_entities.clear();
+                                row_entities.push(entity_chunks[chunk][row]);
+                                read_views.clear();
+                                write_views.clear();
+                                fill_row_slices(
+                                    views,
+                                    query,
+                                    chunk,
+                                    row,
+                                    &mut read_views,
+                                    &mut write_views,
+                                );
+                                f(&row_entities, &read_views, &mut write_views);
+                            }
+                        }
+                        ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
+                            fill_chunk_slices(views, chunk, &mut read_views, &mut write_views);
+                            f(&entity_chunks[chunk], &read_views, &mut write_views);
+                        }
+                    }
+                }
+            });
+
+            start = end;
+        }
+    });
+}
+
 // Keep the hot-path helper flat: grouping these parameters obscures the two
 // closure shapes and the GPU-only dirty-tracking slice.
 #[allow(clippy::too_many_arguments)]
@@ -561,6 +763,101 @@ fn run_chunks_fallible(
     });
 }
 
+// Keep the hot-path helper flat: grouping these parameters obscures the two
+// closure shapes and the GPU-only dirty-tracking slice.
+#[allow(clippy::too_many_arguments)]
+fn run_chunks_entity_fallible(
+    views: &ChunkView,
+    entity_chunks: &[Vec<Entity>],
+    query: &BuiltQuery,
+    archetype_id: crate::engine::types::ArchetypeID,
+    activation: ActivationContext,
+    f: &(impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) -> ECSResult<()> + Send + Sync),
+    abort: &Arc<AtomicBool>,
+    err: &Arc<Mutex<Option<(usize, ECSError)>>>,
+    #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
+) {
+    let threads = rayon::current_num_threads().max(1);
+    let grainsize = (views.chunk_count / threads).max(8);
+    let chunk_order = chunk_order(views.chunk_count, activation, archetype_id);
+
+    rayon::scope(|s| {
+        let mut start = 0usize;
+        while start < chunk_order.len() {
+            let end = (start + grainsize).min(chunk_order.len());
+            let abort = Arc::clone(abort);
+            let err = Arc::clone(err);
+            let chunks = &chunk_order[start..end];
+
+            s.spawn(move |_| {
+                let mut row_entities: SmallVec<[Entity; 1]> = SmallVec::new();
+                let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
+                let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
+
+                for (ordinal_offset, &chunk) in chunks.iter().enumerate() {
+                    let ordinal = start + ordinal_offset;
+                    if abort.load(Ordering::Acquire) {
+                        let latched = err
+                            .lock()
+                            .map(|g| g.as_ref().map(|(c, _)| *c))
+                            .unwrap_or(None);
+                        if latched.is_some_and(|c| c <= ordinal) {
+                            return;
+                        }
+                    }
+
+                    let len = views.chunk_lens[chunk];
+                    if len == 0 {
+                        continue;
+                    }
+
+                    #[cfg(feature = "gpu")]
+                    mark_dirty_entries(dirty_entries, chunk);
+
+                    read_views.clear();
+                    write_views.clear();
+                    match activation.order {
+                        ActivationOrder::ShuffleFull => {
+                            let mut rows = row_order(len, activation, archetype_id, chunk);
+                            for row in rows.drain(..) {
+                                row_entities.clear();
+                                row_entities.push(entity_chunks[chunk][row]);
+                                read_views.clear();
+                                write_views.clear();
+                                fill_row_slices(
+                                    views,
+                                    query,
+                                    chunk,
+                                    row,
+                                    &mut read_views,
+                                    &mut write_views,
+                                );
+                                if let Err(e) = f(&row_entities, &read_views, &mut write_views) {
+                                    latch_iteration_error(&err, ordinal, e);
+                                    abort.store(true, Ordering::Release);
+                                    return;
+                                }
+                            }
+                        }
+                        ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
+                            fill_chunk_slices(views, chunk, &mut read_views, &mut write_views);
+
+                            if let Err(e) = f(&entity_chunks[chunk], &read_views, &mut write_views)
+                            {
+                                latch_iteration_error(&err, ordinal, e);
+                                abort.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+
+            start = end;
+        }
+    });
+}
+
 #[cfg(feature = "gpu")]
 fn resolve_dirty_entries(
     archetype: &Archetype,
@@ -631,13 +928,6 @@ fn shuffle_with_seed(values: &mut [usize], seed: u64) {
         let j = (r as usize) % (i + 1);
         values.swap(i, j);
     }
-}
-
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
 }
 
 fn latch_iteration_error(

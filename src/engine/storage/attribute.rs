@@ -352,27 +352,8 @@ impl<T> Attribute<T> {
         chunk: ChunkID,
         row: RowID,
     ) -> Result<Option<(ChunkID, RowID)>, AttributeError> {
-        let chunk_count = self.chunks.len();
-
-        if chunk as usize >= self.chunks.len() {
-            return Err(AttributeError::Position(PositionOutOfBoundsError {
-                chunk,
-                row,
-                chunks: chunk_count,
-                capacity: CHUNK_CAP,
-                last_chunk_length: self.last_chunk_length,
-            }));
-        }
-
-        let index = chunk as usize * CHUNK_CAP + row as usize;
-        if index >= self.length {
-            return Err(AttributeError::Position(PositionOutOfBoundsError {
-                chunk,
-                row,
-                chunks: chunk_count,
-                capacity: CHUNK_CAP,
-                last_chunk_length: self.last_chunk_length,
-            }));
+        if !self.valid_position(chunk, row) {
+            return Err(self.position_error(chunk, row));
         }
 
         let last_index = self.length - 1;
@@ -438,27 +419,8 @@ impl<T> Attribute<T> {
         chunk: ChunkID,
         row: RowID,
     ) -> Result<(T, Option<(ChunkID, RowID)>), AttributeError> {
-        let chunk_count = self.chunks.len();
-
-        if chunk as usize >= self.chunks.len() {
-            return Err(AttributeError::Position(PositionOutOfBoundsError {
-                chunk,
-                row,
-                chunks: chunk_count,
-                capacity: CHUNK_CAP,
-                last_chunk_length: self.last_chunk_length,
-            }));
-        }
-
-        let index = chunk as usize * CHUNK_CAP + row as usize;
-        if index >= self.length {
-            return Err(AttributeError::Position(PositionOutOfBoundsError {
-                chunk,
-                row,
-                chunks: chunk_count,
-                capacity: CHUNK_CAP,
-                last_chunk_length: self.last_chunk_length,
-            }));
+        if !self.valid_position(chunk, row) {
+            return Err(self.position_error(chunk, row));
         }
 
         let last_index = self.length - 1;

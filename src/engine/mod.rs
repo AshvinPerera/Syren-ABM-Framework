@@ -24,6 +24,7 @@ pub mod error;
 pub mod manager;
 pub mod plan_display;
 pub mod query;
+pub mod random;
 pub mod reduce;
 pub mod scheduler;
 pub mod storage;

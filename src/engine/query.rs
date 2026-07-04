@@ -70,6 +70,18 @@ impl QueryComponent {
         }
     }
 
+    /// Construct from a [`ComponentDesc`] — used for dynamic (runtime) queries
+    /// where the concrete Rust type is not known at compile time.
+    #[inline]
+    pub fn from_desc(desc: &super::component::ComponentDesc) -> Self {
+        Self {
+            component_id: desc.component_id.unwrap_or(0),
+            type_id: desc.type_id,
+            type_name: desc.name,
+            size: desc.size,
+        }
+    }
+
     /// Runtime component identifier.
     #[inline]
     pub fn component_id(&self) -> ComponentID {
@@ -335,6 +347,28 @@ impl QueryBuilder {
         let id = self.registry_source.resolve::<T>()?;
         self.signature.without.set(id);
         Ok(self)
+    }
+
+    // ── Dynamic query methods (runtime ComponentID) ────────────────────────
+
+    /// Declares read-only access to a component by its runtime [`ComponentID`].
+    ///
+    /// The caller must supply a [`ComponentDesc`] obtained from the
+    /// [`ComponentRegistry`] so that the query knows the component's size,
+    /// TypeId and name without a generic type parameter.
+    pub fn read_id(mut self, desc: &super::component::ComponentDesc) -> Self {
+        let id = desc.component_id.unwrap_or(0);
+        self.signature.read.set(id);
+        self.reads.push(QueryComponent::from_desc(desc));
+        self
+    }
+
+    /// Declares mutable access to a component by its runtime [`ComponentID`].
+    pub fn write_id(mut self, desc: &super::component::ComponentDesc) -> Self {
+        let id = desc.component_id.unwrap_or(0);
+        self.signature.write.set(id);
+        self.writes.push(QueryComponent::from_desc(desc));
+        self
     }
 
     /// Finalizes the query description and returns an immutable [`crate::BuiltQuery`].

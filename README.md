@@ -51,10 +51,13 @@ The `model` feature ties these together behind `ModelBuilder`, which wires up
 component registration, agent populations, environments, messaging, and
 scheduling in a single fluent API.
 
-For performance-critical paths the engine includes a thread-local xorshift64*
-RNG. Each thread owns an independent, lock-free state seeded with a fixed
-constant, giving deterministic output per thread with zero synchronisation
-overhead.
+Randomness is deliberately *keyed*, not thread-local: activation-order
+shuffles derive from a `splitmix64` stream seeded by (global seed, system,
+archetype, chunk), and the public `DetRng` type gives model systems the same
+property for per-agent draws. Because Rayon's work stealing assigns chunks to
+worker threads nondeterministically, a thread-local RNG would break run-to-run
+reproducibility; deriving randomness from simulation coordinates keeps results
+identical for a fixed seed at any thread count.
 
 ## Feature Flags
 
@@ -274,7 +277,7 @@ src/
   lib.rs                — public API re-exports and prelude
   engine/               — core ECS: archetypes, entities, components, scheduler,
                           queries, commands, boundaries, borrow tracking, workers
-    random.rs           — thread-local xorshift64* RNG
+    random.rs           — deterministic seed-keyed RNG (DetRng, splitmix64)
   agents/               — agent templates, spawners, batch spawning, handles, registry
   environment/          — typed key-value parameter store with dirty-channel tracking
   messaging/            — per-tick typed message buffers (brute-force, bucket,

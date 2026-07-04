@@ -14,10 +14,13 @@
 //! | [`ShuffleFull`](ActivationOrder::ShuffleFull) | Individual rows shuffled within each chunk | One Fisher-Yates pass per chunk |
 //!
 //! `Sequential` is the default and incurs no cost. The shuffle variants use
-//! [`tl_rand_u64`](crate::engine::random::tl_rand_u64) so that each worker
-//! thread has an independent, deterministically seeded RNG - results are
-//! reproducible given a fixed global seed set via
-//! [`Scheduler::seed`](crate::engine::scheduler::Scheduler::seed).
+//! a Fisher-Yates pass driven by a `splitmix64` stream keyed on the global
+//! seed, system id, archetype id, and chunk index - deliberately *not* a
+//! thread-local RNG, so the visit order is reproducible for a fixed seed set
+//! via [`Scheduler::seed`](crate::engine::scheduler::Scheduler::seed)
+//! regardless of how Rayon assigns chunks to worker threads. Model code that
+//! needs per-agent randomness should use [`DetRng`](crate::DetRng) for the
+//! same reason.
 //!
 //! ## Integration with the scheduler
 //!
@@ -56,6 +59,21 @@ pub enum ActivationOrder {
     ShuffleFull,
 }
 
+/// Deterministic execution context for the system currently running on this
+/// thread.
+///
+/// The scheduler installs this context before calling `System::run`. Code
+/// running outside a scheduled system observes the zero-valued default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunContext {
+    /// Global simulation seed selected by the model or generated crate.
+    pub simulation_seed: u64,
+    /// Current model tick.
+    pub tick: u64,
+    /// Stable identifier of the system currently executing.
+    pub system_id: crate::engine::types::SystemID,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ActivationContext {
     pub(crate) order: ActivationOrder,
@@ -80,6 +98,12 @@ thread_local! {
             seed: 0,
             system_id: 0,
         }) };
+    static CURRENT_RUN_CONTEXT: std::cell::Cell<RunContext> =
+        const { std::cell::Cell::new(RunContext {
+            simulation_seed: 0,
+            tick: 0,
+            system_id: 0,
+        }) };
 }
 
 pub(crate) fn current_activation_context() -> ActivationContext {
@@ -88,6 +112,19 @@ pub(crate) fn current_activation_context() -> ActivationContext {
 
 pub(crate) fn with_activation_context<R>(context: ActivationContext, f: impl FnOnce() -> R) -> R {
     CURRENT_ACTIVATION.with(|cell| {
+        let previous = cell.replace(context);
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+pub(crate) fn current_run_context() -> RunContext {
+    CURRENT_RUN_CONTEXT.with(std::cell::Cell::get)
+}
+
+pub(crate) fn with_run_context<R>(context: RunContext, f: impl FnOnce() -> R) -> R {
+    CURRENT_RUN_CONTEXT.with(|cell| {
         let previous = cell.replace(context);
         let result = f();
         cell.set(previous);

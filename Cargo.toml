@@ -134,3 +134,12 @@ required-features = ["gpu"]
 name = "gpu_message_finalisation"
 harness = false
 required-features = ["model", "messaging_gpu"]
+
+[[example]]
+name = "sugarscape"
+path = "examples/sugarscape/sugarscape_v2.rs"
+
+[[example]]
+name = "macroeconomy"
+path = "examples/macroeconomy/main.rs"
+required-features = ["model", "messaging"]

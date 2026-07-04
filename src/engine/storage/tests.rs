@@ -332,6 +332,42 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Position validation (regression: row >= CHUNK_CAP must error, not panic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn swap_remove_rejects_row_beyond_chunk_capacity() {
+        let mut attr: Attribute<u64> = Attribute::default();
+        // Two full chunks, so `chunk*CHUNK_CAP + row < length` holds for the
+        // out-of-range row below and the old index-only check would pass.
+        for i in 0..(2 * CHUNK_CAP) {
+            attr.push(i as u64).unwrap();
+        }
+
+        let result = attr.swap_remove(0, (CHUNK_CAP + 5) as u32);
+        assert!(
+            matches!(result, Err(crate::engine::error::AttributeError::Position(_))),
+            "expected Position error, got {result:?}"
+        );
+        assert_eq!(attr.length, 2 * CHUNK_CAP, "attribute must be unchanged");
+    }
+
+    #[test]
+    fn take_swap_remove_rejects_row_beyond_chunk_capacity() {
+        let mut attr: Attribute<u64> = Attribute::default();
+        for i in 0..(2 * CHUNK_CAP) {
+            attr.push(i as u64).unwrap();
+        }
+
+        let result = attr.take_swap_remove(0, (CHUNK_CAP + 5) as u32);
+        assert!(
+            matches!(result, Err(crate::engine::error::AttributeError::Position(_))),
+            "expected Position error, got Ok/other"
+        );
+        assert_eq!(attr.length, 2 * CHUNK_CAP, "attribute must be unchanged");
+    }
+
+    // -----------------------------------------------------------------------
     // Debug impl
     // -----------------------------------------------------------------------
 

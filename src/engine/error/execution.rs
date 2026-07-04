@@ -267,6 +267,10 @@ pub enum ExecutionError {
 
     /// Unsafe execution path was invoked incorrectly.
     InternalExecutionError,
+
+    /// A system's runtime logic produced an error (e.g. a Python script failure).
+    /// The contained string carries the formatted error message.
+    SystemRuntime(String),
 }
 
 impl fmt::Display for ExecutionError {
@@ -380,6 +384,9 @@ impl fmt::Display for ExecutionError {
 
             ExecutionError::InternalExecutionError =>
                 f.write_str("internal ECS execution error"),
+
+            ExecutionError::SystemRuntime(msg) =>
+                write!(f, "system runtime error: {}", msg),
         }
     }
 }

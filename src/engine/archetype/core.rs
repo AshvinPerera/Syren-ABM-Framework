@@ -338,4 +338,30 @@ impl Archetype {
             Ok(if used == 0 { CHUNK_CAP } else { used })
         }
     }
+
+    pub(crate) fn entity_chunks(&self, chunk_lens: &[usize]) -> ECSResult<Vec<Vec<Entity>>> {
+        let meta = self
+            .meta
+            .read()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+        let mut out = Vec::with_capacity(chunk_lens.len());
+        for (chunk, &len) in chunk_lens.iter().enumerate() {
+            let Some(positions) = meta.entity_positions.get(chunk) else {
+                return Err(ECSError::from(
+                    InternalViolation::ArchetypeEntityPositionMissing,
+                ));
+            };
+            let mut entities = Vec::with_capacity(len);
+            for row in 0..len {
+                let Some(entity) = positions.get(row).and_then(|slot| *slot) else {
+                    return Err(ECSError::from(
+                        InternalViolation::ArchetypeEntityPositionMissing,
+                    ));
+                };
+                entities.push(entity);
+            }
+            out.push(entities);
+        }
+        Ok(out)
+    }
 }

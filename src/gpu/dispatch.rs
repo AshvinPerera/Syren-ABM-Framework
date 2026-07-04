@@ -54,6 +54,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use crate::engine::activation::RunContext;
 use crate::engine::archetype::Archetype;
 use crate::engine::component::{or_signature_in_place, Signature};
 use crate::engine::error::{ECSError, ECSResult, ExecutionError};
@@ -421,6 +422,7 @@ pub fn execute_gpu_system(
     ecs: ECSReference<'_>,
     system: &dyn System,
     gpu: &dyn GpuSystem,
+    run_context: RunContext,
 ) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
         let mut access = system.access().clone();
@@ -469,6 +471,7 @@ pub fn execute_gpu_system(
                 world_state,
                 system.id(),
                 gpu,
+                run_context,
                 archetypes,
                 &access,
                 gpu_resources,
@@ -502,6 +505,7 @@ fn dispatch_over_archetypes(
     world_state: &mut GpuWorldState,
     system_id: crate::engine::types::SystemID,
     gpu: &dyn GpuSystem,
+    run_context: RunContext,
     archetypes: &[Archetype],
     access: &crate::engine::systems::AccessSets,
     gpu_resources: &GPUResourceRegistry,
@@ -623,8 +627,12 @@ fn dispatch_over_archetypes(
             struct Params {
                 entity_len: u32,
                 archetype_base: u32,
-                _pad1: u32,
-                _pad2: u32,
+                simulation_seed_lo: u32,
+                simulation_seed_hi: u32,
+                tick_lo: u32,
+                tick_hi: u32,
+                system_id: u32,
+                _pad0: u32,
             }
 
             unsafe impl bytemuck::Pod for Params {}
@@ -633,8 +641,12 @@ fn dispatch_over_archetypes(
             let params = Params {
                 entity_len,
                 archetype_base,
-                _pad1: 0,
-                _pad2: 0,
+                simulation_seed_lo: run_context.simulation_seed as u32,
+                simulation_seed_hi: (run_context.simulation_seed >> 32) as u32,
+                tick_lo: run_context.tick as u32,
+                tick_hi: (run_context.tick >> 32) as u32,
+                system_id: run_context.system_id as u32,
+                _pad0: 0,
             };
 
             let size = size_of::<Params>() as u64;

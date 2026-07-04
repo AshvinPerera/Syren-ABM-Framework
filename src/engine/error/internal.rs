@@ -67,6 +67,10 @@ pub enum InternalViolation {
     /// entity - metadata is out of sync.
     DespawnMovedSlotMissingEntity,
 
+    /// A query tried to snapshot a live row whose archetype metadata had no
+    /// associated entity.
+    ArchetypeEntityPositionMissing,
+
     /// `from_components` encountered a component type that is not
     /// registered in the global registry.
     ComponentTypeNotRegistered,
@@ -128,6 +132,9 @@ impl fmt::Display for InternalViolation {
             }
             InternalViolation::DespawnMovedSlotMissingEntity => {
                 f.write_str("despawn_on: moved slot missing entity; metadata out of sync")
+            }
+            InternalViolation::ArchetypeEntityPositionMissing => {
+                f.write_str("query: live row missing entity position metadata")
             }
             InternalViolation::ComponentTypeNotRegistered => {
                 f.write_str("from_components: component type not registered")

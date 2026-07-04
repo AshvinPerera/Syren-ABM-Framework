@@ -76,13 +76,29 @@ impl SpatialConfig {
     /// circle centred at `(cx, cy)` with radius `r`.
     ///
     /// Returns `(col_lo, col_hi, row_lo, row_hi)`.
+    ///
+    /// If the circle's bounding box does not intersect the grid at all (or
+    /// any input is NaN), an **inverted range** (`lo > hi`) is returned so
+    /// callers can detect emptiness. All indices of a non-inverted range are
+    /// guaranteed to lie within the grid.
     #[inline]
     pub fn cell_range_for_radius(&self, cx: f32, cy: f32, r: f32) -> (u32, u32, u32, u32) {
         let cols = self.cols();
         let rows = self.rows();
-        let col_lo = ((cx - r) / self.cell_size).floor().max(0.0) as u32;
+
+        // A circle whose bounding box lies entirely outside the grid covers
+        // no cells. The comparison form also routes NaN inputs here.
+        let intersects = cx + r >= 0.0
+            && cy + r >= 0.0
+            && cx - r < self.width
+            && cy - r < self.height;
+        if !intersects {
+            return (1, 0, 1, 0);
+        }
+
+        let col_lo = ((((cx - r) / self.cell_size).floor().max(0.0)) as u32).min(cols - 1);
         let col_hi = ((cx + r) / self.cell_size).ceil().min((cols - 1) as f32) as u32;
-        let row_lo = ((cy - r) / self.cell_size).floor().max(0.0) as u32;
+        let row_lo = ((((cy - r) / self.cell_size).floor().max(0.0)) as u32).min(rows - 1);
         let row_hi = ((cy + r) / self.cell_size).ceil().min((rows - 1) as f32) as u32;
         (col_lo, col_hi, row_lo, row_hi)
     }

@@ -150,6 +150,13 @@ impl<'a, M: Message> SpatialQueryIter<'a, M> {
         let data: &'a [M] = unsafe { buf.data.as_slice() };
         let (col_lo, col_hi, row_lo, row_hi) = buf.config.cell_range_for_radius(cx, cy, r);
 
+        // An inverted range means the query circle does not intersect the
+        // grid; iterating it would alias into unrelated rows via the flat
+        // `row * cols + col` cell index.
+        if col_lo > col_hi || row_lo > row_hi {
+            return Self::empty_with_config(buf.config);
+        }
+
         let mut iter = SpatialQueryIter {
             data,
             cell_starts: &buf.cell_starts,
@@ -305,5 +312,92 @@ mod tests {
                 function: "position"
             })
         ));
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: query circles entirely outside the grid must yield no
+    // messages instead of aliasing into unrelated rows through the flat
+    // `row * cols + col` cell index.
+    // -------------------------------------------------------------------
+
+    #[derive(Clone, Copy)]
+    struct PosMsg {
+        x: f32,
+        y: f32,
+    }
+
+    impl crate::messaging::message::Message for PosMsg {}
+    impl crate::messaging::message::SpatialMessage for PosMsg {
+        fn position(&self) -> (f32, f32) {
+            (self.x, self.y)
+        }
+    }
+
+    /// Type-erased position accessor matching `PositionFn`.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid `PosMsg`.
+    unsafe fn pos_of(ptr: *const u8) -> (f32, f32) {
+        let msg = unsafe { &*(ptr as *const PosMsg) };
+        (msg.x, msg.y)
+    }
+
+    fn populated_grid() -> SpatialBuffer {
+        let config = SpatialConfig {
+            width: 10.0,
+            height: 10.0,
+            cell_size: 1.0,
+        };
+        let (size, align) = (
+            std::mem::size_of::<PosMsg>(),
+            std::mem::align_of::<PosMsg>(),
+        );
+        let mut raw = AlignedBuffer::with_capacity(size, align, 16);
+        // One message per row of column 5, so every row has content that a
+        // column-aliasing bug would leak into out-of-grid queries.
+        for row in 0..10 {
+            unsafe {
+                raw.push(PosMsg {
+                    x: 5.5,
+                    y: row as f32 + 0.5,
+                })
+            };
+        }
+        let mut buf = SpatialBuffer::new(size, align, config, 16);
+        let fns = ErasedFns {
+            bucket_key: None,
+            position: Some(pos_of),
+            recipient: None,
+        };
+        unsafe { buf.finalise(&raw, &fns) }.unwrap();
+        buf
+    }
+
+    #[test]
+    fn queries_fully_outside_grid_yield_no_messages() {
+        let buf = populated_grid();
+        // East, west, north, south of the 10x10 grid, radius 1.
+        for (cx, cy) in [(15.0, 5.0), (-5.0, 5.0), (5.0, 15.0), (5.0, -5.0)] {
+            let hits: Vec<PosMsg> = SpatialQueryIter::<PosMsg>::new(&buf, cx, cy, 1.0).collect();
+            assert!(
+                hits.is_empty(),
+                "query at ({cx}, {cy}) returned {} phantom messages",
+                hits.len()
+            );
+        }
+    }
+
+    #[test]
+    fn edge_overlapping_query_still_returns_messages() {
+        let buf = populated_grid();
+        // Circle centred just outside the east edge but overlapping column 9;
+        // it must yield nothing from column 5 (bounding box covers cols 8..=9)
+        // and iterate without panicking.
+        let hits: Vec<PosMsg> = SpatialQueryIter::<PosMsg>::new(&buf, 10.5, 5.0, 1.0).collect();
+        assert!(hits.is_empty());
+
+        // Circle covering the whole grid sees all ten messages.
+        let hits: Vec<PosMsg> = SpatialQueryIter::<PosMsg>::new(&buf, 5.0, 5.0, 20.0).collect();
+        assert_eq!(hits.len(), 10);
     }
 }

@@ -41,6 +41,7 @@
 //! - uphold the aliasing guarantees required by `cast_slice` /
 //!   `cast_slice_mut`.
 
+use crate::engine::entity::Entity;
 use crate::engine::error::{ECSError, ECSResult, InternalViolation};
 use crate::engine::query::BuiltQuery;
 use crate::engine::storage::{cast_slice, cast_slice_mut};
@@ -84,6 +85,51 @@ pub unsafe trait QueryParam: Send + Sync {
     unsafe fn for_each_chunk(reads: &[&[u8]], writes: &mut [&mut [u8]], f: &Self::Closure);
 }
 
+/// Entity-aware variant of [`QueryParam`].
+///
+/// Implementations receive a row-aligned entity slice in addition to the
+/// component byte slices. The slice contains exactly one [`Entity`] for each
+/// component row in the chunk, allowing generated systems to map a component
+/// reference back to its owning entity without changing component storage.
+///
+/// # Safety
+///
+/// Implementors inherit the [`QueryParam`] safety requirements and must also
+/// keep the entity slice indexed in lockstep with the component slices.
+pub unsafe trait EntityQueryParam: QueryParam {
+    /// Infallible closure type used by entity-aware iteration.
+    type EntityClosure: ?Sized;
+
+    /// Fallible closure type used by entity-aware iteration.
+    type EntityFallibleClosure: ?Sized;
+
+    /// Iterates one chunk and invokes `f` once per entity row.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that `entities`, `reads`, and `writes` describe
+    /// the same chunk and row count.
+    unsafe fn for_each_entity_chunk(
+        entities: &[Entity],
+        reads: &[&[u8]],
+        writes: &mut [&mut [u8]],
+        f: &Self::EntityClosure,
+    );
+
+    /// Iterates one chunk with a fallible closure.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that `entities`, `reads`, and `writes` describe
+    /// the same chunk and row count.
+    unsafe fn for_each_entity_chunk_fallible(
+        entities: &[Entity],
+        reads: &[&[u8]],
+        writes: &mut [&mut [u8]],
+        f: &Self::EntityFallibleClosure,
+    ) -> ECSResult<()>;
+}
+
 // --- Implementations for single Read/Write ---
 
 unsafe impl<A: 'static + Send + Sync> QueryParam for Read<A> {
@@ -110,6 +156,40 @@ unsafe impl<A: 'static + Send + Sync> QueryParam for Read<A> {
     }
 }
 
+unsafe impl<A: 'static + Send + Sync> EntityQueryParam for Read<A> {
+    type EntityClosure = dyn Fn((Entity, &A)) + Send + Sync;
+    type EntityFallibleClosure = dyn Fn((Entity, &A)) -> ECSResult<()> + Send + Sync;
+
+    unsafe fn for_each_entity_chunk(
+        entities: &[Entity],
+        reads: &[&[u8]],
+        _writes: &mut [&mut [u8]],
+        f: &Self::EntityClosure,
+    ) {
+        // SAFETY: Caller guarantees the byte slice is correctly typed for A.
+        let a = unsafe { cast_slice::<A>(reads[0].as_ptr(), reads[0].len()) };
+        debug_assert_eq!(entities.len(), a.len());
+        for i in 0..a.len() {
+            f((entities[i], &a[i]));
+        }
+    }
+
+    unsafe fn for_each_entity_chunk_fallible(
+        entities: &[Entity],
+        reads: &[&[u8]],
+        _writes: &mut [&mut [u8]],
+        f: &Self::EntityFallibleClosure,
+    ) -> ECSResult<()> {
+        // SAFETY: Caller guarantees the byte slice is correctly typed for A.
+        let a = unsafe { cast_slice::<A>(reads[0].as_ptr(), reads[0].len()) };
+        debug_assert_eq!(entities.len(), a.len());
+        for i in 0..a.len() {
+            f((entities[i], &a[i]))?;
+        }
+        Ok(())
+    }
+}
+
 unsafe impl<A: 'static + Send + Sync> QueryParam for Write<A> {
     type Closure = dyn Fn(&mut A) + Send + Sync;
 
@@ -131,6 +211,40 @@ unsafe impl<A: 'static + Send + Sync> QueryParam for Write<A> {
         for v in a {
             f(v);
         }
+    }
+}
+
+unsafe impl<A: 'static + Send + Sync> EntityQueryParam for Write<A> {
+    type EntityClosure = dyn Fn((Entity, &mut A)) + Send + Sync;
+    type EntityFallibleClosure = dyn Fn((Entity, &mut A)) -> ECSResult<()> + Send + Sync;
+
+    unsafe fn for_each_entity_chunk(
+        entities: &[Entity],
+        _reads: &[&[u8]],
+        writes: &mut [&mut [u8]],
+        f: &Self::EntityClosure,
+    ) {
+        // SAFETY: Caller guarantees the byte slice is correctly typed for A.
+        let a = unsafe { cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len()) };
+        debug_assert_eq!(entities.len(), a.len());
+        for i in 0..a.len() {
+            f((entities[i], &mut a[i]));
+        }
+    }
+
+    unsafe fn for_each_entity_chunk_fallible(
+        entities: &[Entity],
+        _reads: &[&[u8]],
+        writes: &mut [&mut [u8]],
+        f: &Self::EntityFallibleClosure,
+    ) -> ECSResult<()> {
+        // SAFETY: Caller guarantees the byte slice is correctly typed for A.
+        let a = unsafe { cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len()) };
+        debug_assert_eq!(entities.len(), a.len());
+        for i in 0..a.len() {
+            f((entities[i], &mut a[i]))?;
+        }
+        Ok(())
     }
 }
 
@@ -198,6 +312,83 @@ macro_rules! impl_query_param_tuple {
                 for _i in 0.._len {
                     f(($(&$R[_i],)* $(&mut $W[_i],)*));
                 }
+            }
+        }
+
+        unsafe impl<$($R: 'static + Send + Sync,)* $($W: 'static + Send + Sync,)*>
+            EntityQueryParam for ($(Read<$R>,)* $(Write<$W>,)*)
+        {
+            type EntityClosure = dyn Fn((Entity, $(&$R,)* $(&mut $W,)*)) + Send + Sync;
+            type EntityFallibleClosure =
+                dyn Fn((Entity, $(&$R,)* $(&mut $W,)*)) -> ECSResult<()> + Send + Sync;
+
+            #[allow(unused_variables, unused_assignments, non_snake_case)]
+            unsafe fn for_each_entity_chunk(
+                entities: &[Entity],
+                reads: &[&[u8]],
+                writes: &mut [&mut [u8]],
+                f: &Self::EntityClosure,
+            ) {
+                // SAFETY: Caller guarantees byte slices are correctly typed
+                // and aligned for the corresponding component types.
+
+                $(
+                    let $R = unsafe {
+                        cast_slice::<$R>(reads[$ri].as_ptr(), reads[$ri].len())
+                    };
+                )*
+
+                $(
+                    let $W = unsafe {
+                        cast_slice_mut::<$W>(writes[$wi].as_mut_ptr(), writes[$wi].len())
+                    };
+                )*
+
+                let _len: usize;
+                impl_query_param_tuple!(@first_len _len, [$($R),*], [$($W),*]);
+
+                debug_assert_eq!(entities.len(), _len);
+                $( debug_assert_eq!($R.len(), _len); )*
+                $( debug_assert_eq!($W.len(), _len); )*
+
+                for _i in 0.._len {
+                    f((entities[_i], $(&$R[_i],)* $(&mut $W[_i],)*));
+                }
+            }
+
+            #[allow(unused_variables, unused_assignments, non_snake_case)]
+            unsafe fn for_each_entity_chunk_fallible(
+                entities: &[Entity],
+                reads: &[&[u8]],
+                writes: &mut [&mut [u8]],
+                f: &Self::EntityFallibleClosure,
+            ) -> ECSResult<()> {
+                // SAFETY: Caller guarantees byte slices are correctly typed
+                // and aligned for the corresponding component types.
+
+                $(
+                    let $R = unsafe {
+                        cast_slice::<$R>(reads[$ri].as_ptr(), reads[$ri].len())
+                    };
+                )*
+
+                $(
+                    let $W = unsafe {
+                        cast_slice_mut::<$W>(writes[$wi].as_mut_ptr(), writes[$wi].len())
+                    };
+                )*
+
+                let _len: usize;
+                impl_query_param_tuple!(@first_len _len, [$($R),*], [$($W),*]);
+
+                debug_assert_eq!(entities.len(), _len);
+                $( debug_assert_eq!($R.len(), _len); )*
+                $( debug_assert_eq!($W.len(), _len); )*
+
+                for _i in 0.._len {
+                    f((entities[_i], $(&$R[_i],)* $(&mut $W[_i],)*))?;
+                }
+                Ok(())
             }
         }
     };

@@ -93,7 +93,8 @@ pub use engine::types::{BoundaryID, ChannelID};
 #[cfg(feature = "gpu")]
 pub use engine::types::{GPUAccessMode, GPUResourceID};
 
-pub use engine::activation::ActivationOrder;
+pub use engine::activation::{ActivationOrder, RunContext};
+pub use engine::random::DetRng;
 pub use engine::boundary::{BoundaryChannelProfile, BoundaryContext, BoundaryResource};
 pub use engine::dot_export::DotExport;
 pub use engine::plan_display::PlanDisplay;
@@ -142,6 +143,6 @@ pub mod model;
 pub mod prelude {
     pub use crate::{
         BuiltQuery, ComponentRegistry, ECSManager, ECSReference, Entity, FnSystem, QueryBuilder,
-        QueryComponent, QuerySignature, Signature, System, SystemBackend,
+        QueryComponent, QuerySignature, RunContext, Signature, System, SystemBackend,
     };
 }
