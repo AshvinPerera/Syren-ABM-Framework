@@ -96,6 +96,10 @@ name = "scheduler_execution"
 harness = false
 
 [[bench]]
+name = "parallel_scaling"
+harness = false
+
+[[bench]]
 name = "message_specialisations"
 harness = false
 required-features = ["messaging"]

@@ -825,6 +825,116 @@ mod tests {
     }
 
     #[test]
+    fn sub_chunk_ranges_visit_each_row_exactly_once() {
+        // 20_000 rows span two chunks; on any multi-core machine the work
+        // planner splits them into sub-chunk row ranges, so this guards the
+        // exactly-once property of range-disjoint parallel iteration.
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let n = 20_000u32;
+
+        for i in 0..n {
+            world
+                .defer(Command::Spawn {
+                    bundle: marker_bundle(marker_id, i),
+                })
+                .unwrap();
+        }
+        ecs.apply_deferred_commands().unwrap();
+
+        let write_query = world
+            .query()
+            .unwrap()
+            .write::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        for _ in 0..3 {
+            world
+                .for_each_w1(write_query.clone(), |marker: &mut Marker| {
+                    marker.0 += 1_000_000;
+                })
+                .unwrap();
+        }
+
+        let read_query = world
+            .query()
+            .unwrap()
+            .read::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let count = AtomicUsize::new(0);
+        let overwritten = std::sync::atomic::AtomicU64::new(0);
+        world
+            .for_each_r1(read_query, |marker: &Marker| {
+                count.fetch_add(1, Ordering::Relaxed);
+                // Every row must have received exactly three increments.
+                if marker.0 < 3_000_000 || marker.0 >= 3_000_000 + n {
+                    overwritten.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .unwrap();
+
+        assert_eq!(count.load(Ordering::Relaxed), n as usize);
+        assert_eq!(
+            overwritten.load(Ordering::Relaxed),
+            0,
+            "some rows were visited more or fewer than three times"
+        );
+    }
+
+    #[test]
+    fn entity_slices_stay_row_aligned_under_range_splitting() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let n = 20_000u32;
+
+        for i in 0..n {
+            world
+                .defer(Command::Spawn {
+                    bundle: marker_bundle(marker_id, i),
+                })
+                .unwrap();
+        }
+        let events = ecs.apply_deferred_commands().unwrap();
+
+        // Ground truth: entity -> the marker value it was spawned with.
+        let expected: std::collections::HashMap<crate::engine::entity::Entity, u32> = events
+            .spawned
+            .iter()
+            .enumerate()
+            .map(|(i, event)| (event.entity, i as u32))
+            .collect();
+        assert_eq!(expected.len(), n as usize);
+
+        let query = world
+            .query()
+            .unwrap()
+            .read::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let observed: std::sync::Mutex<Vec<(crate::engine::entity::Entity, u32)>> =
+            std::sync::Mutex::new(Vec::with_capacity(n as usize));
+        world
+            .for_each_entity_r1(query, |entity, marker: &Marker| {
+                observed.lock().unwrap().push((entity, marker.0));
+            })
+            .unwrap();
+
+        let observed = observed.into_inner().unwrap();
+        assert_eq!(observed.len(), n as usize);
+        for (entity, value) in observed {
+            assert_eq!(
+                expected.get(&entity),
+                Some(&value),
+                "entity slice and component rows disagree under range splitting"
+            );
+        }
+    }
+
+    #[test]
     fn failed_deferred_drain_returns_spawn_and_despawn_events_from_committed_prefix() {
         let (ecs, marker_id, _extra_id) = test_manager();
         let base = spawn_marker(&ecs, marker_id, 0);

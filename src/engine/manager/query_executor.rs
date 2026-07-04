@@ -32,6 +32,87 @@ type WriteGuard<'a> = (
     RwLockWriteGuard<'a, Box<dyn TypeErasedAttribute>>,
 );
 
+/// Minimum number of rows a work range may contain when a chunk is split
+/// across tasks. Even trivial per-row work amortises a Rayon spawn well
+/// before this many rows, and larger floors would re-create the coarse
+/// granularity this planner exists to avoid.
+const MIN_ROWS_PER_RANGE: usize = 2048;
+
+/// A contiguous run of rows within one chunk, executed by exactly one task.
+///
+/// `ordinal` is the range's position in the deterministic flattened work
+/// order; fallible runs use it to latch the lowest-ordinal error so the
+/// surfaced error is independent of thread count.
+#[derive(Clone, Copy, Debug)]
+struct WorkRange {
+    chunk: usize,
+    row_lo: usize,
+    row_hi: usize,
+    ordinal: usize,
+}
+
+/// Splits an archetype's chunks into parallel tasks of contiguous row ranges.
+///
+/// Sizing policy:
+/// - aim for `threads * 2` tasks (oversubscription smooths load imbalance),
+/// - never below one whole chunk of work when chunks are plentiful,
+/// - when there are fewer chunks than target tasks, split chunks into row
+///   ranges no smaller than [`MIN_ROWS_PER_RANGE`], so small populations
+///   still spread across the machine.
+///
+/// Chunk visit order honours `ShuffleChunks`; empty chunks are dropped.
+/// Ranges are packed into tasks contiguously, preserving the deterministic
+/// flattened order that `ordinal` records.
+fn plan_work_tasks(
+    chunk_lens: &[usize],
+    threads: usize,
+    activation: ActivationContext,
+    archetype_id: ArchetypeID,
+) -> Vec<Vec<WorkRange>> {
+    let total_rows: usize = chunk_lens.iter().sum();
+    if total_rows == 0 {
+        return Vec::new();
+    }
+
+    let order = chunk_order(chunk_lens.len(), activation, archetype_id);
+    let target_tasks = threads.saturating_mul(2).max(1);
+    let rows_per_range = (total_rows / target_tasks).max(MIN_ROWS_PER_RANGE);
+
+    let mut ranges: Vec<WorkRange> = Vec::new();
+    let mut ordinal = 0usize;
+    for &chunk in &order {
+        let len = chunk_lens[chunk];
+        if len == 0 {
+            continue;
+        }
+        // Number of near-equal ranges for this chunk (floor division keeps
+        // every range at or above `rows_per_range` except when len is small,
+        // where the whole chunk becomes a single range).
+        let splits = (len / rows_per_range).max(1);
+        let base = len / splits;
+        let remainder = len % splits;
+        let mut row_lo = 0usize;
+        for i in 0..splits {
+            let size = base + usize::from(i < remainder);
+            ranges.push(WorkRange {
+                chunk,
+                row_lo,
+                row_hi: row_lo + size,
+                ordinal,
+            });
+            ordinal += 1;
+            row_lo += size;
+        }
+    }
+
+    let task_count = ranges.len().min(target_tasks).max(1);
+    let per_task = ranges.len().div_ceil(task_count);
+    ranges
+        .chunks(per_task)
+        .map(|group| group.to_vec())
+        .collect()
+}
+
 pub(super) fn for_each_unchecked(
     archetypes: &[Archetype],
     matches: &[ArchetypeID],
@@ -48,7 +129,7 @@ pub(super) fn for_each_unchecked(
         let views = build_chunk_view(archetype, &query, &read_guards, &mut write_guards)?;
         #[cfg(feature = "gpu")]
         let dirty_entries =
-            resolve_dirty_entries(archetype, &query, views.chunk_count, dirty_chunks);
+            resolve_dirty_entries(archetype, &query, views.chunk_lens.len(), dirty_chunks);
 
         #[cfg(feature = "gpu")]
         run_chunks(
@@ -89,7 +170,7 @@ pub(super) fn for_each_entity_unchecked(
             .map_err(|_| ExecutionError::InternalExecutionError)?;
         #[cfg(feature = "gpu")]
         let dirty_entries =
-            resolve_dirty_entries(archetype, &query, views.chunk_count, dirty_chunks);
+            resolve_dirty_entries(archetype, &query, views.chunk_lens.len(), dirty_chunks);
 
         #[cfg(feature = "gpu")]
         run_chunks_entity(
@@ -139,7 +220,7 @@ pub(super) fn for_each_fallible_unchecked(
             .map_err(ECSError::from)?;
         #[cfg(feature = "gpu")]
         let dirty_entries =
-            resolve_dirty_entries(archetype, &query, views.chunk_count, dirty_chunks);
+            resolve_dirty_entries(archetype, &query, views.chunk_lens.len(), dirty_chunks);
 
         #[cfg(feature = "gpu")]
         run_chunks_fallible(
@@ -196,7 +277,7 @@ pub(super) fn for_each_entity_fallible_unchecked(
         let entity_chunks = archetype.entity_chunks(&views.chunk_lens)?;
         #[cfg(feature = "gpu")]
         let dirty_entries =
-            resolve_dirty_entries(archetype, &query, views.chunk_count, dirty_chunks);
+            resolve_dirty_entries(archetype, &query, views.chunk_lens.len(), dirty_chunks);
 
         #[cfg(feature = "gpu")]
         run_chunks_entity_fallible(
@@ -307,7 +388,6 @@ where
         }
 
         let views = ChunkView {
-            chunk_count,
             chunk_lens,
             n_reads,
             n_writes: 0,
@@ -316,32 +396,33 @@ where
         };
 
         let threads = rayon::current_num_threads().max(1);
-        let grainsize = (views.chunk_count / threads).max(8);
+        // Reductions always fold in sequential chunk order; the default
+        // activation context yields the identity chunk ordering.
+        let tasks = plan_work_tasks(
+            &views.chunk_lens,
+            threads,
+            ActivationContext::default(),
+            archetype_id,
+        );
 
-        if views.chunk_count <= grainsize {
-            let mut local = init();
-            let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::with_capacity(views.n_reads);
-            fold_reduce_range(
-                &views,
-                0,
-                views.chunk_count,
-                &mut local,
-                &*fold_chunk,
-                &mut read_views,
-            );
-            partials
-                .lock()
-                .map_err(|_| ExecutionError::LockPoisoned {
-                    what: "reduce partials",
-                })?
-                .push((archetype_order, 0, local));
+        if tasks.len() <= 1 {
+            if let Some(task) = tasks.first() {
+                let mut local = init();
+                let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::with_capacity(views.n_reads);
+                fold_reduce_task(&views, &query, task, &mut local, &*fold_chunk, &mut read_views);
+                partials
+                    .lock()
+                    .map_err(|_| ExecutionError::LockPoisoned {
+                        what: "reduce partials",
+                    })?
+                    .push((archetype_order, task[0].ordinal, local));
+            }
         } else {
             let views_ref = &views;
+            let query_ref = &query;
 
             rayon::scope(|s| {
-                let mut start = 0usize;
-                while start < views_ref.chunk_count {
-                    let end = (start + grainsize).min(views_ref.chunk_count);
+                for task in &tasks {
                     let init = init.clone();
                     let fold_chunk = fold_chunk.clone();
                     let partials = partials.clone();
@@ -352,22 +433,20 @@ where
                         let mut local = init();
                         let mut read_views: SmallVec<[&[u8]; 8]> =
                             SmallVec::with_capacity(views.n_reads);
-                        fold_reduce_range(
+                        fold_reduce_task(
                             views,
-                            start,
-                            end,
+                            query_ref,
+                            task,
                             &mut local,
                             &*fold_chunk,
                             &mut read_views,
                         );
 
                         match partials.lock() {
-                            Ok(mut guard) => guard.push((archetype_order, start, local)),
+                            Ok(mut guard) => guard.push((archetype_order, task[0].ordinal, local)),
                             Err(_) => partials_poisoned.store(true, Ordering::Release),
                         }
                     });
-
-                    start = end;
                 }
             });
         }
@@ -392,28 +471,33 @@ where
     Ok(out)
 }
 
-fn fold_reduce_range<R>(
+/// Folds every range in `task` into `local`, passing the range's row count
+/// as the fold's valid length.
+fn fold_reduce_task<R>(
     views: &ChunkView,
-    start: usize,
-    end: usize,
+    query: &BuiltQuery,
+    task: &[WorkRange],
     local: &mut R,
     fold_chunk: &(impl Fn(&mut R, &[&[u8]], usize) + Send + Sync),
     read_views: &mut SmallVec<[&[u8]; 8]>,
 ) {
-    for chunk in start..end {
-        let len = views.chunk_lens[chunk];
-        if len == 0 {
-            continue;
-        }
+    for range in task {
+        let rows = range.row_hi - range.row_lo;
         read_views.clear();
-        let base = chunk * views.n_reads;
+        let base = range.chunk * views.n_reads;
         for i in 0..views.n_reads {
             let (ptr, bytes) = views.read_ptrs[base + i];
+            let size = query.reads()[i].size();
+            debug_assert!(size > 0);
+            debug_assert_eq!(bytes, views.chunk_lens[range.chunk] * size);
             unsafe {
-                read_views.push(std::slice::from_raw_parts(ptr, bytes));
+                read_views.push(std::slice::from_raw_parts(
+                    ptr.add(range.row_lo * size),
+                    rows * size,
+                ));
             }
         }
-        fold_chunk(local, read_views, len);
+        fold_chunk(local, read_views, rows);
     }
 }
 
@@ -500,7 +584,6 @@ fn build_chunk_view(
     }
 
     Ok(ChunkView {
-        chunk_count,
         chunk_lens,
         n_reads,
         n_writes,
@@ -552,40 +635,34 @@ fn run_chunks(
     #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
 ) {
     let threads = rayon::current_num_threads().max(1);
-    let grainsize = (views.chunk_count / threads).max(8);
-    let chunk_order = chunk_order(views.chunk_count, activation, archetype_id);
+    let tasks = plan_work_tasks(&views.chunk_lens, threads, activation, archetype_id);
 
     rayon::scope(|s| {
-        let mut start = 0usize;
-        while start < chunk_order.len() {
-            let end = (start + grainsize).min(chunk_order.len());
-            let chunks = &chunk_order[start..end];
-
+        for task in &tasks {
             s.spawn(move |_| {
                 let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
                 let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
 
-                for &chunk in chunks {
-                    let len = views.chunk_lens[chunk];
-                    if len == 0 {
-                        continue;
-                    }
-
+                for range in task {
                     #[cfg(feature = "gpu")]
-                    mark_dirty_entries(dirty_entries, chunk);
+                    mark_dirty_entries(dirty_entries, range.chunk);
 
                     read_views.clear();
                     write_views.clear();
                     match activation.order {
                         ActivationOrder::ShuffleFull => {
-                            let mut rows = row_order(len, activation, archetype_id, chunk);
-                            for row in rows.drain(..) {
+                            // The shuffle covers the whole chunk so results
+                            // are independent of how the chunk was ranged;
+                            // this task visits its slice of that order.
+                            let len = views.chunk_lens[range.chunk];
+                            let rows = row_order(len, activation, archetype_id, range.chunk);
+                            for &row in &rows[range.row_lo..range.row_hi] {
                                 read_views.clear();
                                 write_views.clear();
                                 fill_row_slices(
                                     views,
                                     query,
-                                    chunk,
+                                    range.chunk,
                                     row,
                                     &mut read_views,
                                     &mut write_views,
@@ -594,14 +671,12 @@ fn run_chunks(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_chunk_slices(views, chunk, &mut read_views, &mut write_views);
+                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
                             f(&read_views, &mut write_views);
                         }
                     }
                 }
             });
-
-            start = end;
         }
     });
 }
@@ -616,43 +691,34 @@ fn run_chunks_entity(
     #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
 ) {
     let threads = rayon::current_num_threads().max(1);
-    let grainsize = (views.chunk_count / threads).max(8);
-    let chunk_order = chunk_order(views.chunk_count, activation, archetype_id);
+    let tasks = plan_work_tasks(&views.chunk_lens, threads, activation, archetype_id);
 
     rayon::scope(|s| {
-        let mut start = 0usize;
-        while start < chunk_order.len() {
-            let end = (start + grainsize).min(chunk_order.len());
-            let chunks = &chunk_order[start..end];
-
+        for task in &tasks {
             s.spawn(move |_| {
                 let mut row_entities: SmallVec<[Entity; 1]> = SmallVec::new();
                 let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
                 let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
 
-                for &chunk in chunks {
-                    let len = views.chunk_lens[chunk];
-                    if len == 0 {
-                        continue;
-                    }
-
+                for range in task {
                     #[cfg(feature = "gpu")]
-                    mark_dirty_entries(dirty_entries, chunk);
+                    mark_dirty_entries(dirty_entries, range.chunk);
 
                     read_views.clear();
                     write_views.clear();
                     match activation.order {
                         ActivationOrder::ShuffleFull => {
-                            let mut rows = row_order(len, activation, archetype_id, chunk);
-                            for row in rows.drain(..) {
+                            let len = views.chunk_lens[range.chunk];
+                            let rows = row_order(len, activation, archetype_id, range.chunk);
+                            for &row in &rows[range.row_lo..range.row_hi] {
                                 row_entities.clear();
-                                row_entities.push(entity_chunks[chunk][row]);
+                                row_entities.push(entity_chunks[range.chunk][row]);
                                 read_views.clear();
                                 write_views.clear();
                                 fill_row_slices(
                                     views,
                                     query,
-                                    chunk,
+                                    range.chunk,
                                     row,
                                     &mut read_views,
                                     &mut write_views,
@@ -661,14 +727,16 @@ fn run_chunks_entity(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_chunk_slices(views, chunk, &mut read_views, &mut write_views);
-                            f(&entity_chunks[chunk], &read_views, &mut write_views);
+                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
+                            f(
+                                &entity_chunks[range.chunk][range.row_lo..range.row_hi],
+                                &read_views,
+                                &mut write_views,
+                            );
                         }
                     }
                 }
             });
-
-            start = end;
         }
     });
 }
@@ -687,23 +755,19 @@ fn run_chunks_fallible(
     #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
 ) {
     let threads = rayon::current_num_threads().max(1);
-    let grainsize = (views.chunk_count / threads).max(8);
-    let chunk_order = chunk_order(views.chunk_count, activation, archetype_id);
+    let tasks = plan_work_tasks(&views.chunk_lens, threads, activation, archetype_id);
 
     rayon::scope(|s| {
-        let mut start = 0usize;
-        while start < chunk_order.len() {
-            let end = (start + grainsize).min(chunk_order.len());
+        for task in &tasks {
             let abort = Arc::clone(abort);
             let err = Arc::clone(err);
-            let chunks = &chunk_order[start..end];
 
             s.spawn(move |_| {
                 let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
                 let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
 
-                for (ordinal_offset, &chunk) in chunks.iter().enumerate() {
-                    let ordinal = start + ordinal_offset;
+                for range in task {
+                    let ordinal = range.ordinal;
                     if abort.load(Ordering::Acquire) {
                         let latched = err
                             .lock()
@@ -714,26 +778,22 @@ fn run_chunks_fallible(
                         }
                     }
 
-                    let len = views.chunk_lens[chunk];
-                    if len == 0 {
-                        continue;
-                    }
-
                     #[cfg(feature = "gpu")]
-                    mark_dirty_entries(dirty_entries, chunk);
+                    mark_dirty_entries(dirty_entries, range.chunk);
 
                     read_views.clear();
                     write_views.clear();
                     match activation.order {
                         ActivationOrder::ShuffleFull => {
-                            let mut rows = row_order(len, activation, archetype_id, chunk);
-                            for row in rows.drain(..) {
+                            let len = views.chunk_lens[range.chunk];
+                            let rows = row_order(len, activation, archetype_id, range.chunk);
+                            for &row in &rows[range.row_lo..range.row_hi] {
                                 read_views.clear();
                                 write_views.clear();
                                 fill_row_slices(
                                     views,
                                     query,
-                                    chunk,
+                                    range.chunk,
                                     row,
                                     &mut read_views,
                                     &mut write_views,
@@ -746,7 +806,7 @@ fn run_chunks_fallible(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_chunk_slices(views, chunk, &mut read_views, &mut write_views);
+                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
 
                             if let Err(e) = f(&read_views, &mut write_views) {
                                 latch_iteration_error(&err, ordinal, e);
@@ -757,8 +817,6 @@ fn run_chunks_fallible(
                     }
                 }
             });
-
-            start = end;
         }
     });
 }
@@ -778,24 +836,20 @@ fn run_chunks_entity_fallible(
     #[cfg(feature = "gpu")] dirty_entries: &[Arc<Entry>],
 ) {
     let threads = rayon::current_num_threads().max(1);
-    let grainsize = (views.chunk_count / threads).max(8);
-    let chunk_order = chunk_order(views.chunk_count, activation, archetype_id);
+    let tasks = plan_work_tasks(&views.chunk_lens, threads, activation, archetype_id);
 
     rayon::scope(|s| {
-        let mut start = 0usize;
-        while start < chunk_order.len() {
-            let end = (start + grainsize).min(chunk_order.len());
+        for task in &tasks {
             let abort = Arc::clone(abort);
             let err = Arc::clone(err);
-            let chunks = &chunk_order[start..end];
 
             s.spawn(move |_| {
                 let mut row_entities: SmallVec<[Entity; 1]> = SmallVec::new();
                 let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::new();
                 let mut write_views: SmallVec<[&mut [u8]; 8]> = SmallVec::new();
 
-                for (ordinal_offset, &chunk) in chunks.iter().enumerate() {
-                    let ordinal = start + ordinal_offset;
+                for range in task {
+                    let ordinal = range.ordinal;
                     if abort.load(Ordering::Acquire) {
                         let latched = err
                             .lock()
@@ -806,28 +860,24 @@ fn run_chunks_entity_fallible(
                         }
                     }
 
-                    let len = views.chunk_lens[chunk];
-                    if len == 0 {
-                        continue;
-                    }
-
                     #[cfg(feature = "gpu")]
-                    mark_dirty_entries(dirty_entries, chunk);
+                    mark_dirty_entries(dirty_entries, range.chunk);
 
                     read_views.clear();
                     write_views.clear();
                     match activation.order {
                         ActivationOrder::ShuffleFull => {
-                            let mut rows = row_order(len, activation, archetype_id, chunk);
-                            for row in rows.drain(..) {
+                            let len = views.chunk_lens[range.chunk];
+                            let rows = row_order(len, activation, archetype_id, range.chunk);
+                            for &row in &rows[range.row_lo..range.row_hi] {
                                 row_entities.clear();
-                                row_entities.push(entity_chunks[chunk][row]);
+                                row_entities.push(entity_chunks[range.chunk][row]);
                                 read_views.clear();
                                 write_views.clear();
                                 fill_row_slices(
                                     views,
                                     query,
-                                    chunk,
+                                    range.chunk,
                                     row,
                                     &mut read_views,
                                     &mut write_views,
@@ -840,10 +890,13 @@ fn run_chunks_entity_fallible(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_chunk_slices(views, chunk, &mut read_views, &mut write_views);
+                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
 
-                            if let Err(e) = f(&entity_chunks[chunk], &read_views, &mut write_views)
-                            {
+                            if let Err(e) = f(
+                                &entity_chunks[range.chunk][range.row_lo..range.row_hi],
+                                &read_views,
+                                &mut write_views,
+                            ) {
                                 latch_iteration_error(&err, ordinal, e);
                                 abort.store(true, Ordering::Release);
                                 return;
@@ -852,8 +905,6 @@ fn run_chunks_entity_fallible(
                     }
                 }
             });
-
-            start = end;
         }
     });
 }
@@ -946,25 +997,47 @@ fn latch_iteration_error(
     }
 }
 
-fn fill_chunk_slices<'a>(
+/// Pushes byte views covering `range`'s rows of each queried column.
+///
+/// A whole chunk is simply the range `0..chunk_len`. Sub-chunk ranges from
+/// [`plan_work_tasks`] produce disjoint sub-slices of the same chunk, so two
+/// tasks may safely hold mutable views into one chunk concurrently.
+fn fill_range_slices<'a>(
     views: &ChunkView,
-    chunk: usize,
+    query: &BuiltQuery,
+    range: &WorkRange,
     read_views: &mut SmallVec<[&'a [u8]; 8]>,
     write_views: &mut SmallVec<[&'a mut [u8]; 8]>,
 ) {
-    let rbase = chunk * views.n_reads;
+    let rows = range.row_hi - range.row_lo;
+
+    let rbase = range.chunk * views.n_reads;
     for i in 0..views.n_reads {
         let (ptr, bytes) = views.read_ptrs[rbase + i];
+        let size = query.reads()[i].size();
+        debug_assert!(size > 0);
+        debug_assert_eq!(bytes, views.chunk_lens[range.chunk] * size);
+        debug_assert!(range.row_hi * size <= bytes);
         unsafe {
-            read_views.push(std::slice::from_raw_parts(ptr, bytes));
+            read_views.push(std::slice::from_raw_parts(
+                ptr.add(range.row_lo * size),
+                rows * size,
+            ));
         }
     }
 
-    let wbase = chunk * views.n_writes;
+    let wbase = range.chunk * views.n_writes;
     for i in 0..views.n_writes {
         let (ptr, bytes) = views.write_ptrs[wbase + i];
+        let size = query.writes()[i].size();
+        debug_assert!(size > 0);
+        debug_assert_eq!(bytes, views.chunk_lens[range.chunk] * size);
+        debug_assert!(range.row_hi * size <= bytes);
         unsafe {
-            write_views.push(std::slice::from_raw_parts_mut(ptr, bytes));
+            write_views.push(std::slice::from_raw_parts_mut(
+                ptr.add(range.row_lo * size),
+                rows * size,
+            ));
         }
     }
 }
