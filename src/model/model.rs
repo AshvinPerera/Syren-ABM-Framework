@@ -180,6 +180,9 @@ impl Model {
     }
 
     /// Spawns a single-column batch of agents and returns the created entities.
+    ///
+    /// The column is carried as one `Vec<T>` end to end - no per-value boxing
+    /// - and applied through the columnar bulk-spawn path.
     pub fn spawn_agent_batch<T>(
         &mut self,
         template_name: &str,
@@ -189,26 +192,23 @@ impl Model {
     where
         T: Any + Send + 'static,
     {
-        let values = values
-            .into_iter()
-            .map(|value| Box::new(value) as Box<dyn Any + Send>)
-            .collect();
-        self.spawn_agent_batch_boxed(template_name, component_id, values)
+        let len = values.len();
+        self.spawn_agent_batch_erased(template_name, component_id, Box::new(values), len)
     }
 
-    pub(crate) fn spawn_agent_batch_boxed(
+    pub(crate) fn spawn_agent_batch_erased(
         &mut self,
         template_name: &str,
         component_id: crate::ComponentID,
-        values: Vec<Box<dyn Any + Send>>,
+        values: Box<dyn Any + Send>,
+        len: usize,
     ) -> Result<Vec<Entity>, super::error::ModelError> {
         let template_id = self.agents.id(template_name)?;
-        let count = values.len();
         let batch = self
             .agents
             .get(template_name)?
-            .batch(count)?
-            .set_boxed_column(component_id, values)?
+            .batch(len)?
+            .set_erased_column(component_id, values, len)?
             .into_spawn_batch();
         self.ecs
             .world_ref()

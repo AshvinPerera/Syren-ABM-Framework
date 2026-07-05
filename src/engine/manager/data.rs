@@ -52,16 +52,18 @@ use std::sync::{Arc, RwLock};
 
 use crate::engine::archetype::Archetype;
 use crate::engine::commands::{
-    Command, CommandEvents, DespawnEvent, SpawnEvent, TemplateLifecycleBatch,
+    Command, CommandEvents, DespawnEvent, SpawnBatch, SpawnEvent, TemplateLifecycleBatch,
 };
 use crate::engine::component::{ComponentRegistry, Signature};
-use crate::engine::entity::{Entity, EntityShards};
+use crate::engine::entity::{Entity, EntityLocation, EntityShards};
 use crate::engine::error::{
     AccessKind, AttributeError, ECSError, ECSResult, ExecutionError, InternalViolation, MoveError,
     RegistryError, SpawnError, StaleEntityError,
 };
 use crate::engine::query::BuiltQuery;
-use crate::engine::types::{ArchetypeID, ComponentID, ShardID, SIGNATURE_SIZE};
+use crate::engine::types::{
+    AgentTemplateId, ArchetypeID, ChunkID, ComponentID, RowID, ShardID, CHUNK_CAP, SIGNATURE_SIZE,
+};
 
 #[cfg(feature = "gpu")]
 use crate::engine::dirty::DirtyChunks;
@@ -577,17 +579,18 @@ impl ECSData {
     ) -> Result<CommandEvents, CommandDrainFailure> {
         let mut events = CommandEvents::default();
         #[cfg(feature = "gpu")]
-        let mut applied_any = false;
+        let mut touched: std::collections::BTreeSet<ArchetypeID> = std::collections::BTreeSet::new();
         let mut iter = commands.into_iter();
 
         while let Some(command) = iter.next() {
             let result = match command {
                 Command::Spawn { bundle } => {
                     let signature = bundle.signature();
-                    let archetype_id = self.get_or_create_archetype(&signature);
-                    let archetype_id = match archetype_id {
+                    let archetype_id = match self.get_or_create_archetype(&signature) {
                         Ok(id) => id,
                         Err(error) => {
+                            #[cfg(feature = "gpu")]
+                            self.notify_touched_archetypes(&touched);
                             return Err(CommandDrainFailure {
                                 error,
                                 unapplied: iter.collect(),
@@ -595,6 +598,8 @@ impl ECSData {
                             });
                         }
                     };
+                    #[cfg(feature = "gpu")]
+                    touched.insert(archetype_id);
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
                     archetype
@@ -606,10 +611,11 @@ impl ECSData {
 
                 Command::SpawnTagged { bundle, tag } => {
                     let signature = bundle.signature();
-                    let archetype_id = self.get_or_create_archetype(&signature);
-                    let archetype_id = match archetype_id {
+                    let archetype_id = match self.get_or_create_archetype(&signature) {
                         Ok(id) => id,
                         Err(error) => {
+                            #[cfg(feature = "gpu")]
+                            self.notify_touched_archetypes(&touched);
                             return Err(CommandDrainFailure {
                                 error,
                                 unapplied: iter.collect(),
@@ -617,6 +623,8 @@ impl ECSData {
                             });
                         }
                     };
+                    #[cfg(feature = "gpu")]
+                    touched.insert(archetype_id);
                     let shard_id = self.pick_spawn_shard();
                     let archetype = &mut self.archetypes[archetype_id as usize];
                     archetype
@@ -627,73 +635,14 @@ impl ECSData {
                 }
 
                 Command::SpawnBatchTagged { batch, template_id } => {
-                    let archetype_id = self.get_or_create_archetype(&batch.signature);
-                    let archetype_id = match archetype_id {
-                        Ok(id) => id,
-                        Err(error) => {
-                            return Err(CommandDrainFailure {
-                                error,
-                                unapplied: iter.collect(),
-                                events,
-                            });
+                    match self.apply_spawn_batch(batch, template_id, &mut events) {
+                        Ok(_archetype_id) => {
+                            #[cfg(feature = "gpu")]
+                            touched.insert(_archetype_id);
+                            Ok(())
                         }
-                    };
-
-                    let mut spawned = Vec::with_capacity(batch.count);
-                    let mut columns: Vec<_> = batch
-                        .columns
-                        .into_iter()
-                        .map(|column| (column.component_id, column.values.into_iter()))
-                        .collect();
-                    if let Err(error) =
-                        self.archetypes[archetype_id as usize].reserve_additional_rows(batch.count)
-                    {
-                        return Err(CommandDrainFailure {
-                            error,
-                            unapplied: iter.collect(),
-                            events,
-                        });
+                        Err(error) => Err(error),
                     }
-
-                    for _ in 0..batch.count {
-                        let mut bundle = crate::engine::component::Bundle::new();
-                        for (component_id, values) in &mut columns {
-                            let Some(value) = values.next() else {
-                                return Err(CommandDrainFailure {
-                                    error: ECSError::from(SpawnError::MissingComponent {
-                                        type_id: std::any::TypeId::of::<()>(),
-                                        name: "batch column value",
-                                    }),
-                                    unapplied: iter.collect(),
-                                    events,
-                                });
-                            };
-                            bundle.insert_boxed(*component_id, value);
-                        }
-
-                        let shard_id = self.pick_spawn_shard();
-                        let archetype = &mut self.archetypes[archetype_id as usize];
-                        match archetype.spawn_on(&self.shards, shard_id, bundle) {
-                            Ok(entity) => {
-                                events
-                                    .spawned
-                                    .push(SpawnEvent::template_tagged(entity, template_id));
-                                spawned.push(entity);
-                            }
-                            Err(error) => {
-                                return Err(CommandDrainFailure {
-                                    error,
-                                    unapplied: iter.collect(),
-                                    events,
-                                });
-                            }
-                        }
-                    }
-                    events.spawned_batches.push(TemplateLifecycleBatch {
-                        template_id,
-                        entities: spawned,
-                    });
-                    Ok(())
                 }
 
                 Command::Despawn { entity } => {
@@ -706,6 +655,8 @@ impl ECSData {
                         });
                     match loc {
                         Ok(loc) => {
+                            #[cfg(feature = "gpu")]
+                            touched.insert(loc.archetype);
                             let archetype = &mut self.archetypes[loc.archetype as usize];
                             archetype.despawn_on(&self.shards, entity).map(|()| {
                                 events.despawned.push(DespawnEvent::untagged(entity));
@@ -725,6 +676,8 @@ impl ECSData {
                         });
                     match loc {
                         Ok(loc) => {
+                            #[cfg(feature = "gpu")]
+                            touched.insert(loc.archetype);
                             let archetype = &mut self.archetypes[loc.archetype as usize];
                             archetype.despawn_on(&self.shards, entity).map(|()| {
                                 events.despawned.push(DespawnEvent::tagged(entity, tag));
@@ -737,99 +690,237 @@ impl ECSData {
                 Command::DespawnBatchTagged {
                     entities,
                     template_id,
-                } => {
-                    let mut despawned = Vec::with_capacity(entities.len());
-                    for entity in entities {
-                        let loc = self
-                            .shards
-                            .get_location(entity)
-                            .map_err(ECSError::from)
-                            .and_then(|loc| {
-                                loc.ok_or(ECSError::from(SpawnError::StaleEntity(StaleEntityError)))
-                            });
-                        match loc {
-                            Ok(loc) => {
-                                let archetype = &mut self.archetypes[loc.archetype as usize];
-                                if let Err(error) = archetype.despawn_on(&self.shards, entity) {
-                                    return Err(CommandDrainFailure {
-                                        error,
-                                        unapplied: iter.collect(),
-                                        events,
-                                    });
-                                }
-                                events
-                                    .despawned
-                                    .push(DespawnEvent::template_tagged(entity, template_id));
-                                despawned.push(entity);
-                            }
-                            Err(error) => {
-                                return Err(CommandDrainFailure {
-                                    error,
-                                    unapplied: iter.collect(),
-                                    events,
-                                });
-                            }
-                        }
+                } => match self.apply_despawn_batch(entities, template_id, &mut events) {
+                    Ok(_archetype_ids) => {
+                        #[cfg(feature = "gpu")]
+                        touched.extend(_archetype_ids);
+                        Ok(())
                     }
-                    events.despawned_batches.push(TemplateLifecycleBatch {
-                        template_id,
-                        entities: despawned,
-                    });
-                    Ok(())
-                }
+                    Err(error) => Err(error),
+                },
 
                 Command::Add {
                     entity,
                     component_id,
                     value,
-                } => self.add_component(entity, component_id, value),
+                } => {
+                    #[cfg(feature = "gpu")]
+                    self.touch_entity_archetype(entity, &mut touched);
+                    let result = self.add_component(entity, component_id, value);
+                    #[cfg(feature = "gpu")]
+                    if result.is_ok() {
+                        self.touch_entity_archetype(entity, &mut touched);
+                    }
+                    result
+                }
 
                 Command::Remove {
                     entity,
                     component_id,
-                } => self.remove_component(entity, component_id),
+                } => {
+                    #[cfg(feature = "gpu")]
+                    self.touch_entity_archetype(entity, &mut touched);
+                    let result = self.remove_component(entity, component_id);
+                    #[cfg(feature = "gpu")]
+                    if result.is_ok() {
+                        self.touch_entity_archetype(entity, &mut touched);
+                    }
+                    result
+                }
 
                 Command::Set {
                     entity,
                     component_id,
                     value,
-                } => self.apply_set_command(entity, component_id, value),
+                } => {
+                    #[cfg(feature = "gpu")]
+                    self.touch_entity_archetype(entity, &mut touched);
+                    self.apply_set_command(entity, component_id, value)
+                }
             };
 
-            match result {
-                Ok(()) => {
-                    #[cfg(feature = "gpu")]
-                    {
-                        applied_any = true;
-                    }
-                }
-                Err(error) => {
-                    #[cfg(feature = "gpu")]
-                    if applied_any {
-                        self.notify_all_archetypes_dirty();
-                    }
-                    return Err(CommandDrainFailure {
-                        error,
-                        unapplied: iter.collect(),
-                        events,
-                    });
-                }
+            if let Err(error) = result {
+                #[cfg(feature = "gpu")]
+                self.notify_touched_archetypes(&touched);
+                return Err(CommandDrainFailure {
+                    error,
+                    unapplied: iter.collect(),
+                    events,
+                });
             }
         }
 
         #[cfg(feature = "gpu")]
-        if applied_any {
-            self.notify_all_archetypes_dirty();
-        }
+        self.notify_touched_archetypes(&touched);
 
         Ok(events)
     }
 
+    /// Applies one columnar spawn batch: bulk column appends, bulk entity
+    /// allocation, and a single metadata commit. Returns the archetype the
+    /// batch spawned into.
+    ///
+    /// ## Failure semantics
+    /// The batch is atomic: on any error, appended column data is truncated
+    /// back to the pre-batch length and any allocated entity handles are
+    /// despawned, leaving the world as if the command had never run.
+    fn apply_spawn_batch(
+        &mut self,
+        batch: SpawnBatch,
+        template_id: AgentTemplateId,
+        events: &mut CommandEvents,
+    ) -> ECSResult<ArchetypeID> {
+        let count = batch.count;
+        let archetype_id = self.get_or_create_archetype(&batch.signature)?;
+
+        if count == 0 {
+            events.spawned_batches.push(TemplateLifecycleBatch {
+                template_id,
+                entities: Vec::new(),
+            });
+            return Ok(archetype_id);
+        }
+
+        let start = self.archetypes[archetype_id as usize].length()?;
+        self.archetypes[archetype_id as usize].reserve_additional_rows(count)?;
+
+        let column_ids: Vec<ComponentID> = batch
+            .columns
+            .iter()
+            .map(|column| column.component_id)
+            .collect();
+        self.archetypes[archetype_id as usize].append_batch_columns(
+            start,
+            count,
+            batch.columns,
+        )?;
+
+        // Every location below is addressable: `append_batch_columns`
+        // validated `start + count - 1` against ChunkID/RowID limits.
+        let entities = match self.shards.spawn_batch(count, |k| {
+            let index = start + k;
+            EntityLocation {
+                archetype: archetype_id,
+                chunk: (index / CHUNK_CAP) as ChunkID,
+                row: (index % CHUNK_CAP) as RowID,
+            }
+        }) {
+            Ok(entities) => entities,
+            Err(error) => {
+                self.archetypes[archetype_id as usize].truncate_columns_to(&column_ids, start);
+                return Err(error.into());
+            }
+        };
+
+        if let Err(error) =
+            self.archetypes[archetype_id as usize].commit_batch_rows(start, &entities)
+        {
+            self.archetypes[archetype_id as usize].truncate_columns_to(&column_ids, start);
+            for entity in entities {
+                let _ = self.shards.despawn(entity);
+            }
+            return Err(error);
+        }
+
+        events.spawned.reserve(entities.len());
+        for &entity in &entities {
+            events
+                .spawned
+                .push(SpawnEvent::template_tagged(entity, template_id));
+        }
+        events.spawned_batches.push(TemplateLifecycleBatch {
+            template_id,
+            entities,
+        });
+        Ok(archetype_id)
+    }
+
+    /// Applies one batched despawn. Returns the archetypes it touched.
+    ///
+    /// ## Failure semantics
+    /// Every handle is preflighted: stale or duplicate entities fail the
+    /// whole command *before* any despawn happens (the per-entity `Despawn`
+    /// command retains its fail-midway semantics).
+    fn apply_despawn_batch(
+        &mut self,
+        entities: Vec<Entity>,
+        template_id: AgentTemplateId,
+        events: &mut CommandEvents,
+    ) -> ECSResult<Vec<ArchetypeID>> {
+        let mut resolved: Vec<(Entity, EntityLocation)> = Vec::with_capacity(entities.len());
+        for &entity in &entities {
+            let Some(location) = self.shards.get_location(entity)? else {
+                return Err(SpawnError::StaleEntity(StaleEntityError).into());
+            };
+            resolved.push((entity, location));
+        }
+
+        let mut by_archetype: HashMap<ArchetypeID, Vec<(Entity, ChunkID, RowID)>> =
+            HashMap::new();
+        for (entity, location) in resolved {
+            by_archetype
+                .entry(location.archetype)
+                .or_default()
+                .push((entity, location.chunk, location.row));
+        }
+
+        let mut archetype_ids: Vec<ArchetypeID> = by_archetype.keys().copied().collect();
+        archetype_ids.sort_unstable();
+
+        for &archetype_id in &archetype_ids {
+            let Some(mut targets) = by_archetype.remove(&archetype_id) else {
+                continue;
+            };
+            // Descending linear index: each swap-remove's moved row (the
+            // current last) can never itself be a pending target, so the
+            // locations resolved above stay valid throughout the batch.
+            targets.sort_by_key(|&(_, chunk, row)| {
+                std::cmp::Reverse(chunk as usize * CHUNK_CAP + row as usize)
+            });
+            for pair in targets.windows(2) {
+                if (pair[0].1, pair[0].2) == (pair[1].1, pair[1].2) {
+                    return Err(SpawnError::StaleEntity(StaleEntityError).into());
+                }
+            }
+            self.archetypes[archetype_id as usize]
+                .despawn_rows_batch(&self.shards, &targets)?;
+        }
+
+        events.despawned.reserve(entities.len());
+        for &entity in &entities {
+            events
+                .despawned
+                .push(DespawnEvent::template_tagged(entity, template_id));
+        }
+        events.despawned_batches.push(TemplateLifecycleBatch {
+            template_id,
+            entities,
+        });
+        Ok(archetype_ids)
+    }
+
+    /// Records the archetype currently holding `entity` in the GPU dirty set.
     #[cfg(feature = "gpu")]
-    fn notify_all_archetypes_dirty(&self) {
-        for archetype in &self.archetypes {
+    fn touch_entity_archetype(
+        &self,
+        entity: Entity,
+        touched: &mut std::collections::BTreeSet<ArchetypeID>,
+    ) {
+        if let Ok(Some(location)) = self.shards.get_location(entity) {
+            touched.insert(location.archetype);
+        }
+    }
+
+    /// Marks every chunk of each touched archetype dirty for GPU re-upload.
+    ///
+    /// Replaces the previous blanket invalidation of *all* archetypes after
+    /// any structural change: only archetypes a command actually touched are
+    /// re-uploaded at the next GPU sync.
+    #[cfg(feature = "gpu")]
+    fn notify_touched_archetypes(&self, touched: &std::collections::BTreeSet<ArchetypeID>) {
+        for &archetype_id in touched {
             self.gpu_dirty_chunks
-                .notify_archetype_changed(archetype.archetype_id());
+                .notify_archetype_changed(archetype_id);
         }
     }
 
@@ -1195,6 +1286,201 @@ mod tests {
                 assert_eq!(len, 0);
             }
         }
+    }
+
+    fn marker_signature(marker_id: ComponentID) -> Signature {
+        let mut signature = Signature::default();
+        signature.set(marker_id);
+        signature
+    }
+
+    #[test]
+    fn spawn_batch_column_length_mismatch_rolls_back_cleanly() {
+        use crate::engine::commands::{BatchColumn, SpawnBatch};
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let world = ecs.world_ref();
+
+        // Declared len disagrees with the batch count.
+        world
+            .defer(Command::SpawnBatchTagged {
+                batch: SpawnBatch {
+                    count: 4,
+                    signature: marker_signature(marker_id),
+                    columns: vec![BatchColumn {
+                        component_id: marker_id,
+                        values: Box::new(vec![Marker(1), Marker(2), Marker(3)]),
+                        len: 3,
+                    }],
+                },
+                template_id: crate::AgentTemplateId(7),
+            })
+            .unwrap();
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Spawn(crate::engine::error::SpawnError::BatchColumnMismatch { .. }))
+        ));
+
+        // Declared len matches the count but the payload is short: the append
+        // itself must detect the shortfall and truncate back.
+        world
+            .defer(Command::SpawnBatchTagged {
+                batch: SpawnBatch {
+                    count: 4,
+                    signature: marker_signature(marker_id),
+                    columns: vec![BatchColumn {
+                        component_id: marker_id,
+                        values: Box::new(vec![Marker(1), Marker(2)]),
+                        len: 4,
+                    }],
+                },
+                template_id: crate::AgentTemplateId(7),
+            })
+            .unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        world
+            .with_exclusive(|data| {
+                assert_all_columns_empty(data);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn spawn_batch_rows_are_visible_and_row_aligned() {
+        use crate::engine::commands::{BatchColumn, SpawnBatch};
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let n = 40_000u32; // spans three chunks
+
+        let mut signature = Signature::default();
+        signature.set(marker_id);
+        signature.set(extra_id);
+        let markers: Vec<Marker> = (0..n).map(Marker).collect();
+        let extras: Vec<Extra> = (0..n).map(|i| Extra(i * 2)).collect();
+        world
+            .defer(Command::SpawnBatchTagged {
+                batch: SpawnBatch {
+                    count: n as usize,
+                    signature,
+                    columns: vec![
+                        BatchColumn {
+                            component_id: marker_id,
+                            values: Box::new(markers),
+                            len: n as usize,
+                        },
+                        BatchColumn {
+                            component_id: extra_id,
+                            values: Box::new(extras),
+                            len: n as usize,
+                        },
+                    ],
+                },
+                template_id: crate::AgentTemplateId(1),
+            })
+            .unwrap();
+        let events = ecs.apply_deferred_commands().unwrap();
+        assert_eq!(events.spawned.len(), n as usize);
+        assert_eq!(events.spawned_batches[0].entities.len(), n as usize);
+
+        // Row alignment: both columns of every row agree, and all rows exist.
+        let query = world
+            .query()
+            .unwrap()
+            .read::<Marker>()
+            .unwrap()
+            .read::<Extra>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let misaligned = std::sync::atomic::AtomicUsize::new(0);
+        world
+            .for_each_r2(query, |marker: &Marker, extra: &Extra| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if extra.0 != marker.0 * 2 {
+                    misaligned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), n as usize);
+        assert_eq!(misaligned.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Entity handles resolve to the values they were spawned with.
+        for (k, &entity) in events.spawned_batches[0].entities.iter().enumerate().step_by(7919) {
+            let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
+            assert_eq!(marker.0 as usize, k);
+        }
+    }
+
+    #[test]
+    fn despawn_batch_removes_interleaved_targets_atomically() {
+        let (ecs, marker_id, _extra_id) = test_manager();
+        let world = ecs.world_ref();
+
+        let mut entities = Vec::new();
+        for i in 0..100 {
+            entities.push(spawn_marker(&ecs, marker_id, i));
+        }
+
+        // Every third entity, unordered rows interleaved with survivors.
+        let targets: Vec<_> = entities.iter().copied().step_by(3).collect();
+        let survivors: Vec<(crate::engine::entity::Entity, u32)> = entities
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 0)
+            .map(|(i, e)| (e, i as u32))
+            .collect();
+
+        world
+            .defer(Command::DespawnBatchTagged {
+                entities: targets.clone(),
+                template_id: crate::AgentTemplateId(2),
+            })
+            .unwrap();
+        let events = ecs.apply_deferred_commands().unwrap();
+        assert_eq!(events.despawned.len(), targets.len());
+        assert_eq!(events.despawned_batches[0].entities, targets);
+
+        // Survivors keep their values through the swap-remove churn.
+        for &(entity, expected) in &survivors {
+            let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
+            assert_eq!(marker.0, expected);
+        }
+        assert_eq!(count_markers_in(&ecs), survivors.len());
+
+        // A batch containing a duplicate handle fails before despawning
+        // anything (atomic preflight).
+        let dup_target = survivors[0].0;
+        world
+            .defer(Command::DespawnBatchTagged {
+                entities: vec![dup_target, dup_target],
+                template_id: crate::AgentTemplateId(2),
+            })
+            .unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+        assert_eq!(count_markers_in(&ecs), survivors.len());
+        let marker: Marker = world.read_entity_component(dup_target, marker_id).unwrap();
+        assert_eq!(marker.0, survivors[0].1);
+    }
+
+    fn count_markers_in(ecs: &crate::engine::manager::ECSManager) -> usize {
+        let world = ecs.world_ref();
+        let query = world
+            .query()
+            .unwrap()
+            .read::<Marker>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        world
+            .for_each_r1(query, |_: &Marker| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+            .unwrap();
+        count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[test]

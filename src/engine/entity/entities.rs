@@ -142,6 +142,59 @@ impl Entities {
         Ok(make_entity(shard_id, index, version))
     }
 
+    /// Allocates `count` entity slots under a single borrow.
+    ///
+    /// The bulk companion to [`spawn`](Self::spawn): capacity is ensured
+    /// once, then slots are claimed from the free list in a tight loop.
+    /// `location_for(k)` supplies the archetype location of the `k`-th
+    /// allocated entity; handles are appended to `out` in `k` order.
+    ///
+    /// ## Errors
+    /// Returns `CapacityError` if the shard cannot hold `count` more live
+    /// entities. No slots are allocated in that case.
+    pub(crate) fn spawn_many(
+        &mut self,
+        shard_id: ShardID,
+        count: usize,
+        mut location_for: impl FnMut(usize) -> EntityLocation,
+        out: &mut Vec<Entity>,
+    ) -> Result<(), CapacityError> {
+        let free = self.free_store.len();
+        if free < count {
+            let deficit = count - free;
+            let capacity = INDEX_CAP as usize + 1;
+            let available = capacity.saturating_sub(self.versions.len());
+            if available < deficit {
+                return Err(CapacityError {
+                    entities_needed: (self.versions.len() as EntityID)
+                        + (deficit as EntityID),
+                    capacity: capacity as EntityID,
+                });
+            }
+            // Grow by at least the deficit, preferring the usual doubling
+            // policy, clamped to what the shard can still address.
+            let growth = deficit.max(self.versions.len()).max(1024).min(available);
+            self.ensure_capacity(growth as EntityCount)?;
+        }
+
+        debug_assert!(self.free_store.len() >= count);
+        out.reserve(count);
+        for k in 0..count {
+            // The capacity check above guarantees enough free slots.
+            let Some(index) = self.free_store.pop() else {
+                return Err(CapacityError {
+                    entities_needed: (self.versions.len() as EntityID) + 1,
+                    capacity: INDEX_CAP as EntityID + 1,
+                });
+            };
+            let version = self.versions[index as usize];
+            self.alive[index as usize] = true;
+            self.locations[index as usize] = location_for(k);
+            out.push(make_entity(shard_id, index, version));
+        }
+        Ok(())
+    }
+
     /// Destroys an entity and invalidates its handle.
     ///
     /// ## Behaviour

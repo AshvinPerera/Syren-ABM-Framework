@@ -722,6 +722,107 @@ impl<T> Attribute<T> {
         Ok(())
     }
 
+    /// Appends every element of `values` in order using chunk-sized copies.
+    ///
+    /// This is the bulk-spawn fast path: instead of per-element `push` calls
+    /// it copies runs of up to `CHUNK_CAP` elements directly into chunk tails
+    /// with `ptr::copy_nonoverlapping`, then transfers ownership by resetting
+    /// the source vector's length. Works for any `T` (elements are moved, not
+    /// duplicated, so non-`Copy` types are handled correctly).
+    ///
+    /// # Returns
+    /// `(start, count)` where `start` is the attribute length before the
+    /// append and `count` is `values.len()`.
+    ///
+    /// # Errors
+    /// Returns [`AttributeError::IndexOverflow`] if the resulting length would
+    /// exceed what `(ChunkID, RowID)` coordinates can address. The attribute
+    /// is unchanged in that case.
+    pub fn extend_from_vec(&mut self, mut values: Vec<T>) -> Result<(usize, usize), AttributeError> {
+        let count = values.len();
+        let start = self.length;
+        if count == 0 {
+            return Ok((start, 0));
+        }
+
+        // Validate addressability up front so failure leaves storage intact.
+        let last_index = start + count - 1;
+        let _: ChunkID = (last_index / CHUNK_CAP)
+            .try_into()
+            .map_err(|_| AttributeError::IndexOverflow("ChunkID"))?;
+
+        let needed_chunks = (start + count).div_ceil(CHUNK_CAP);
+        self.chunks.reserve(needed_chunks.saturating_sub(self.chunks.len()));
+
+        let source = values.as_ptr();
+        let mut copied = 0usize;
+        while copied < count {
+            self.ensure_last_chunk();
+            let chunk_index = self.chunks.len() - 1;
+            let row = self.last_chunk_length;
+            let run = (CHUNK_CAP - row).min(count - copied);
+
+            // SAFETY: `values[copied..copied + run]` are initialized elements
+            // we own; the destination slots `[row, row + run)` of the last
+            // chunk are uninitialized (`ensure_last_chunk` guarantees
+            // `row < CHUNK_CAP` and the invariants guarantee everything at or
+            // beyond `last_chunk_length` is uninit). Source and destination
+            // are distinct allocations, so `copy_nonoverlapping` is sound.
+            // Ownership of the copied elements transfers to the chunk; the
+            // `set_len(0)` below ensures the vector never drops them.
+            unsafe {
+                let destination = self.chunks[chunk_index].as_mut_ptr().add(row) as *mut T;
+                ptr::copy_nonoverlapping(source.add(copied), destination, run);
+            }
+
+            self.last_chunk_length += run;
+            self.length += run;
+            copied += run;
+        }
+
+        // SAFETY: every element was moved into chunk storage above; clearing
+        // the length prevents a double drop when `values` is deallocated.
+        unsafe {
+            values.set_len(0);
+        }
+
+        Ok((start, count))
+    }
+
+    /// Drops all elements at indices `>= new_length`, keeping the prefix.
+    ///
+    /// Used to roll back a partially applied bulk append: truncating back to
+    /// the pre-append length restores the column exactly (bulk appends never
+    /// reorder existing rows).
+    ///
+    /// # Errors
+    /// Returns [`AttributeError::InternalInvariant`] if `new_length` exceeds
+    /// the current length.
+    pub(crate) fn truncate_to(&mut self, new_length: usize) -> Result<(), AttributeError> {
+        if new_length > self.length {
+            return Err(AttributeError::InternalInvariant(
+                AttributeInvariantViolation::LengthMismatch,
+            ));
+        }
+        if new_length == self.length {
+            return Ok(());
+        }
+
+        for index in new_length..self.length {
+            let chunk = index / CHUNK_CAP;
+            let row = index % CHUNK_CAP;
+            // SAFETY: `index < self.length`, so the slot is initialized; each
+            // slot is visited exactly once, so no double drop.
+            unsafe {
+                self.get_slot_unchecked(chunk, row).assume_init_drop();
+            }
+        }
+
+        self.length = new_length;
+        self.fixup_after_length_decrement();
+        Ok(())
+    }
+
     /// Drops all initialized elements in all chunks without modifying the chunk
     /// structure.
     ///

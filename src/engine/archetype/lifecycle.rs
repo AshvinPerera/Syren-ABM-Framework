@@ -33,10 +33,11 @@
 //! `despawn_on` leave the entity handle intact so that the archetype state
 //! remains recoverable.
 
-use crate::engine::types::{ChunkID, ComponentID, RowID, ShardID};
+use crate::engine::types::{ChunkID, ComponentID, RowID, ShardID, CHUNK_CAP};
 
 use std::any::Any;
 
+use crate::engine::commands::BatchColumn;
 use crate::engine::component::DynamicBundle;
 
 use crate::engine::entity::{Entity, EntityLocation, EntityShards};
@@ -312,5 +313,242 @@ impl Archetype {
                 let _ = g.as_mut().swap_remove_dyn(chunk, row);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Columnar batch operations
+    // -----------------------------------------------------------------------
+
+    /// Bulk-appends one full column per component for `count` new rows.
+    ///
+    /// The columnar spawn fast path: each column is a single type-erased
+    /// `Vec<T>` that the storage layer downcasts once and copies in
+    /// chunk-sized runs, instead of one boxed value per entity per component.
+    ///
+    /// ## Contract
+    /// - `start` must equal the archetype's current row count.
+    /// - `columns` must cover the archetype signature exactly (no missing,
+    ///   duplicate, or unknown components) and each column must hold `count`
+    ///   elements of the registered storage type.
+    ///
+    /// ## Failure semantics
+    /// Appends are applied column by column in ascending [`ComponentID`]
+    /// order. On any failure, every column extended so far is truncated back
+    /// to `start` (bulk appends never reorder existing rows, so truncation is
+    /// an exact rollback) and the error is returned.
+    pub(crate) fn append_batch_columns(
+        &self,
+        start: usize,
+        count: usize,
+        mut columns: Vec<BatchColumn>,
+    ) -> ECSResult<()> {
+        columns.sort_by_key(|column| column.component_id);
+
+        // Validate exact signature coverage: the sorted column ids must equal
+        // the sorted signature ids.
+        let mut expected = self.signature.iterate_over_components();
+        for column in &columns {
+            match expected.next() {
+                Some(required) if required == column.component_id => {}
+                _ => {
+                    return Err(SpawnError::BatchColumnSet {
+                        component_id: column.component_id,
+                    }
+                    .into());
+                }
+            }
+            if column.len != count {
+                return Err(SpawnError::BatchColumnMismatch {
+                    component_id: column.component_id,
+                    expected: count,
+                    actual: column.len,
+                }
+                .into());
+            }
+        }
+        if let Some(missing) = expected.next() {
+            return Err(SpawnError::BatchColumnSet {
+                component_id: missing,
+            }
+            .into());
+        }
+
+        let mut appended: Vec<ComponentID> = Vec::with_capacity(columns.len());
+        for column in columns {
+            let component_id = column.component_id;
+            let attr = self
+                .find_component(component_id)
+                .ok_or(SpawnError::BatchColumnSet { component_id })?;
+            let result = Self::lock_write_spawn(attr)
+                .map_err(ECSError::from)
+                .and_then(|mut guard| {
+                    guard
+                        .extend_from_vec_any(column.values)
+                        .map_err(|e| ECSError::from(SpawnError::StoragePushFailedWith(e)))
+                });
+
+            match result {
+                Ok((appended_start, appended_count))
+                    if appended_start == start && appended_count == count =>
+                {
+                    appended.push(component_id);
+                }
+                Ok((appended_start, _)) => {
+                    // The column was longer or shorter than its siblings; put
+                    // everything (including this column) back to `start`.
+                    appended.push(component_id);
+                    self.truncate_columns_to(&appended, start);
+                    return Err(SpawnError::BatchColumnMismatch {
+                        component_id,
+                        expected: start,
+                        actual: appended_start,
+                    }
+                    .into());
+                }
+                Err(error) => {
+                    self.truncate_columns_to(&appended, start);
+                    return Err(error);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Best-effort rollback: truncates the named columns back to `length`.
+    pub(crate) fn truncate_columns_to(&self, component_ids: &[ComponentID], length: usize) {
+        for &component_id in component_ids {
+            if let Some(attr) = self.find_component(component_id) {
+                if let Ok(mut guard) = attr.write() {
+                    let _ = guard.truncate_to(length);
+                }
+            }
+        }
+    }
+
+    /// Publishes metadata for rows `start..start + entities.len()` appended by
+    /// [`append_batch_columns`](Self::append_batch_columns).
+    ///
+    /// Fills `entity_positions` for every new row and bumps the archetype
+    /// length in a single metadata-lock acquisition.
+    pub(crate) fn commit_batch_rows(&self, start: usize, entities: &[Entity]) -> ECSResult<()> {
+        let mut meta = self
+            .meta
+            .write()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+
+        let end = start + entities.len();
+        let last_chunk = if end == 0 { 0 } else { (end - 1) / CHUNK_CAP };
+        Self::ensure_capacity(&mut meta, last_chunk + 1);
+
+        for (offset, &entity) in entities.iter().enumerate() {
+            let index = start + offset;
+            let chunk = index / CHUNK_CAP;
+            let row = index % CHUNK_CAP;
+            if meta.entity_positions[chunk][row].is_some() {
+                // Clear the rows written so far so a failed commit leaves no
+                // stale entries beyond the (unchanged) archetype length.
+                for cleared in 0..offset {
+                    let cleared_index = start + cleared;
+                    meta.entity_positions[cleared_index / CHUNK_CAP][cleared_index % CHUNK_CAP] =
+                        None;
+                }
+                return Err(InternalViolation::SpawnSlotOccupied.into());
+            }
+            meta.entity_positions[chunk][row] = Some(entity);
+        }
+        meta.length += entities.len();
+        Ok(())
+    }
+
+    /// Despawns a batch of rows belonging to this archetype.
+    ///
+    /// `targets` must be sorted **descending** by linear row index and must
+    /// contain no duplicates; the caller ([`ECSData`]) resolves and orders
+    /// them. Descending order guarantees each swap-remove's moved row (always
+    /// the current last row) is never itself a pending target, so locations
+    /// resolved up front stay valid throughout the batch.
+    ///
+    /// Column locks are acquired once for the whole batch (ascending
+    /// [`ComponentID`] order, before the metadata lock), which is the point
+    /// of batching: per-entity despawn pays those acquisitions per entity.
+    pub(crate) fn despawn_rows_batch(
+        &mut self,
+        shards: &EntityShards,
+        targets: &[(Entity, ChunkID, RowID)],
+    ) -> ECSResult<()> {
+        if targets.is_empty() {
+            return Ok(());
+        }
+
+        // Acquire every column write lock up front, ascending component id.
+        let mut guards = Vec::with_capacity(self.components.len());
+        for (component_id, attr) in self.components.iter() {
+            let guard = Self::lock_write_spawn(attr).map_err(ECSError::from)?;
+            guards.push((*component_id, guard));
+        }
+
+        let mut meta = self
+            .meta
+            .write()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+
+        // Shard operations are deferred and applied grouped (one mutex
+        // acquisition per shard) after all rows are removed. Per-shard order
+        // of `pending_moves` is preserved, so an entity relocated twice by
+        // chained swaps ends up at its final location.
+        let mut pending_moves: Vec<(Entity, EntityLocation)> = Vec::new();
+
+        for &(_entity, chunk, row) in targets {
+            let mut moved_from: Option<(ChunkID, RowID)> = None;
+            let mut first = true;
+            for (_, guard) in guards.iter_mut() {
+                let pos = guard
+                    .as_mut()
+                    .swap_remove_dyn(chunk, row)
+                    .map_err(|e| ECSError::from(SpawnError::StorageSwapRemoveFailed(e)))?;
+                if first {
+                    moved_from = pos;
+                    first = false;
+                } else if pos != moved_from {
+                    return Err(InternalViolation::DespawnSwapMisalignment.into());
+                }
+            }
+
+            Self::ensure_capacity(&mut meta, chunk as usize + 1);
+            if let Some((moved_chunk, moved_row)) = moved_from {
+                let moved_entity = meta.entity_positions[moved_chunk as usize]
+                    [moved_row as usize]
+                    .ok_or(ECSError::from(
+                        InternalViolation::DespawnMovedSlotMissingEntity,
+                    ))?;
+                meta.entity_positions[chunk as usize][row as usize] = Some(moved_entity);
+                pending_moves.push((
+                    moved_entity,
+                    EntityLocation {
+                        archetype: self.archetype_id,
+                        chunk,
+                        row,
+                    },
+                ));
+                meta.entity_positions[moved_chunk as usize][moved_row as usize] = None;
+            } else {
+                meta.entity_positions[chunk as usize][row as usize] = None;
+            }
+
+            meta.length = meta.length.saturating_sub(1);
+        }
+
+        if meta.length == 0 {
+            meta.entity_positions.clear();
+        }
+
+        shards
+            .set_locations_grouped(&pending_moves)
+            .map_err(ECSError::from)?;
+        let despawn_targets: Vec<Entity> = targets.iter().map(|&(entity, _, _)| entity).collect();
+        shards.despawn_grouped(&despawn_targets).map_err(ECSError::from)?;
+
+        Ok(())
     }
 }

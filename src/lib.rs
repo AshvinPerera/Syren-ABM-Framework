@@ -71,6 +71,7 @@ pub use engine::scheduler::{Scheduler, Stage};
 // Deferred commands
 
 pub use engine::commands::Command;
+pub use engine::commands::{BatchColumn, SpawnBatch};
 
 // Error types
 

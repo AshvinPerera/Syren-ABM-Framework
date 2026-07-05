@@ -153,6 +153,26 @@ fn structural_mutation_benchmarks(c: &mut Criterion) {
         );
     });
 
+    // Batched despawn: one command, column locks taken once per archetype.
+    group.bench_function("despawn_batch_4096", |b| {
+        let registry = Arc::clone(&registry);
+        b.iter_batched(
+            || world_with_core(Arc::clone(&registry), core_id).unwrap(),
+            |(ecs, entities)| {
+                let world = ecs.world_ref();
+                world
+                    .defer(Command::DespawnBatchTagged {
+                        entities,
+                        template_id: abm_framework::AgentTemplateId(0),
+                    })
+                    .unwrap();
+                ecs.apply_deferred_commands().unwrap();
+                black_box(ecs);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
     group.finish();
 }
 

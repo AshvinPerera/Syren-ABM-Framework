@@ -34,11 +34,19 @@ use crate::engine::entity::Entity;
 use crate::engine::types::{AgentTemplateId, ComponentID};
 
 /// One component column in a dynamically-typed spawn batch.
+///
+/// The column is carried as a **single** type-erased `Vec<T>` (one heap
+/// allocation per column) rather than one box per value; the storage layer
+/// downcasts it once and bulk-copies chunk-sized runs.
 pub struct BatchColumn {
     /// Component identifier for this column.
     pub component_id: ComponentID,
-    /// One value per entity in the batch.
-    pub values: Vec<Box<dyn Any + Send>>,
+    /// The whole column: a `Box<dyn Any + Send>` containing a `Vec<T>` whose
+    /// `T` matches the registered storage type for `component_id`.
+    pub values: Box<dyn Any + Send>,
+    /// Element count recorded at construction, used for validation without
+    /// downcasting.
+    pub len: usize,
 }
 
 /// Dynamically-typed batch payload for spawning many entities with one signature.

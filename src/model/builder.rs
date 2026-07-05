@@ -102,7 +102,10 @@ struct PendingGpuMessageResource {
 struct PendingAgentPopulation {
     template_name: String,
     component_id: crate::ComponentID,
-    values: Vec<Box<dyn Any + Send>>,
+    /// The whole column as one type-erased `Vec<T>`.
+    values: Box<dyn Any + Send>,
+    /// Element count recorded at registration.
+    len: usize,
 }
 
 impl ModelBuilder {
@@ -201,13 +204,12 @@ impl ModelBuilder {
     {
         let template_name = template_name.into();
         self.agents.get(&template_name)?;
+        let len = values.len();
         self.pending_agent_populations.push(PendingAgentPopulation {
             template_name,
             component_id,
-            values: values
-                .into_iter()
-                .map(|value| Box::new(value) as Box<dyn Any + Send>)
-                .collect(),
+            values: Box::new(values),
+            len,
         });
         Ok(self)
     }
@@ -558,10 +560,11 @@ impl ModelBuilder {
         };
 
         for population in self.pending_agent_populations {
-            model.spawn_agent_batch_boxed(
+            model.spawn_agent_batch_erased(
                 &population.template_name,
                 population.component_id,
                 population.values,
+                population.len,
             )?;
         }
 

@@ -126,6 +126,33 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// Inserts a dynamically-typed value into the attribute.
     fn push_dyn(&mut self, value: Box<dyn Any>) -> Result<(ChunkID, RowID), AttributeError>;
 
+    /// Bulk-appends a type-erased `Vec<T>` column payload.
+    ///
+    /// `values` must contain a `Vec<T>` where `T` is this attribute's element
+    /// type. On success returns `(start, count)`: the attribute length before
+    /// the append and the number of elements appended. This is the columnar
+    /// spawn fast path - one downcast and chunk-sized copies instead of one
+    /// boxed value per element.
+    ///
+    /// # Errors
+    /// - [`AttributeError::TypeMismatch`] if `values` is not a `Vec<T>`.
+    /// - [`AttributeError::IndexOverflow`] if the resulting length is not
+    ///   addressable; the attribute is unchanged.
+    fn extend_from_vec_any(
+        &mut self,
+        values: Box<dyn Any + Send>,
+    ) -> Result<(usize, usize), AttributeError>;
+
+    /// Drops all elements at indices `>= new_length`, keeping the prefix.
+    ///
+    /// Rollback companion to [`extend_from_vec_any`](Self::extend_from_vec_any):
+    /// truncating to the pre-append length restores the column exactly.
+    ///
+    /// # Errors
+    /// - [`AttributeError::InternalInvariant`] if `new_length` exceeds the
+    ///   current length.
+    fn truncate_to(&mut self, new_length: usize) -> Result<(), AttributeError>;
+
     /// Transfers an element from another attribute into this one.
     fn push_from_dyn(
         &mut self,
@@ -356,6 +383,26 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
             expected_name: type_name::<T>(),
             actual_name: "",
         }))
+    }
+
+    fn extend_from_vec_any(
+        &mut self,
+        values: Box<dyn Any + Send>,
+    ) -> Result<(usize, usize), AttributeError> {
+        let actual = values.as_ref().type_id();
+        match values.downcast::<Vec<T>>() {
+            Ok(vec) => self.extend_from_vec(*vec),
+            Err(_) => Err(AttributeError::TypeMismatch(TypeMismatchError {
+                expected: TypeId::of::<Vec<T>>(),
+                actual,
+                expected_name: type_name::<Vec<T>>(),
+                actual_name: "",
+            })),
+        }
+    }
+
+    fn truncate_to(&mut self, new_length: usize) -> Result<(), AttributeError> {
+        Attribute::truncate_to(self, new_length)
     }
 
     /// Moves an element from a source attribute into this attribute through a
