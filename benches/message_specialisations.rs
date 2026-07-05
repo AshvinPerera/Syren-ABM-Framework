@@ -70,6 +70,51 @@ fn empty_world(registry: Arc<MessageRegistry>) -> ECSManager {
 fn message_specialisation_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("message_specialisations");
 
+    // Per-call emit vs cached emitter, 1M messages on one thread.
+    group.bench_function("emit_per_call_1M", |b| {
+        b.iter_batched(
+            || {
+                let mut alloc = ChannelAllocator::new();
+                let mut registry = MessageRegistry::new();
+                let handle = registry
+                    .register_brute_force::<BruteMsg>(&mut alloc, Capacity::unbounded(1_000_000))
+                    .unwrap();
+                registry.freeze();
+                (MessageBufferSet::new(Arc::new(registry)).unwrap(), handle)
+            },
+            |(buffers, handle)| {
+                for i in 0..1_000_000u32 {
+                    buffers.emit(handle, BruteMsg { _value: i }).unwrap();
+                }
+                black_box(buffers)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.bench_function("emit_cached_emitter_1M", |b| {
+        b.iter_batched(
+            || {
+                let mut alloc = ChannelAllocator::new();
+                let mut registry = MessageRegistry::new();
+                let handle = registry
+                    .register_brute_force::<BruteMsg>(&mut alloc, Capacity::unbounded(1_000_000))
+                    .unwrap();
+                registry.freeze();
+                (MessageBufferSet::new(Arc::new(registry)).unwrap(), handle)
+            },
+            |(buffers, handle)| {
+                let emitter = buffers.emitter(handle).unwrap();
+                for i in 0..1_000_000u32 {
+                    emitter.emit(BruteMsg { _value: i });
+                }
+                drop(emitter);
+                black_box(buffers)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
     group.bench_function("brute_force_4096", |b| {
         b.iter_batched(
             || {

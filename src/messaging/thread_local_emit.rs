@@ -99,8 +99,9 @@ thread_local! {
 /// Initialises the thread-local emit slots for the current thread.
 ///
 /// Must be called once before the first `emit` on each thread/runtime pair. In
-/// practice this is handled automatically by [`emit`]'s lazy initialisation.
-fn ensure_worker_registered_fallible(
+/// practice this is handled automatically by [`emit`]'s lazy initialisation;
+/// [`MessageEmitter`] calls it once at construction and caches the result.
+pub(crate) fn ensure_worker_registered_fallible(
     runtime_id: MessageRuntimeID,
     num_message_types: usize,
 ) -> ECSResult<Arc<WorkerEmitSlots>> {
@@ -192,6 +193,94 @@ pub(crate) fn emit<M: Message>(
     // SAFETY: M is the type registered for mtid; item_size and align match.
     unsafe { buf.push(msg) };
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Cached emitter (Phase A fast path)
+// -----------------------------------------------------------------------------
+
+/// Cached per-thread emitter for one message type.
+///
+/// [`emit`] resolves the calling thread's slot container on every call:
+/// a thread-local access, a `RefCell` borrow, a `HashMap` lookup, and a
+/// `Weak::upgrade`. A `MessageEmitter` performs that resolution **once** at
+/// construction, so each [`MessageEmitter::emit`] is a bounds-checked slot
+/// access plus a buffer push - the right shape for per-agent hot loops.
+///
+/// Obtain one via
+/// [`MessageBufferSet::emitter`](crate::messaging::MessageBufferSet::emitter)
+/// inside the system that emits, and drop it before the system returns.
+///
+/// # Thread affinity
+///
+/// The cached slot belongs to the constructing thread, so the emitter is
+/// deliberately `!Send + !Sync`. Construct it *inside* the closure or system
+/// body running on the emitting thread - one emitter per thread, not one
+/// shared across a parallel iteration.
+///
+/// # Lifetime
+///
+/// The emitter borrows the [`MessageBufferSet`] it came from, so it cannot
+/// outlive the boundary handle - the same Phase A discipline that makes the
+/// per-thread buffers sound applies unchanged.
+pub struct MessageEmitter<'a, M: Message> {
+    worker: Arc<WorkerEmitSlots>,
+    slot_index: usize,
+    item_size: usize,
+    item_align: usize,
+    initial_capacity: usize,
+    /// Borrow of the owning buffer set (keeps Phase A discipline).
+    _owner: std::marker::PhantomData<&'a ()>,
+    /// `*mut ()` keeps the emitter on its constructing thread; `fn() -> M`
+    /// binds the message type without affecting auto traits otherwise.
+    _marker: std::marker::PhantomData<(*mut (), fn() -> M)>,
+}
+
+impl<'a, M: Message> MessageEmitter<'a, M> {
+    pub(crate) fn new(
+        runtime_id: MessageRuntimeID,
+        num_message_types: usize,
+        mtid: MessageTypeID,
+        item_size: usize,
+        item_align: usize,
+        initial_capacity: usize,
+    ) -> ECSResult<Self> {
+        let worker = ensure_worker_registered_fallible(runtime_id, num_message_types)?;
+        Ok(Self {
+            worker,
+            slot_index: mtid.index(),
+            item_size,
+            item_align,
+            initial_capacity,
+            _owner: std::marker::PhantomData,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    /// Emits one message into the calling thread's staging buffer.
+    #[inline]
+    pub fn emit(&self, msg: M) {
+        // SAFETY: Phase A discipline - this emitter is `!Send`, so the slot
+        // container belongs to the current thread and no drain can run
+        // concurrently (drains happen in boundary stages after all systems
+        // have returned, and the emitter cannot outlive its boundary handle).
+        let slots = unsafe { &mut *self.worker.slots.get() };
+
+        if slots[self.slot_index].is_none() {
+            slots[self.slot_index] = Some(AlignedBuffer::with_capacity(
+                self.item_size,
+                self.item_align,
+                self.initial_capacity,
+            ));
+        }
+
+        let buffer = slots[self.slot_index]
+            .as_mut()
+            .expect("slot initialised above");
+        // SAFETY: `M` is the type registered for this slot's message type id;
+        // size and alignment were taken from the registry descriptor.
+        unsafe { buffer.push(msg) };
+    }
 }
 
 // -----------------------------------------------------------------------------
