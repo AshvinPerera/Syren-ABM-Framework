@@ -324,7 +324,7 @@ impl Archetype {
                     })?;
             Self::ensure_capacity(&mut dest_meta, destination_chunk as usize + 1);
             dest_meta.entity_positions[destination_chunk as usize][destination_row as usize] =
-                Some(entity);
+                entity;
         }
 
         shards
@@ -352,16 +352,18 @@ impl Archetype {
             Some((last_chunk, last_row)) => {
                 Self::ensure_capacity(&mut src_meta, last_chunk as usize + 1);
 
-                let swapped_entity = src_meta.entity_positions[last_chunk as usize]
-                    [last_row as usize]
-                    .ok_or(MoveError::MetadataFailure {
+                let swapped_entity =
+                    src_meta.entity_positions[last_chunk as usize][last_row as usize];
+                if swapped_entity == Entity::PLACEHOLDER {
+                    return Err(MoveError::MetadataFailure {
                         entity: None,
                         source_archetype: None,
                         destination_archetype: None,
-                    })?;
+                    });
+                }
 
                 src_meta.entity_positions[source_chunk as usize][source_row as usize] =
-                    Some(swapped_entity);
+                    swapped_entity;
 
                 shards
                     .set_location(
@@ -378,10 +380,12 @@ impl Archetype {
                         destination_archetype: None,
                     })?;
 
-                src_meta.entity_positions[last_chunk as usize][last_row as usize] = None;
+                src_meta.entity_positions[last_chunk as usize][last_row as usize] =
+                    Entity::PLACEHOLDER;
             }
             None => {
-                src_meta.entity_positions[source_chunk as usize][source_row as usize] = None;
+                src_meta.entity_positions[source_chunk as usize][source_row as usize] =
+                    Entity::PLACEHOLDER;
             }
         }
 
@@ -775,7 +779,8 @@ impl Archetype {
                 .entity_positions
                 .get(source_position.0 as usize)
                 .and_then(|chunk| chunk.get(source_position.1 as usize))
-                .and_then(|slot| *slot);
+                .copied()
+                .filter(|entity| *entity != Entity::PLACEHOLDER);
             if source_slot != Some(entity) {
                 return Err(MoveError::MetadataFailure {
                     entity: Some(entity.to_raw()),
@@ -788,7 +793,8 @@ impl Archetype {
                     .entity_positions
                     .get(chunk as usize)
                     .and_then(|chunk_meta| chunk_meta.get(row as usize))
-                    .and_then(|slot| *slot);
+                    .copied()
+                .filter(|entity| *entity != Entity::PLACEHOLDER);
                 if swapped_slot.is_none() {
                     return Err(MoveError::MetadataFailure {
                         entity: Some(entity.to_raw()),
@@ -812,7 +818,8 @@ impl Archetype {
                 .entity_positions
                 .get(destination_position.0 as usize)
                 .and_then(|chunk| chunk.get(destination_position.1 as usize))
-                .and_then(|slot| *slot)
+                .copied()
+                .filter(|entity| *entity != Entity::PLACEHOLDER)
                 .is_some();
             if occupied {
                 return Err(MoveError::MetadataFailure {

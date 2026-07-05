@@ -85,6 +85,13 @@ use crate::engine::types::{
 pub struct Entity(EntityID);
 
 impl Entity {
+    /// Sentinel used by archetype metadata for empty back-map slots.
+    ///
+    /// Never produced by the allocator: `Entities::despawn` skips version
+    /// `VersionID::MAX`, so no live handle can encode the all-ones bit
+    /// pattern this constant occupies.
+    pub(crate) const PLACEHOLDER: Entity = Entity(EntityID::MAX);
+
     /// Creates an `Entity` from a raw ID.
     ///
     /// Intended for deserialization or low-level interop only. The caller

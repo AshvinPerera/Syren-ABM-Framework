@@ -215,6 +215,11 @@ impl Entities {
         match self.versions.get_mut(index) {
             Some(live) if *live == v && self.alive.get(index).copied().unwrap_or(false) => {
                 *live = live.wrapping_add(1);
+                // Skip VersionID::MAX so `Entity::PLACEHOLDER` (the all-ones
+                // raw bit pattern) can never collide with a live handle.
+                if *live == VersionID::MAX {
+                    *live = 0;
+                }
                 self.alive[index] = false;
                 self.locations[index] = EntityLocation::default();
                 self.free_store.push(i);
@@ -243,6 +248,16 @@ impl Entities {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn doctor_version_for_test(&mut self, index: usize, version: VersionID) {
+        self.versions[index] = version;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn version_for_test(&self, index: usize) -> VersionID {
+        self.versions[index]
+    }
+
     /// Updates the stored location for an entity.
     ///
     /// ## Safety
@@ -259,5 +274,29 @@ impl Entities {
         if index < self.locations.len() {
             self.locations[index] = location;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn despawn_version_increment_skips_max() {
+        let mut pool = Entities::default();
+        let first = pool.spawn(0, EntityLocation::default()).unwrap();
+        let index = first.index() as usize;
+
+        // Doctor the slot to the last pre-sentinel version and rebuild the
+        // matching live handle.
+        pool.doctor_version_for_test(index, VersionID::MAX - 1);
+        let handle = make_entity(0, first.index(), VersionID::MAX - 1);
+
+        assert!(pool.despawn(handle));
+        assert_eq!(
+            pool.version_for_test(index),
+            0,
+            "version increment must skip VersionID::MAX"
+        );
     }
 }

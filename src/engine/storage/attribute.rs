@@ -100,6 +100,10 @@ pub struct Attribute<T> {
     pub(crate) chunks: Vec<Box<[MaybeUninit<T>; CHUNK_CAP]>>,
     pub(crate) last_chunk_length: usize, // number of initialized elements in the last chunk
     pub(crate) length: usize,
+    /// One retired chunk kept as allocation hysteresis: a population
+    /// oscillating across a chunk boundary reuses this buffer instead of
+    /// freeing and reallocating a multi-hundred-KiB block per oscillation.
+    pub(crate) spare_chunk: Option<Box<[MaybeUninit<T>; CHUNK_CAP]>>,
 }
 
 impl<T: 'static + Send + Sync> fmt::Debug for Attribute<T> {
@@ -131,12 +135,15 @@ impl<T> Attribute<T> {
     #[inline]
     fn ensure_last_chunk(&mut self) {
         if self.chunks.is_empty() || self.last_chunk_length == CHUNK_CAP {
-            let mut chunk = Vec::with_capacity(CHUNK_CAP);
-            chunk.resize_with(CHUNK_CAP, MaybeUninit::<T>::uninit);
-            let chunk: Box<[MaybeUninit<T>; CHUNK_CAP]> = chunk
-                .into_boxed_slice()
-                .try_into()
-                .expect("chunk length is fixed to CHUNK_CAP");
+            let chunk = self.spare_chunk.take().unwrap_or_else(|| {
+                let mut chunk = Vec::with_capacity(CHUNK_CAP);
+                chunk.resize_with(CHUNK_CAP, MaybeUninit::<T>::uninit);
+                chunk
+                    .into_boxed_slice()
+                    .try_into()
+                    .map_err(|_| ())
+                    .expect("chunk length is fixed to CHUNK_CAP")
+            });
             self.chunks.push(chunk);
             self.last_chunk_length = 0;
         }
@@ -219,6 +226,9 @@ impl<T> Attribute<T> {
     /// `self.length` must already reflect the post-removal count.
     fn fixup_after_length_decrement(&mut self) {
         if self.length == 0 {
+            if self.spare_chunk.is_none() {
+                self.spare_chunk = self.chunks.pop();
+            }
             self.chunks.clear();
             self.last_chunk_length = 0;
         } else {
@@ -226,7 +236,10 @@ impl<T> Attribute<T> {
             let new_last_row = (self.length - 1) % CHUNK_CAP;
 
             while self.chunks.len() - 1 > new_last_chunk {
-                self.chunks.pop();
+                let popped = self.chunks.pop();
+                if self.spare_chunk.is_none() {
+                    self.spare_chunk = popped;
+                }
             }
 
             self.last_chunk_length = new_last_row + 1;
@@ -877,6 +890,7 @@ impl<T> Attribute<T> {
 
         self.drop_all_initialized_elements();
         self.chunks.clear();
+        self.spare_chunk = None;
         self.length = 0;
         self.last_chunk_length = 0;
     }
@@ -888,6 +902,7 @@ impl<T> Default for Attribute<T> {
             chunks: Vec::new(),
             last_chunk_length: 0,
             length: 0,
+            spare_chunk: None,
         }
     }
 }

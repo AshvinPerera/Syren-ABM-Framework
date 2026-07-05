@@ -368,6 +368,57 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Chunk hysteresis
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn boundary_oscillation_reuses_the_spare_chunk() {
+        let mut attr: Attribute<u64> = Attribute::default();
+        for i in 0..CHUNK_CAP {
+            attr.push(i as u64).unwrap();
+        }
+
+        // Cross the boundary once to allocate chunk 1.
+        attr.push(0).unwrap();
+        assert_eq!(attr.chunk_count(), 2);
+
+        // Retiring the trailing chunk parks it in the spare slot...
+        attr.swap_remove(1, 0).unwrap();
+        assert_eq!(attr.chunk_count(), 1);
+        assert!(attr.spare_chunk.is_some(), "popped chunk must be retained");
+
+        // ...and the next boundary crossing takes it back without allocating.
+        for _ in 0..100 {
+            attr.push(0).unwrap();
+            assert!(attr.spare_chunk.is_none(), "spare must be reused");
+            attr.swap_remove(1, 0).unwrap();
+            assert!(attr.spare_chunk.is_some(), "spare must be recaptured");
+        }
+        assert_eq!(attr.length, CHUNK_CAP);
+    }
+
+    #[test]
+    fn truncate_to_drops_tail_and_keeps_prefix() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut attr: Attribute<DropCounter> = Attribute::default();
+        for _ in 0..(CHUNK_CAP + 10) {
+            attr.push(DropCounter(Arc::clone(&counter))).unwrap();
+        }
+
+        attr.truncate_to(5).unwrap();
+        assert_eq!(attr.length, 5);
+        assert_eq!(counter.load(Ordering::Relaxed), CHUNK_CAP + 5);
+        assert_eq!(attr.chunk_count(), 1);
+
+        // Truncating beyond the current length is rejected.
+        assert!(attr.truncate_to(6).is_err());
+
+        attr.truncate_to(0).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), CHUNK_CAP + 10);
+        assert_eq!(attr.length, 0);
+    }
+
+    // -----------------------------------------------------------------------
     // Debug impl
     // -----------------------------------------------------------------------
 

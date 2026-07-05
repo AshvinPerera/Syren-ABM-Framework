@@ -160,7 +160,7 @@ impl Archetype {
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
 
-            if meta.entity_positions[chunk as usize][row as usize].is_some() {
+            if meta.entity_positions[chunk as usize][row as usize] != Entity::PLACEHOLDER {
                 drop(meta);
                 Self::rollback_written_positions(&self.components, &written_positions);
                 return Err(InternalViolation::SpawnSlotOccupied.into());
@@ -185,7 +185,7 @@ impl Archetype {
                 .meta
                 .write()
                 .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
-            meta.entity_positions[chunk as usize][row as usize] = Some(entity);
+            meta.entity_positions[chunk as usize][row as usize] = entity;
             meta.length += 1;
         }
 
@@ -270,13 +270,14 @@ impl Archetype {
 
             if let Some((moved_chunk, moved_row)) = moved_from {
                 Self::ensure_capacity(&mut meta, moved_chunk as usize + 1);
-                let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize]
-                    .ok_or(ECSError::from(
-                        InternalViolation::DespawnMovedSlotMissingEntity,
-                    ))?;
+                let moved_entity =
+                    meta.entity_positions[moved_chunk as usize][moved_row as usize];
+                if moved_entity == Entity::PLACEHOLDER {
+                    return Err(InternalViolation::DespawnMovedSlotMissingEntity.into());
+                }
 
                 meta.entity_positions[entity_chunk as usize][entity_row as usize] =
-                    Some(moved_entity);
+                    moved_entity;
 
                 shards
                     .set_location(
@@ -289,9 +290,11 @@ impl Archetype {
                     )
                     .map_err(ECSError::from)?;
 
-                meta.entity_positions[moved_chunk as usize][moved_row as usize] = None;
+                meta.entity_positions[moved_chunk as usize][moved_row as usize] =
+                    Entity::PLACEHOLDER;
             } else {
-                meta.entity_positions[entity_chunk as usize][entity_row as usize] = None;
+                meta.entity_positions[entity_chunk as usize][entity_row as usize] =
+                    Entity::PLACEHOLDER;
             }
 
             meta.length = meta.length.saturating_sub(1);
@@ -445,17 +448,17 @@ impl Archetype {
             let index = start + offset;
             let chunk = index / CHUNK_CAP;
             let row = index % CHUNK_CAP;
-            if meta.entity_positions[chunk][row].is_some() {
+            if meta.entity_positions[chunk][row] != Entity::PLACEHOLDER {
                 // Clear the rows written so far so a failed commit leaves no
                 // stale entries beyond the (unchanged) archetype length.
                 for cleared in 0..offset {
                     let cleared_index = start + cleared;
-                    meta.entity_positions[cleared_index / CHUNK_CAP][cleared_index % CHUNK_CAP] =
-                        None;
+                    meta.entity_positions[cleared_index / CHUNK_CAP]
+                        [cleared_index % CHUNK_CAP] = Entity::PLACEHOLDER;
                 }
                 return Err(InternalViolation::SpawnSlotOccupied.into());
             }
-            meta.entity_positions[chunk][row] = Some(entity);
+            meta.entity_positions[chunk][row] = entity;
         }
         meta.length += entities.len();
         Ok(())
@@ -517,12 +520,12 @@ impl Archetype {
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
             if let Some((moved_chunk, moved_row)) = moved_from {
-                let moved_entity = meta.entity_positions[moved_chunk as usize]
-                    [moved_row as usize]
-                    .ok_or(ECSError::from(
-                        InternalViolation::DespawnMovedSlotMissingEntity,
-                    ))?;
-                meta.entity_positions[chunk as usize][row as usize] = Some(moved_entity);
+                let moved_entity =
+                    meta.entity_positions[moved_chunk as usize][moved_row as usize];
+                if moved_entity == Entity::PLACEHOLDER {
+                    return Err(InternalViolation::DespawnMovedSlotMissingEntity.into());
+                }
+                meta.entity_positions[chunk as usize][row as usize] = moved_entity;
                 pending_moves.push((
                     moved_entity,
                     EntityLocation {
@@ -531,9 +534,10 @@ impl Archetype {
                         row,
                     },
                 ));
-                meta.entity_positions[moved_chunk as usize][moved_row as usize] = None;
+                meta.entity_positions[moved_chunk as usize][moved_row as usize] =
+                    Entity::PLACEHOLDER;
             } else {
-                meta.entity_positions[chunk as usize][row as usize] = None;
+                meta.entity_positions[chunk as usize][row as usize] = Entity::PLACEHOLDER;
             }
 
             meta.length = meta.length.saturating_sub(1);
