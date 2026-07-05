@@ -638,7 +638,7 @@ mod tests {
         assert!(matches!(
             err,
             ECSError::Execute(ExecutionError::QueryTypeMismatch {
-                method: "for_each<(Read<A>,)>",
+                method: "for_each<(Read,)>",
                 access: crate::engine::error::AccessKind::Read,
                 index: 0,
                 ..
@@ -663,7 +663,7 @@ mod tests {
         assert!(matches!(
             err,
             ECSError::Execute(ExecutionError::QueryTypeMismatch {
-                method: "for_each<(Write<A>,)>",
+                method: "for_each<(Write,)>",
                 access: crate::engine::error::AccessKind::Write,
                 index: 0,
                 ..

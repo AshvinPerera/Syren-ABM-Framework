@@ -199,9 +199,15 @@ pub(crate) fn emit<M: Message>(
 // Cached emitter (Phase A fast path)
 // -----------------------------------------------------------------------------
 
+/// Marker bundling the emitter's auto-trait shape: `*mut ()` pins it to its
+/// constructing thread (`!Send + !Sync`); `fn() -> M` binds the message type
+/// without adding further constraints.
+type EmitterMarker<M> = std::marker::PhantomData<(*mut (), fn() -> M)>;
+
 /// Cached per-thread emitter for one message type.
 ///
-/// [`emit`] resolves the calling thread's slot container on every call:
+/// The per-call emit path resolves the calling thread's slot container on
+/// every message:
 /// a thread-local access, a `RefCell` borrow, a `HashMap` lookup, and a
 /// `Weak::upgrade`. A `MessageEmitter` performs that resolution **once** at
 /// construction, so each [`MessageEmitter::emit`] is a bounds-checked slot
@@ -220,8 +226,9 @@ pub(crate) fn emit<M: Message>(
 ///
 /// # Lifetime
 ///
-/// The emitter borrows the [`MessageBufferSet`] it came from, so it cannot
-/// outlive the boundary handle - the same Phase A discipline that makes the
+/// The emitter borrows the
+/// [`MessageBufferSet`](crate::messaging::MessageBufferSet) it came from, so
+/// it cannot outlive the boundary handle - the same Phase A discipline that makes the
 /// per-thread buffers sound applies unchanged.
 pub struct MessageEmitter<'a, M: Message> {
     worker: Arc<WorkerEmitSlots>,
@@ -231,9 +238,7 @@ pub struct MessageEmitter<'a, M: Message> {
     initial_capacity: usize,
     /// Borrow of the owning buffer set (keeps Phase A discipline).
     _owner: std::marker::PhantomData<&'a ()>,
-    /// `*mut ()` keeps the emitter on its constructing thread; `fn() -> M`
-    /// binds the message type without affecting auto traits otherwise.
-    _marker: std::marker::PhantomData<(*mut (), fn() -> M)>,
+    _marker: EmitterMarker<M>,
 }
 
 impl<'a, M: Message> MessageEmitter<'a, M> {

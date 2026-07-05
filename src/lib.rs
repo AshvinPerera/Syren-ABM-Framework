@@ -34,7 +34,9 @@ pub(crate) mod profiling;
 
 // Core ECS manager and world access
 
-pub use engine::manager::{BoundaryHandle, ECSManager, ECSReference, Read, Write};
+pub use engine::manager::{
+    BoundaryHandle, ECSManager, ECSReference, EntityQueryParam, QueryParam, Read, Write,
+};
 
 // Entity types
 
@@ -76,7 +78,7 @@ pub use engine::commands::{BatchColumn, SpawnBatch};
 // Error types
 
 pub use engine::error::{
-    AttributeError, ECSError, ECSResult, ExecutionError, MoveError, SpawnError,
+    AttributeError, ECSError, ECSResult, ExecutionError, MoveError, RegistryError, SpawnError,
 };
 
 // User-attributable error context for boundary access.

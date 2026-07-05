@@ -252,7 +252,7 @@ fn collect_agents(ecs: ECSReference<'_>) -> ECSResult<Vec<SugarAgent>> {
     let agents = Arc::new(Mutex::new(Vec::<SugarAgent>::new()));
     let agents_for_query = Arc::clone(&agents);
     let q = ecs.query()?.read::<SugarAgent>()?.build()?;
-    ecs.for_each::<(Read<SugarAgent>,)>(q, &move |agent| {
+    ecs.for_each::<(Read<SugarAgent>,), _>(q, move |agent| {
         agents_for_query.lock().unwrap().push(*agent.0);
     })?;
     let mut agents = agents.lock().unwrap().clone();
@@ -263,7 +263,7 @@ fn collect_agents(ecs: ECSReference<'_>) -> ECSResult<Vec<SugarAgent>> {
 fn write_agents(ecs: ECSReference<'_>, agents: &[SugarAgent]) -> ECSResult<()> {
     let agents = agents.to_vec();
     let q = ecs.query()?.write::<SugarAgent>()?.build()?;
-    ecs.for_each::<(Write<SugarAgent>,)>(q, &move |agent| {
+    ecs.for_each::<(Write<SugarAgent>,), _>(q, move |agent| {
         *agent.0 = agents[agent.0.id as usize];
     })
 }
@@ -386,7 +386,7 @@ impl System for CpuMetabolismSystem {
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
         let q = ecs.query()?.write::<SugarAgent>()?.build()?;
-        ecs.for_each::<(Write<SugarAgent>,)>(q, &|agent| {
+        ecs.for_each::<(Write<SugarAgent>,), _>(q, |agent| {
             agent.0.wealth = agent.0.wealth.saturating_sub(agent.0.metabolism);
         })
     }

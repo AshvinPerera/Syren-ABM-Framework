@@ -28,7 +28,7 @@ fn iterate_benchmark(c: &mut Criterion) {
             },
             |(ecs, q)| {
                 ecs.world_ref()
-                    .for_each::<(Write<Wealth>,)>(q, &|w| {
+                    .for_each::<(Write<Wealth>,), _>(q, |w| {
                         w.0.value *= 1.0001;
                     })
                     .unwrap();
@@ -91,7 +91,7 @@ fn iterate_benchmark(c: &mut Criterion) {
             },
             |(ecs, q)| {
                 ecs.world_ref()
-                    .for_each::<(Read<Productivity>, Write<Wealth>)>(q, &|(p, w)| {
+                    .for_each::<(Read<Productivity>, Write<Wealth>), _>(q, |(p, w)| {
                         w.value += p.rate;
                     })
                     .unwrap();

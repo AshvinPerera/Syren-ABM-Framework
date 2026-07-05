@@ -314,52 +314,60 @@ impl<'a> ECSReference<'a> {
 
 // Generic tuple for_each
 impl ECSReference<'_> {
-    /// Generic tuple-based parallel iteration. `P` is `Read<T>`/`Write<T>` or a tuple thereof.
-    pub fn for_each<P>(&self, query: BuiltQuery, f: &P::Closure) -> ECSResult<()>
+    /// Generic tuple-based parallel iteration. `P` is `Read<T>`/`Write<T>` or
+    /// a tuple thereof (up to four reads and four writes).
+    ///
+    /// The closure receives [`QueryParam::Item`] per row and is statically
+    /// dispatched - the compiler inlines it into the per-row loop. Because
+    /// the closure type is inferred, name only `P` and let `_` stand for the
+    /// closure:
+    ///
+    /// ```text
+    /// world.for_each::<(Read<Productivity>, Write<Wealth>), _>(query, |(p, w)| {
+    ///     w.value += p.rate;
+    /// })?;
+    /// ```
+    pub fn for_each<P, F>(&self, query: BuiltQuery, f: F) -> ECSResult<()>
     where
         P: QueryParam,
-        P::Closure: Send + Sync,
+        F: for<'i> Fn(P::Item<'i>) + Send + Sync,
     {
         P::validate(&query)?;
         // SAFETY: the typed query was validated against its stored TypeIds.
         unsafe {
             self.for_each_abstraction(query, move |reads, writes| {
-                P::for_each_chunk(reads, writes, f)
+                P::for_each_chunk(reads, writes, &f)
             })
         }
     }
 
     /// Generic tuple-based parallel iteration that also passes the owning
     /// [`Entity`] for each component row.
-    pub fn for_each_entity<P>(&self, query: BuiltQuery, f: &P::EntityClosure) -> ECSResult<()>
+    pub fn for_each_entity<P, F>(&self, query: BuiltQuery, f: F) -> ECSResult<()>
     where
         P: EntityQueryParam,
-        P::EntityClosure: Send + Sync,
+        F: for<'i> Fn(P::EntityItem<'i>) + Send + Sync,
     {
         P::validate(&query)?;
         // SAFETY: the typed query was validated against its stored TypeIds.
         unsafe {
             self.for_each_entity_abstraction(query, move |entities, reads, writes| {
-                P::for_each_entity_chunk(entities, reads, writes, f)
+                P::for_each_entity_chunk(entities, reads, writes, &f)
             })
         }
     }
 
     /// Generic tuple-based entity-aware iteration whose closure may fail.
-    pub fn for_each_entity_fallible<P>(
-        &self,
-        query: BuiltQuery,
-        f: &P::EntityFallibleClosure,
-    ) -> ECSResult<()>
+    pub fn for_each_entity_fallible<P, F>(&self, query: BuiltQuery, f: F) -> ECSResult<()>
     where
         P: EntityQueryParam,
-        P::EntityFallibleClosure: Send + Sync,
+        F: for<'i> Fn(P::EntityItem<'i>) -> ECSResult<()> + Send + Sync,
     {
         P::validate(&query)?;
         // SAFETY: the typed query was validated against its stored TypeIds.
         unsafe {
             self.for_each_entity_abstraction_fallible(query, move |entities, reads, writes| {
-                P::for_each_entity_chunk_fallible(entities, reads, writes, f)
+                P::for_each_entity_chunk_fallible(entities, reads, writes, &f)
             })
         }
     }

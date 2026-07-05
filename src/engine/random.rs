@@ -51,8 +51,11 @@ pub(crate) fn splitmix64(mut x: u64) -> u64 {
 
 /// Deterministic pseudo-random generator keyed by simulation coordinates.
 ///
-/// See the [module documentation](self) for the reproducibility rationale.
-/// The sequence is the canonical splitmix64 stream over the derived seed.
+/// Two constructions with identical `(seed, tick, system, salt)` inputs
+/// yield identical sequences on any machine and thread count - unlike a
+/// thread-local RNG, whose per-agent draws depend on Rayon's run-to-run
+/// work-stealing decisions. The sequence is the canonical splitmix64 stream
+/// over the derived seed.
 #[derive(Clone, Copy, Debug)]
 pub struct DetRng {
     state: u64,

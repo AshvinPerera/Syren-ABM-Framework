@@ -107,7 +107,7 @@ fn entity_aware_tuple_iteration_returns_matching_entities() {
         .unwrap();
     let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen_capture = Arc::clone(&seen);
-    ecs.for_each_entity::<(Read<Velocity>, Write<Position>)>(q, &move |(
+    ecs.for_each_entity::<(Read<Velocity>, Write<Position>), _>(q, move |(
         entity,
         velocity,
         position,

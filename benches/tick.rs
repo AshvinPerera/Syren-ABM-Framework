@@ -55,9 +55,9 @@ fn tick_benchmark(c: &mut Criterion) {
                     "production",
                     access_prod_to_wealth,
                     move |world| {
-                        world.for_each::<(Read<Productivity>, Write<Wealth>)>(
+                        world.for_each::<(Read<Productivity>, Write<Wealth>), _>(
                             q_prod_to_wealth.clone(),
-                            &|(p, w)| w.value += p.rate,
+                            |(p, w)| w.value += p.rate,
                         )?;
                         Ok(())
                     },
@@ -76,7 +76,7 @@ fn tick_benchmark(c: &mut Criterion) {
                 };
 
                 scheduler.add_system(FnSystem::new(2, "decay", access_decay, move |world| {
-                    world.for_each::<(Write<Wealth>,)>(q_decay_wealth.clone(), &|w| {
+                    world.for_each::<(Write<Wealth>,), _>(q_decay_wealth.clone(), |w| {
                         w.0.value *= 0.9999
                     })?;
                     Ok(())
@@ -136,9 +136,9 @@ fn tick_benchmark(c: &mut Criterion) {
             "production",
             access_prod_to_wealth,
             move |world| {
-                world.for_each::<(Read<Productivity>, Write<Wealth>)>(
+                world.for_each::<(Read<Productivity>, Write<Wealth>), _>(
                     q_prod_to_wealth.clone(),
-                    &|(p, w)| w.value += p.rate,
+                    |(p, w)| w.value += p.rate,
                 )?;
                 Ok(())
             },
@@ -155,7 +155,7 @@ fn tick_benchmark(c: &mut Criterion) {
             consumes: Default::default(),
         };
         scheduler.add_system(FnSystem::new(2, "decay", access_decay, move |world| {
-            world.for_each::<(Write<Wealth>,)>(q_decay_wealth.clone(), &|w| {
+            world.for_each::<(Write<Wealth>,), _>(q_decay_wealth.clone(), |w| {
                 w.0.value *= 0.9999
             })?;
             Ok(())

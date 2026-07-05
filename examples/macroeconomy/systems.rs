@@ -1865,7 +1865,7 @@ where
     let rows = Arc::new(Mutex::new(Vec::new()));
     let rows_for_query = Arc::clone(&rows);
     let q = ecs.query()?.read::<T>()?.build()?;
-    ecs.for_each::<(Read<T>,)>(q, &move |row| {
+    ecs.for_each::<(Read<T>,), _>(q, move |row| {
         rows_for_query.lock().unwrap().push(*row.0);
     })?;
     let out = rows.lock().unwrap().clone();
@@ -1878,7 +1878,7 @@ where
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
     let q = ecs.query()?.write::<T>()?.build()?;
-    ecs.for_each::<(Write<T>,)>(q, &move |slot| {
+    ecs.for_each::<(Write<T>,), _>(q, move |slot| {
         let slot_id = id(slot.0);
         if let Some(updated) = rows.iter().find(|row| id(row) == slot_id) {
             *slot.0 = *updated;

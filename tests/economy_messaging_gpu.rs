@@ -346,7 +346,7 @@ fn build_gpu_model() -> (abm_framework::model::Model, EconomyGpuIds) {
                 let firm_state = Arc::new(Mutex::new(None::<GpuFirm>));
                 let firm_for_query = Arc::clone(&firm_state);
                 let read_q = ecs.query()?.read::<GpuFirm>()?.build()?;
-                ecs.for_each::<(Read<GpuFirm>,)>(read_q, &move |firm| {
+                ecs.for_each::<(Read<GpuFirm>,), _>(read_q, move |firm| {
                     *firm_for_query.lock().unwrap() = Some(*firm.0);
                 })?;
 
@@ -371,7 +371,7 @@ fn build_gpu_model() -> (abm_framework::model::Model, EconomyGpuIds) {
                 }
 
                 let write_q = ecs.query()?.write::<GpuFirm>()?.build()?;
-                ecs.for_each::<(Write<GpuFirm>,)>(write_q, &move |slot| {
+                ecs.for_each::<(Write<GpuFirm>,), _>(write_q, move |slot| {
                     *slot.0 = firm;
                 })?;
 
@@ -430,7 +430,7 @@ fn households(model: &abm_framework::model::Model) -> ECSResult<Vec<GpuHousehold
     let out_for_query = Arc::clone(&out);
     let world = model.ecs().world_ref();
     let q = world.query()?.read::<GpuHousehold>()?.build()?;
-    world.for_each::<(Read<GpuHousehold>,)>(q, &move |household| {
+    world.for_each::<(Read<GpuHousehold>,), _>(q, move |household| {
         out_for_query.lock().unwrap().push(*household.0);
     })?;
     let mut out = out.lock().unwrap().clone();
@@ -443,7 +443,7 @@ fn firm(model: &abm_framework::model::Model) -> ECSResult<GpuFirm> {
     let out_for_query = Arc::clone(&out);
     let world = model.ecs().world_ref();
     let q = world.query()?.read::<GpuFirm>()?.build()?;
-    world.for_each::<(Read<GpuFirm>,)>(q, &move |firm| {
+    world.for_each::<(Read<GpuFirm>,), _>(q, move |firm| {
         out_for_query.lock().unwrap().push(*firm.0);
     })?;
     let firm = out.lock().unwrap()[0];
