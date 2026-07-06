@@ -127,8 +127,8 @@ deferred commands, and run systems through a scheduler:
 ```rust
 use std::sync::{Arc, RwLock};
 use abm_framework::{
-    advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry,
-    ECSManager, ECSResult, FnSystem, Read, Scheduler,
+    advanced::EntityShards, Bundle, Command, ComponentRegistry, ECSManager,
+    ECSResult, FnSystem, QueryBuilder, Read, Scheduler,
 };
 
 #[derive(Clone, Copy)]
@@ -141,7 +141,7 @@ fn main() -> ECSResult<()> {
     let wealth_id = registry.write().unwrap().register::<Wealth>().unwrap();
     registry.write().unwrap().freeze();
 
-    let ecs = ECSManager::with_registry(EntityShards::new(1)?, registry);
+    let ecs = ECSManager::with_registry(EntityShards::new(1)?, registry.clone());
     let world = ecs.world_ref();
 
     let mut bundle = Bundle::new();
@@ -149,15 +149,23 @@ fn main() -> ECSResult<()> {
     world.defer(Command::Spawn { bundle })?;
     ecs.apply_deferred_commands()?;
 
-    let mut access = AccessSets::default();
-    access.read.set(wealth_id);
+    // The system's access set is derived from the queries it runs - no
+    // hand-written AccessSets to drift out of sync.
+    let query = QueryBuilder::with_registry(registry)
+        .read::<Wealth>()?
+        .build()?;
     let mut scheduler = Scheduler::new();
-    scheduler.add_system(FnSystem::new(0, "observe_wealth", access, move |ecs| {
-        let q = ecs.query()?.read::<Wealth>()?.build()?;
-        ecs.for_each::<(Read<Wealth>,), _>(q, |wealth| {
-            let _ = wealth.0.value;
-        })
-    }));
+    let q = query.clone();
+    scheduler.add_system(FnSystem::from_queries(
+        0,
+        "observe_wealth",
+        &[&query],
+        move |ecs| {
+            ecs.for_each::<(Read<Wealth>,), _>(q.clone(), |wealth| {
+                let _ = wealth.0.value;
+            })
+        },
+    ));
 
     ecs.run(&mut scheduler)
 }

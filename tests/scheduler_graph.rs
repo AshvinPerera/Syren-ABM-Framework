@@ -5,7 +5,7 @@ use abm_framework::{
     advanced::{ChannelAllocator, EntityShards},
     AccessSets, ActivationOrder, BoundaryContext, BoundaryResource, Bundle, ChannelID, Command,
     ComponentRegistry, Count, ECSError, ECSManager, ECSReference, ECSResult, ExecutionError,
-    Scheduler, System, SystemID, CHUNK_CAP,
+    FnSystem, QueryBuilder, Scheduler, System, SystemID, CHUNK_CAP,
 };
 
 fn empty_world() -> ECSManager {
@@ -517,4 +517,139 @@ fn ordering_self_dependency_is_rejected() {
         err,
         ECSError::Execute(ExecutionError::SelfSystemOrdering { system_id: 1 })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Query-derived access sets (FnSystem::from_queries)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct DerivedA(#[allow(dead_code)] u32);
+
+#[derive(Clone, Copy)]
+struct DerivedB(#[allow(dead_code)] u32);
+
+fn derived_fixture() -> (
+    ECSManager,
+    std::sync::Arc<RwLock<ComponentRegistry>>,
+    abm_framework::ComponentID,
+) {
+    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
+    let a_id = {
+        let mut reg = registry.write().unwrap();
+        let a = reg.register::<DerivedA>().unwrap();
+        reg.register::<DerivedB>().unwrap();
+        reg.freeze();
+        a
+    };
+    let world = ECSManager::with_registry(EntityShards::new(1).unwrap(), registry.clone());
+    (world, registry, a_id)
+}
+
+#[test]
+fn from_queries_packs_disjoint_writes_and_splits_conflicts() {
+    let (world, registry, _a_id) = derived_fixture();
+    let q_write_a = QueryBuilder::with_registry(registry.clone())
+        .write::<DerivedA>()
+        .unwrap()
+        .build()
+        .unwrap();
+    let q_write_b = QueryBuilder::with_registry(registry.clone())
+        .write::<DerivedB>()
+        .unwrap()
+        .build()
+        .unwrap();
+    let q_read_a = QueryBuilder::with_registry(registry)
+        .read::<DerivedA>()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut scheduler = Scheduler::new();
+    scheduler.add_system(FnSystem::from_queries(1, "writes_a", &[&q_write_a], |_| Ok(())));
+    scheduler.add_system(FnSystem::from_queries(2, "writes_b", &[&q_write_b], |_| Ok(())));
+    scheduler.add_system(FnSystem::from_queries(3, "reads_a", &[&q_read_a], |_| Ok(())));
+    scheduler.try_rebuild().unwrap();
+
+    let stages: Vec<Vec<usize>> = scheduler
+        .plan()
+        .iter()
+        .filter(|stage| !stage.is_boundary())
+        .map(|stage| stage.system_indices().to_vec())
+        .collect();
+
+    // Disjoint writers share the first stage; the reader of A conflicts with
+    // the writer of A and lands in the second.
+    assert_eq!(stages.len(), 2, "expected two CPU stages, got {stages:?}");
+    assert_eq!(stages[0], vec![0, 1]);
+    assert_eq!(stages[1], vec![2]);
+
+    world.run(&mut scheduler).unwrap();
+}
+
+#[test]
+fn from_queries_normalises_read_write_overlap_to_write_only() {
+    let (_world, registry, a_id) = derived_fixture();
+    let q_read_a = QueryBuilder::with_registry(registry.clone())
+        .read::<DerivedA>()
+        .unwrap()
+        .build()
+        .unwrap();
+    let q_write_a = QueryBuilder::with_registry(registry)
+        .write::<DerivedA>()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let system = FnSystem::from_queries(9, "read_then_write_a", &[&q_read_a, &q_write_a], |_| {
+        Ok(())
+    });
+
+    // Write-only after normalisation, and the merged set passes validation
+    // (a raw union would trip the read/write self-alias check).
+    assert!(system.access().write.has(a_id));
+    assert!(!system.access().read.has(a_id));
+    system.access().validate().unwrap();
+}
+
+#[test]
+fn from_queries_channels_order_producer_before_consumer() {
+    let (world, registry, _a_id) = derived_fixture();
+    let mut alloc = ChannelAllocator::new();
+    let channel = alloc.alloc().unwrap();
+
+    let q_write_a = QueryBuilder::with_registry(registry.clone())
+        .write::<DerivedA>()
+        .unwrap()
+        .build()
+        .unwrap();
+    let q_write_b = QueryBuilder::with_registry(registry)
+        .write::<DerivedB>()
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let log: Arc<Mutex<Vec<SystemID>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_producer = Arc::clone(&log);
+    let log_consumer = Arc::clone(&log);
+
+    let mut scheduler = Scheduler::new();
+    // Consumer has the LOWER id; only the channel edge can order it later.
+    scheduler.add_system(
+        FnSystem::from_queries(4, "consumer", &[&q_write_b], move |_| {
+            log_consumer.lock().unwrap().push(4);
+            Ok(())
+        })
+        .consumes(channel),
+    );
+    scheduler.add_system(
+        FnSystem::from_queries(5, "producer", &[&q_write_a], move |_| {
+            log_producer.lock().unwrap().push(5);
+            Ok(())
+        })
+        .produces(channel),
+    );
+
+    world.run(&mut scheduler).unwrap();
+    assert_eq!(*log.lock().unwrap(), vec![5, 4]);
 }

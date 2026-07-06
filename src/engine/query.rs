@@ -176,6 +176,26 @@ impl BuiltQuery {
         &self.writes
     }
 
+    /// Returns the component access this query implies, for scheduler
+    /// declarations.
+    ///
+    /// Channels are empty — attach them with
+    /// [`FnSystem::produces`](crate::FnSystem::produces) /
+    /// [`FnSystem::consumes`](crate::FnSystem::consumes). Prefer deriving a
+    /// system's access from its queries via
+    /// [`FnSystem::from_queries`](crate::FnSystem::from_queries) over writing
+    /// `AccessSets` by hand; hand-written sets can silently drift from what
+    /// the system actually touches.
+    #[inline]
+    pub fn access_sets(&self) -> AccessSets {
+        AccessSets {
+            read: self.signature.read,
+            write: self.signature.write,
+            produces: Default::default(),
+            consumes: Default::default(),
+        }
+    }
+
     #[inline]
     pub(crate) fn validate_read_type<T: 'static>(
         &self,
