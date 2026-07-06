@@ -80,6 +80,28 @@ pub enum MoveError {
     /// Swap-remove operations yielded inconsistent metadata.
     InconsistentSwapInfo,
 
+    /// A batched add-component targeted entities from more than one archetype.
+    ///
+    /// `AddComponentBatch` values are one column that must land in a single
+    /// destination archetype; issue one batch per source archetype (agent
+    /// templates naturally satisfy this).
+    BatchSpansArchetypes {
+        /// Archetype of the first entity in the batch.
+        expected: ArchetypeID,
+        /// Conflicting archetype encountered.
+        got: ArchetypeID,
+    },
+
+    /// A batched remove-component would leave entities with no components.
+    ///
+    /// The per-entity `Command::Remove` despawns such entities; the batched
+    /// form refuses instead - use `Command::DespawnBatchTagged` to remove the
+    /// agents outright.
+    BatchWouldEmptyEntity {
+        /// Component whose removal would empty the signature.
+        component_id: ComponentID,
+    },
+
     /// Entity metadata could not be updated consistently after the move.
     MetadataFailure {
         /// The entity being moved, if known.
@@ -155,6 +177,20 @@ impl fmt::Display for MoveError {
 
             MoveError::InconsistentSwapInfo => {
                 f.write_str("swap-remove produced inconsistent metadata")
+            }
+
+            MoveError::BatchSpansArchetypes { expected, got } => {
+                write!(
+                    f,
+                    "add-component batch spans archetypes ({expected} and {got}); issue one batch per archetype"
+                )
+            }
+
+            MoveError::BatchWouldEmptyEntity { component_id } => {
+                write!(
+                    f,
+                    "removing component {component_id} would leave entities empty; despawn them instead"
+                )
             }
 
             MoveError::MetadataFailure {

@@ -153,6 +153,46 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     ///   current length.
     fn truncate_to(&mut self, new_length: usize) -> Result<(), AttributeError>;
 
+    /// Bitwise gather-copies `rows` from `source` onto this column's tail
+    /// (batched-migration **copy phase**; ownership stays with `source`).
+    ///
+    /// Must be followed by either `swap_remove_forgotten_dyn` on every copied
+    /// source row (commit) or `truncate_forgotten` back to the returned start
+    /// (rollback). See the typed [`Attribute::extend_from_rows`] contract.
+    ///
+    /// # Errors
+    /// - [`AttributeError::TypeMismatch`] if `source` stores a different type.
+    /// - [`AttributeError::Position`] / [`AttributeError::IndexOverflow`],
+    ///   validated before any mutation.
+    fn extend_from_rows_dyn(
+        &mut self,
+        source: &dyn TypeErasedAttribute,
+        rows: &[(ChunkID, RowID)],
+    ) -> Result<(usize, usize), AttributeError>;
+
+    /// Appends `values[order[k]]` for each `k`, consuming a type-erased
+    /// `Vec<T>` (batched add-component's new-column path).
+    ///
+    /// `order` must be a permutation of `0..len`; see
+    /// [`Attribute::extend_permuted_from_vec`].
+    fn extend_permuted_from_vec_any(
+        &mut self,
+        values: Box<dyn Any + Send>,
+        order: &[usize],
+    ) -> Result<(usize, usize), AttributeError>;
+
+    /// Resets length **without** dropping the abandoned tail (rollback of a
+    /// bitwise copy phase whose values are still owned by their source).
+    fn truncate_forgotten(&mut self, new_length: usize) -> Result<(), AttributeError>;
+
+    /// Swap-removes a row **without** dropping the removed value (its bytes
+    /// were moved to another column, which now owns them).
+    fn swap_remove_forgotten_dyn(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+    ) -> Result<Option<(ChunkID, RowID)>, AttributeError>;
+
     /// Transfers an element from another attribute into this one.
     fn push_from_dyn(
         &mut self,
@@ -403,6 +443,53 @@ impl<T: 'static + Send + Sync> TypeErasedAttribute for Attribute<T> {
 
     fn truncate_to(&mut self, new_length: usize) -> Result<(), AttributeError> {
         Attribute::truncate_to(self, new_length)
+    }
+
+    fn extend_from_rows_dyn(
+        &mut self,
+        source: &dyn TypeErasedAttribute,
+        rows: &[(ChunkID, RowID)],
+    ) -> Result<(usize, usize), AttributeError> {
+        let actual = source.element_type_id();
+        let actual_name = source.element_type_name();
+        let Some(source) = source.as_any().downcast_ref::<Attribute<T>>() else {
+            return Err(AttributeError::TypeMismatch(TypeMismatchError {
+                expected: TypeId::of::<T>(),
+                actual,
+                expected_name: type_name::<T>(),
+                actual_name,
+            }));
+        };
+        self.extend_from_rows(source, rows)
+    }
+
+    fn extend_permuted_from_vec_any(
+        &mut self,
+        values: Box<dyn Any + Send>,
+        order: &[usize],
+    ) -> Result<(usize, usize), AttributeError> {
+        let actual = values.as_ref().type_id();
+        match values.downcast::<Vec<T>>() {
+            Ok(vec) => self.extend_permuted_from_vec(*vec, order),
+            Err(_) => Err(AttributeError::TypeMismatch(TypeMismatchError {
+                expected: TypeId::of::<Vec<T>>(),
+                actual,
+                expected_name: type_name::<Vec<T>>(),
+                actual_name: "",
+            })),
+        }
+    }
+
+    fn truncate_forgotten(&mut self, new_length: usize) -> Result<(), AttributeError> {
+        Attribute::truncate_forgotten(self, new_length)
+    }
+
+    fn swap_remove_forgotten_dyn(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+    ) -> Result<Option<(ChunkID, RowID)>, AttributeError> {
+        self.swap_remove_forgotten(chunk, row)
     }
 
     /// Moves an element from a source attribute into this attribute through a

@@ -419,6 +419,79 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Batched-migration primitives: exactly-one-drop accounting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_row_move_primitives_drop_each_value_exactly_once() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut source: Attribute<DropCounter> = Attribute::default();
+        for _ in 0..100 {
+            source.push(DropCounter(Arc::clone(&counter))).unwrap();
+        }
+        let mut destination: Attribute<DropCounter> = Attribute::default();
+
+        // Copy phase: bitwise copies, no ownership transfer yet.
+        let rows = [(0u16, 99u32), (0, 50), (0, 5)]; // descending
+        let (start, count) = destination.extend_from_rows(&source, &rows).unwrap();
+        assert_eq!((start, count), (0, 3));
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "copy phase must not drop");
+
+        // Commit phase: forgotten removal transfers ownership to destination.
+        for &(chunk, row) in &rows {
+            source.swap_remove_forgotten(chunk, row).unwrap();
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "commit must not drop");
+        assert_eq!(source.length, 97);
+        assert_eq!(destination.length, 3);
+
+        drop(source);
+        assert_eq!(counter.load(Ordering::Relaxed), 97);
+        drop(destination);
+        assert_eq!(counter.load(Ordering::Relaxed), 100, "every value dropped exactly once");
+    }
+
+    #[test]
+    fn truncate_forgotten_discards_copies_without_dropping() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut source: Attribute<DropCounter> = Attribute::default();
+        for _ in 0..10 {
+            source.push(DropCounter(Arc::clone(&counter))).unwrap();
+        }
+        let mut destination: Attribute<DropCounter> = Attribute::default();
+        let rows: Vec<(u16, u32)> = (0..10).map(|row| (0u16, row as u32)).collect();
+        destination.extend_from_rows(&source, &rows).unwrap();
+
+        // Rollback: the copies are discarded, source still owns everything.
+        destination.truncate_forgotten(0).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(destination.length, 0);
+
+        drop(destination);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        drop(source);
+        assert_eq!(counter.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn extend_permuted_from_vec_applies_the_order() {
+        let mut attr: Attribute<u32> = Attribute::default();
+        attr.extend_permuted_from_vec(vec![10, 11, 12, 13], &[3, 1, 2, 0])
+            .unwrap();
+        let observed: Vec<u32> = attr.iter().copied().collect();
+        assert_eq!(observed, vec![13, 11, 12, 10]);
+
+        // Length mismatch and out-of-range indices are rejected untouched.
+        assert!(attr
+            .extend_permuted_from_vec(vec![1, 2], &[0])
+            .is_err());
+        assert!(attr
+            .extend_permuted_from_vec(vec![1, 2], &[0, 5])
+            .is_err());
+        assert_eq!(attr.length, 4);
+    }
+
+    // -----------------------------------------------------------------------
     // Debug impl
     // -----------------------------------------------------------------------
 

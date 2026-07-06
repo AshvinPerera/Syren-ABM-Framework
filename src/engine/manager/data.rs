@@ -728,6 +728,32 @@ impl ECSData {
                     result
                 }
 
+                Command::AddComponentBatch {
+                    entities,
+                    component_id,
+                    values,
+                    len,
+                } => match self.apply_add_component_batch(entities, component_id, values, len) {
+                    Ok(_touched) => {
+                        #[cfg(feature = "gpu")]
+                        touched.extend(_touched);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
+
+                Command::RemoveComponentBatch {
+                    entities,
+                    component_id,
+                } => match self.apply_remove_component_batch(entities, component_id) {
+                    Ok(_touched) => {
+                        #[cfg(feature = "gpu")]
+                        touched.extend(_touched);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
+
                 Command::Set {
                     entity,
                     component_id,
@@ -897,6 +923,228 @@ impl ECSData {
             entities,
         });
         Ok(archetype_ids)
+    }
+
+    /// Applies one columnar add-component batch. Returns the touched
+    /// archetypes (source, destination) for GPU dirty tracking.
+    ///
+    /// ## Failure semantics
+    /// Fully atomic: stale/duplicate handles, archetype mismatches,
+    /// already-present components, and length mismatches are all rejected in
+    /// preflight; storage failures roll back via the copy-then-commit
+    /// transaction in [`Archetype::migrate_rows_batch`].
+    fn apply_add_component_batch(
+        &mut self,
+        entities: Vec<Entity>,
+        component_id: ComponentID,
+        values: Box<dyn std::any::Any + Send>,
+        len: usize,
+    ) -> ECSResult<Vec<ArchetypeID>> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(component_id)?;
+        }
+        if len != entities.len() {
+            return Err(SpawnError::BatchColumnMismatch {
+                component_id,
+                expected: entities.len(),
+                actual: len,
+            }
+            .into());
+        }
+        if entities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Preflight: one shared source archetype, all live, none already
+        // carrying the component.
+        let mut resolved: Vec<(usize, Entity, EntityLocation)> =
+            Vec::with_capacity(entities.len());
+        let mut source_id: Option<ArchetypeID> = None;
+        for (input_index, &entity) in entities.iter().enumerate() {
+            let Some(location) = self.shards.get_location(entity)? else {
+                return Err(SpawnError::StaleEntity(StaleEntityError).into());
+            };
+            match source_id {
+                None => source_id = Some(location.archetype),
+                Some(expected) if expected != location.archetype => {
+                    return Err(MoveError::BatchSpansArchetypes {
+                        expected,
+                        got: location.archetype,
+                    }
+                    .into());
+                }
+                Some(_) => {}
+            }
+            resolved.push((input_index, entity, location));
+        }
+        let source_id = source_id.expect("non-empty batch has a source archetype");
+
+        if self.archetypes[source_id as usize]
+            .signature()
+            .try_has(component_id)?
+        {
+            return Err(MoveError::ComponentAlreadyPresent { component_id }.into());
+        }
+
+        // Destination archetype: source signature plus the new component.
+        let mut new_signature = *self.archetypes[source_id as usize].signature();
+        new_signature.try_set(component_id)?;
+        let destination_id = self.get_or_create_archetype(&new_signature)?;
+        let source_signature = *self.archetypes[source_id as usize].signature();
+
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            let (_, destination) = Self::get_archetype_pair_mut(
+                &mut self.archetypes,
+                source_id,
+                destination_id,
+            )?;
+            let factory = || registry.make_empty_component(component_id);
+            destination
+                .ensure_component(component_id, factory)
+                .map_err(ECSError::from)?;
+            Self::ensure_shared_components(
+                &source_signature,
+                destination,
+                component_id,
+                &registry,
+            )?;
+        }
+
+        // Descending linear row order; duplicates become adjacent equals.
+        resolved.sort_by_key(|&(_, _, location)| {
+            std::cmp::Reverse(location.chunk as usize * CHUNK_CAP + location.row as usize)
+        });
+        for pair in resolved.windows(2) {
+            if (pair[0].2.chunk, pair[0].2.row) == (pair[1].2.chunk, pair[1].2.row) {
+                return Err(SpawnError::StaleEntity(StaleEntityError).into());
+            }
+        }
+        let order: Vec<usize> = resolved.iter().map(|&(input_index, _, _)| input_index).collect();
+        let targets: Vec<(Entity, ChunkID, RowID)> = resolved
+            .iter()
+            .map(|&(_, entity, location)| (entity, location.chunk, location.row))
+            .collect();
+
+        let shards = &self.shards;
+        let (source, destination) =
+            Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
+        source.migrate_rows_batch(
+            destination,
+            shards,
+            &targets,
+            Some((component_id, values, order)),
+            None,
+        )?;
+
+        Ok(vec![source_id, destination_id])
+    }
+
+    /// Applies one columnar remove-component batch. Entities may span
+    /// archetypes (each group migrates atomically, groups in ascending
+    /// archetype order); entities without the component are skipped to match
+    /// the per-entity `Remove` no-op. Returns the touched archetypes.
+    fn apply_remove_component_batch(
+        &mut self,
+        entities: Vec<Entity>,
+        component_id: ComponentID,
+    ) -> ECSResult<Vec<ArchetypeID>> {
+        {
+            let registry = self
+                .registry
+                .read()
+                .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+            registry.require_component_id(component_id)?;
+        }
+        if entities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Preflight: resolve, drop non-carriers, group by archetype.
+        let mut by_archetype: HashMap<ArchetypeID, Vec<(Entity, ChunkID, RowID)>> =
+            HashMap::new();
+        for &entity in &entities {
+            let Some(location) = self.shards.get_location(entity)? else {
+                return Err(SpawnError::StaleEntity(StaleEntityError).into());
+            };
+            if !self.archetypes[location.archetype as usize]
+                .signature()
+                .try_has(component_id)?
+            {
+                continue;
+            }
+            by_archetype
+                .entry(location.archetype)
+                .or_default()
+                .push((entity, location.chunk, location.row));
+        }
+
+        let mut archetype_ids: Vec<ArchetypeID> = by_archetype.keys().copied().collect();
+        archetype_ids.sort_unstable();
+
+        let mut touched: Vec<ArchetypeID> = Vec::new();
+        for &source_id in &archetype_ids {
+            let Some(mut targets) = by_archetype.remove(&source_id) else {
+                continue;
+            };
+            targets.sort_by_key(|&(_, chunk, row)| {
+                std::cmp::Reverse(chunk as usize * CHUNK_CAP + row as usize)
+            });
+            for pair in targets.windows(2) {
+                if (pair[0].1, pair[0].2) == (pair[1].1, pair[1].2) {
+                    return Err(SpawnError::StaleEntity(StaleEntityError).into());
+                }
+            }
+
+            let mut new_signature = *self.archetypes[source_id as usize].signature();
+            new_signature.try_clear(component_id)?;
+            if new_signature.components.iter().all(|&bits| bits == 0) {
+                return Err(MoveError::BatchWouldEmptyEntity { component_id }.into());
+            }
+
+            let destination_id = self.get_or_create_archetype(&new_signature)?;
+            let source_signature = *self.archetypes[source_id as usize].signature();
+            {
+                let registry = self
+                    .registry
+                    .read()
+                    .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
+                let (_, destination) = Self::get_archetype_pair_mut(
+                    &mut self.archetypes,
+                    source_id,
+                    destination_id,
+                )?;
+                Self::ensure_shared_components(
+                    &source_signature,
+                    destination,
+                    component_id,
+                    &registry,
+                )?;
+            }
+
+            let shards = &self.shards;
+            let (source, destination) =
+                Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
+            source.migrate_rows_batch(
+                destination,
+                shards,
+                &targets,
+                None,
+                Some(component_id),
+            )?;
+
+            touched.push(source_id);
+            touched.push(destination_id);
+        }
+
+        Ok(touched)
     }
 
     /// Records the archetype currently holding `entity` in the GPU dirty set.
@@ -1481,6 +1729,217 @@ mod tests {
             })
             .unwrap();
         count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn add_component_batch_maps_values_to_entities() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let n = 10_000u32;
+
+        let mut entities = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            entities.push(spawn_marker(&ecs, marker_id, i));
+        }
+
+        // Values in input order; processing order is per-archetype descending,
+        // so this exercises the permutation path end to end.
+        let values: Vec<Extra> = (0..n).map(|i| Extra(i * 3)).collect();
+        world
+            .defer(Command::AddComponentBatch {
+                entities: entities.clone(),
+                component_id: extra_id,
+                values: Box::new(values),
+                len: n as usize,
+            })
+            .unwrap();
+        ecs.apply_deferred_commands().unwrap();
+
+        for (k, &entity) in entities.iter().enumerate().step_by(997) {
+            let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
+            let extra: Extra = world.read_entity_component(entity, extra_id).unwrap();
+            assert_eq!(marker.0 as usize, k, "shared column must follow its entity");
+            assert_eq!(extra.0 as usize, k * 3, "added column must map input order");
+        }
+
+        world
+            .with_exclusive(|data| {
+                let location = data.shards.get_location(entities[0])?.unwrap();
+                assert_eq!(
+                    data.archetypes[location.archetype as usize].length().unwrap(),
+                    n as usize
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn add_component_batch_preflight_rejections() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let a = spawn_marker(&ecs, marker_id, 1);
+        let b = spawn_marker(&ecs, marker_id, 2);
+
+        // Duplicate handle.
+        world
+            .defer(Command::AddComponentBatch {
+                entities: vec![a, a],
+                component_id: extra_id,
+                values: Box::new(vec![Extra(1), Extra(2)]),
+                len: 2,
+            })
+            .unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        // Length mismatch.
+        world
+            .defer(Command::AddComponentBatch {
+                entities: vec![a, b],
+                component_id: extra_id,
+                values: Box::new(vec![Extra(1)]),
+                len: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Spawn(
+                crate::engine::error::SpawnError::BatchColumnMismatch { .. }
+            ))
+        ));
+
+        // Cross-archetype batch: give `b` the Extra component first.
+        world
+            .defer(Command::Add {
+                entity: b,
+                component_id: extra_id,
+                value: Box::new(Extra(9)),
+            })
+            .unwrap();
+        ecs.apply_deferred_commands().unwrap();
+        world
+            .defer(Command::AddComponentBatch {
+                entities: vec![a, b],
+                component_id: extra_id,
+                values: Box::new(vec![Extra(1), Extra(2)]),
+                len: 2,
+            })
+            .unwrap();
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Move(MoveError::BatchSpansArchetypes { .. }))
+        ));
+
+        // Already-present component (single archetype).
+        world
+            .defer(Command::AddComponentBatch {
+                entities: vec![b],
+                component_id: extra_id,
+                values: Box::new(vec![Extra(1)]),
+                len: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Move(MoveError::ComponentAlreadyPresent { .. }))
+        ));
+
+        // Untouched survivor.
+        let marker: Marker = world.read_entity_component(a, marker_id).unwrap();
+        assert_eq!(marker.0, 1);
+    }
+
+    #[test]
+    fn add_component_batch_type_mismatch_is_a_no_op() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+        let mut entities = Vec::new();
+        for i in 0..100 {
+            entities.push(spawn_marker(&ecs, marker_id, i));
+        }
+
+        // Wrong payload type: Vec<Marker> where Vec<Extra> is required.
+        world
+            .defer(Command::AddComponentBatch {
+                entities: entities.clone(),
+                component_id: extra_id,
+                values: Box::new((0..100u32).map(Marker).collect::<Vec<_>>()),
+                len: 100,
+            })
+            .unwrap();
+        assert!(ecs.apply_deferred_commands().is_err());
+
+        // World unchanged: values intact, no Extra column rows anywhere.
+        for (k, &entity) in entities.iter().enumerate() {
+            let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
+            assert_eq!(marker.0 as usize, k);
+            assert!(world
+                .read_entity_component::<Extra>(entity, extra_id)
+                .is_err());
+        }
+        assert_eq!(count_markers_in(&ecs), 100);
+    }
+
+    #[test]
+    fn remove_component_batch_migrates_and_skips_non_carriers() {
+        let (ecs, marker_id, extra_id) = test_manager();
+        let world = ecs.world_ref();
+
+        // 60 carriers (Marker + Extra), 40 plain markers.
+        let mut carriers = Vec::new();
+        for i in 0..60u32 {
+            let entity = spawn_marker(&ecs, marker_id, i);
+            world
+                .defer(Command::Add {
+                    entity,
+                    component_id: extra_id,
+                    value: Box::new(Extra(i + 1000)),
+                })
+                .unwrap();
+            carriers.push(entity);
+        }
+        ecs.apply_deferred_commands().unwrap();
+        let mut plain = Vec::new();
+        for i in 60..100u32 {
+            plain.push(spawn_marker(&ecs, marker_id, i));
+        }
+
+        // Remove Extra from everyone; non-carriers are skipped (no-op parity).
+        let mut all = carriers.clone();
+        all.extend_from_slice(&plain);
+        world
+            .defer(Command::RemoveComponentBatch {
+                entities: all,
+                component_id: extra_id,
+            })
+            .unwrap();
+        ecs.apply_deferred_commands().unwrap();
+
+        for (k, &entity) in carriers.iter().enumerate() {
+            let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
+            assert_eq!(marker.0 as usize, k, "shared column must survive removal");
+            assert!(world
+                .read_entity_component::<Extra>(entity, extra_id)
+                .is_err());
+        }
+        for (k, &entity) in plain.iter().enumerate() {
+            let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
+            assert_eq!(marker.0 as usize, k + 60);
+        }
+        assert_eq!(count_markers_in(&ecs), 100);
+
+        // Removal that would empty the signature is rejected.
+        world
+            .defer(Command::RemoveComponentBatch {
+                entities: vec![plain[0]],
+                component_id: marker_id,
+            })
+            .unwrap();
+        assert!(matches!(
+            ecs.apply_deferred_commands(),
+            Err(ECSError::Move(MoveError::BatchWouldEmptyEntity { .. }))
+        ));
+        assert_eq!(count_markers_in(&ecs), 100);
     }
 
     #[test]

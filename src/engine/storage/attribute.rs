@@ -802,6 +802,229 @@ impl<T> Attribute<T> {
         Ok((start, count))
     }
 
+    /// Bitwise gather-copies the given `source` rows onto this attribute's
+    /// tail, in `rows` order.
+    ///
+    /// This is the **copy phase** of a batched archetype migration. Ownership
+    /// of the copied values does **not** transfer: the source slots remain
+    /// live until the caller's commit phase removes them with
+    /// [`swap_remove_forgotten`](Self::swap_remove_forgotten) (ownership then
+    /// rests here), or the caller rolls back this copy with
+    /// [`truncate_forgotten`](Self::truncate_forgotten) (ownership stays with
+    /// the source). Exactly one of those must follow, or values will be
+    /// double-dropped / leaked.
+    ///
+    /// # Returns
+    /// `(start, count)`: this attribute's length before the append and the
+    /// number of rows copied.
+    ///
+    /// # Errors
+    /// All source positions and the resulting addressability are validated
+    /// **before** any mutation; on error both attributes are unchanged.
+    pub(crate) fn extend_from_rows(
+        &mut self,
+        source: &Attribute<T>,
+        rows: &[(ChunkID, RowID)],
+    ) -> Result<(usize, usize), AttributeError> {
+        let count = rows.len();
+        let start = self.length;
+        if count == 0 {
+            return Ok((start, 0));
+        }
+
+        let last_index = start + count - 1;
+        let _: ChunkID = (last_index / CHUNK_CAP)
+            .try_into()
+            .map_err(|_| AttributeError::IndexOverflow("ChunkID"))?;
+        for &(chunk, row) in rows {
+            if !source.valid_position(chunk, row) {
+                return Err(source.position_error(chunk, row));
+            }
+        }
+
+        let needed_chunks = (start + count).div_ceil(CHUNK_CAP);
+        self.chunks.reserve(needed_chunks.saturating_sub(self.chunks.len()));
+
+        for &(chunk, row) in rows {
+            self.ensure_last_chunk();
+            let chunk_index = self.chunks.len() - 1;
+            let row_index = self.last_chunk_length;
+            // SAFETY: the source slot was validated as initialized above; the
+            // destination slot is uninitialized (`ensure_last_chunk` keeps
+            // `row_index < CHUNK_CAP` and everything at or beyond
+            // `last_chunk_length` uninit). The copy is bitwise; ownership
+            // remains with `source` per this method's contract.
+            unsafe {
+                let src = source.chunks[chunk as usize].as_ptr().add(row as usize) as *const T;
+                let dst = self.chunks[chunk_index].as_mut_ptr().add(row_index) as *mut T;
+                ptr::copy_nonoverlapping(src, dst, 1);
+            }
+            self.last_chunk_length += 1;
+            self.length += 1;
+        }
+
+        Ok((start, count))
+    }
+
+    /// Appends `values[order[k]]` for `k in 0..order.len()`, consuming the
+    /// vector.
+    ///
+    /// Used by batched add-component to append caller-supplied values in the
+    /// batch's processed-row order rather than input order.
+    ///
+    /// # Contract
+    /// `order` must be a permutation of `0..values.len()`: every element is
+    /// moved exactly once. Length and index bounds are validated (and full
+    /// coverage debug-asserted); a violated coverage contract in release
+    /// would double-move/leak elements, so callers construct `order` from a
+    /// sort of `0..len`.
+    pub(crate) fn extend_permuted_from_vec(
+        &mut self,
+        mut values: Vec<T>,
+        order: &[usize],
+    ) -> Result<(usize, usize), AttributeError> {
+        if order.len() != values.len() {
+            return Err(AttributeError::InternalInvariant(
+                AttributeInvariantViolation::LengthMismatch,
+            ));
+        }
+        let count = order.len();
+        let start = self.length;
+        if count == 0 {
+            return Ok((start, 0));
+        }
+
+        let last_index = start + count - 1;
+        let _: ChunkID = (last_index / CHUNK_CAP)
+            .try_into()
+            .map_err(|_| AttributeError::IndexOverflow("ChunkID"))?;
+        for &index in order {
+            if index >= count {
+                return Err(AttributeError::InternalInvariant(
+                    AttributeInvariantViolation::LengthMismatch,
+                ));
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = vec![false; count];
+            for &index in order {
+                debug_assert!(!seen[index], "order must not repeat indices");
+                seen[index] = true;
+            }
+        }
+
+        let needed_chunks = (start + count).div_ceil(CHUNK_CAP);
+        self.chunks.reserve(needed_chunks.saturating_sub(self.chunks.len()));
+
+        let base = values.as_ptr();
+        for &index in order {
+            self.ensure_last_chunk();
+            let chunk_index = self.chunks.len() - 1;
+            let row_index = self.last_chunk_length;
+            // SAFETY: `index < values.len()` was validated; the destination
+            // slot is uninitialized. Each element is moved exactly once per
+            // the permutation contract; `set_len(0)` below relinquishes the
+            // vector's ownership so nothing double-drops.
+            unsafe {
+                let dst = self.chunks[chunk_index].as_mut_ptr().add(row_index) as *mut T;
+                ptr::copy_nonoverlapping(base.add(index), dst, 1);
+            }
+            self.last_chunk_length += 1;
+            self.length += 1;
+        }
+
+        // SAFETY: every element was moved into chunk storage above.
+        unsafe {
+            values.set_len(0);
+        }
+
+        Ok((start, count))
+    }
+
+    /// Resets the length to `new_length` **without running drop glue** on the
+    /// abandoned tail.
+    ///
+    /// Rollback companion to [`extend_from_rows`](Self::extend_from_rows):
+    /// the tail holds bitwise copies still owned by their source, so dropping
+    /// them here would double-drop.
+    ///
+    /// # Errors
+    /// Returns [`AttributeError::InternalInvariant`] if `new_length` exceeds
+    /// the current length.
+    pub(crate) fn truncate_forgotten(&mut self, new_length: usize) -> Result<(), AttributeError> {
+        if new_length > self.length {
+            return Err(AttributeError::InternalInvariant(
+                AttributeInvariantViolation::LengthMismatch,
+            ));
+        }
+        if new_length == self.length {
+            return Ok(());
+        }
+        self.length = new_length;
+        self.fixup_after_length_decrement();
+        Ok(())
+    }
+
+    /// Swap-removes `(chunk, row)` **without running drop glue** on the
+    /// removed value.
+    ///
+    /// Commit companion to [`extend_from_rows`](Self::extend_from_rows): the
+    /// removed value's bytes were already moved to another attribute, which
+    /// now owns them. The backfill move (last row into the hole) behaves
+    /// exactly like [`swap_remove`](Self::swap_remove).
+    pub(crate) fn swap_remove_forgotten(
+        &mut self,
+        chunk: ChunkID,
+        row: RowID,
+    ) -> Result<Option<(ChunkID, RowID)>, AttributeError> {
+        if !self.valid_position(chunk, row) {
+            return Err(self.position_error(chunk, row));
+        }
+
+        let last_index = self.length - 1;
+        let last_chunk = last_index / CHUNK_CAP;
+        let last_row = last_index % CHUNK_CAP;
+        let is_last = (chunk as usize == last_chunk) && (row as usize == last_row);
+
+        let moved_from = if is_last {
+            // SAFETY: ownership of the removed value has already transferred
+            // elsewhere; marking the slot uninit without dropping is the
+            // entire point of this method.
+            unsafe {
+                *self.get_slot_unchecked(chunk as usize, row as usize) = MaybeUninit::uninit();
+            }
+            None
+        } else {
+            // SAFETY: `last` is a distinct initialized slot; its value moves
+            // into the (logically vacated) hole. The hole's previous bytes
+            // are intentionally not dropped - see the method contract.
+            unsafe {
+                let last_value =
+                    ptr::read(self.get_slot_unchecked(last_chunk, last_row).as_ptr());
+                ptr::write(
+                    self.get_slot_unchecked(chunk as usize, row as usize)
+                        .as_mut_ptr(),
+                    last_value,
+                );
+                *self.get_slot_unchecked(last_chunk, last_row) = MaybeUninit::uninit();
+            }
+            Some((
+                last_chunk
+                    .try_into()
+                    .map_err(|_| AttributeError::IndexOverflow("chunk"))?,
+                last_row
+                    .try_into()
+                    .map_err(|_| AttributeError::IndexOverflow("row"))?,
+            ))
+        };
+
+        self.length -= 1;
+        self.fixup_after_length_decrement();
+
+        Ok(moved_from)
+    }
+
     /// Drops all elements at indices `>= new_length`, keeping the prefix.
     ///
     /// Used to roll back a partially applied bulk append: truncating back to
