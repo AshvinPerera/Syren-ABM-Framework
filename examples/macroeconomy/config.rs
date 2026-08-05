@@ -4,13 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::components::SECTORS;
-use super::state::{GoodsClearingPolicy, HousingReductionPolicy, MacroEnvironment, PythonLikeRng};
+use super::state::{GoodsClearingPolicy, MacroEnvironment};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
     Io { path: PathBuf, message: String },
     Parse { line: usize, message: String },
     UnknownKey { line: usize, key: String },
+    UnknownScenario { name: String, available: Vec<String> },
 }
 
 impl fmt::Display for ConfigError {
@@ -23,14 +24,27 @@ impl fmt::Display for ConfigError {
             Self::UnknownKey { line, key } => {
                 write!(f, "unknown config key `{key}` at line {line}")
             }
+            Self::UnknownScenario { name, available } => {
+                write!(
+                    f,
+                    "unknown scenario `{name}`; available: {}",
+                    available.join(", ")
+                )
+            }
         }
     }
 }
 
 impl Error for ConfigError {}
 
+/// Loads `config.yaml`, applying the `defaults` block and then, if named, one
+/// block from `scenarios`.
+///
+/// Scenario settings are applied *after* the defaults, so a scenario only needs
+/// to list the keys it changes.
 pub fn apply_config_file(
     path: impl AsRef<Path>,
+    scenario: Option<&str>,
     environment: &mut MacroEnvironment,
 ) -> Result<(), ConfigError> {
     let path = path.as_ref();
@@ -38,21 +52,107 @@ pub fn apply_config_file(
         path: path.to_path_buf(),
         message: err.to_string(),
     })?;
-    apply_config_str(&text, environment)
+    apply_config_str(&text, scenario, environment)
 }
 
-pub fn apply_config_str(text: &str, environment: &mut MacroEnvironment) -> Result<(), ConfigError> {
+/// One `key: value` pair with the source line it came from.
+type Setting = (usize, String, String);
+
+/// Splits the document into top-level blocks.
+///
+/// This is a deliberately small YAML subset: two levels, scalar leaves,
+/// `#` comments. It exists so the example carries a single readable config file
+/// without adding a YAML crate (and with it serde) to a framework whose whole
+/// dependency list is six entries. Anything outside the subset is rejected
+/// rather than silently misread.
+fn parse_blocks(text: &str) -> Result<Vec<(String, Vec<Setting>)>, ConfigError> {
+    let mut blocks: Vec<(String, Vec<Setting>)> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
     for (idx, raw_line) in text.lines().enumerate() {
         let line_number = idx + 1;
-        let line = raw_line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
+        let without_comment = raw_line.split('#').next().unwrap_or("");
+        if without_comment.trim().is_empty() {
             continue;
         }
-        let (key, value) = line.split_once('=').ok_or_else(|| ConfigError::Parse {
+        if without_comment.contains('\t') {
+            return Err(ConfigError::Parse {
+                line: line_number,
+                message: "tabs are not valid YAML indentation; use spaces".to_owned(),
+            });
+        }
+        let indent = without_comment.len() - without_comment.trim_start().len();
+        if indent % 2 != 0 {
+            return Err(ConfigError::Parse {
+                line: line_number,
+                message: format!("indent of {indent} spaces is not a multiple of 2"),
+            });
+        }
+        let depth = indent / 2;
+        if depth > stack.len() {
+            return Err(ConfigError::Parse {
+                line: line_number,
+                message: "unexpected indentation".to_owned(),
+            });
+        }
+        stack.truncate(depth);
+        let trimmed = without_comment.trim();
+        let (key, value) = trimmed.split_once(':').ok_or_else(|| ConfigError::Parse {
             line: line_number,
-            message: "expected key=value".to_owned(),
+            message: "expected `key: value` or `key:`".to_owned(),
         })?;
-        apply_setting(key.trim(), value.trim(), line_number, environment)?;
+        let key = key.trim().to_owned();
+        let value = value.trim();
+        if value.is_empty() {
+            if depth > 1 {
+                return Err(ConfigError::Parse {
+                    line: line_number,
+                    message: "nesting deeper than two levels is not supported".to_owned(),
+                });
+            }
+            stack.push(key.clone());
+            let path = stack.join(".");
+            if !blocks.iter().any(|(name, _)| *name == path) {
+                blocks.push((path, Vec::new()));
+            }
+            continue;
+        }
+        let path = stack.join(".");
+        let value = value.trim_matches('"').trim_matches('\'').to_owned();
+        match blocks.iter_mut().find(|(name, _)| *name == path) {
+            Some((_, settings)) => settings.push((line_number, key, value)),
+            None => blocks.push((path, vec![(line_number, key, value)])),
+        }
+    }
+    Ok(blocks)
+}
+
+pub fn apply_config_str(
+    text: &str,
+    scenario: Option<&str>,
+    environment: &mut MacroEnvironment,
+) -> Result<(), ConfigError> {
+    let blocks = parse_blocks(text)?;
+    let apply_block = |name: &str, environment: &mut MacroEnvironment| -> Result<bool, ConfigError> {
+        let Some((_, settings)) = blocks.iter().find(|(block, _)| block == name) else {
+            return Ok(false);
+        };
+        for (line, key, value) in settings {
+            apply_setting(key, value, *line, environment)?;
+        }
+        Ok(true)
+    };
+    apply_block("defaults", environment)?;
+    if let Some(scenario) = scenario {
+        let path = format!("scenarios.{scenario}");
+        if !apply_block(&path, environment)? {
+            return Err(ConfigError::UnknownScenario {
+                name: scenario.to_owned(),
+                available: blocks
+                    .iter()
+                    .filter_map(|(block, _)| block.strip_prefix("scenarios.").map(str::to_owned))
+                    .collect(),
+            });
+        }
     }
     Ok(())
 }
@@ -64,11 +164,9 @@ fn apply_setting(
     environment: &mut MacroEnvironment,
 ) -> Result<(), ConfigError> {
     match key {
-        "seed" => {
-            let seed = parse_u64(value, line)?;
-            environment.seed = seed;
-            environment.rng = PythonLikeRng::new(seed);
-        }
+        // Draws are keyed on `seed` at the point of use (see `MacroRng`), so
+        // there is no generator state to re-seed here.
+        "seed" => environment.seed = parse_u64(value, line)?,
         "quarter" => environment.quarter = parse_u64(value, line)?,
         "scale_factor" => environment.scale_factor = parse_f64(value, line)?,
         "car" => environment.params.car = parse_f64(value, line)?,
@@ -76,6 +174,9 @@ fn apply_setting(
         "debt_to_equity" => environment.params.debt_to_equity = parse_f64(value, line)?,
         "return_on_equity" => environment.params.return_on_equity = parse_f64(value, line)?,
         "return_on_assets" => environment.params.return_on_assets = parse_f64(value, line)?,
+        "wage_effort_on_base" => {
+            environment.params.wage_effort_on_base = matches!(value, "1" | "true" | "yes")
+        }
         "consumption_lti" => environment.params.consumption_lti = parse_f64(value, line)?,
         "mortgage_ltv" => environment.params.mortgage_ltv = parse_f64(value, line)?,
         "mortgage_lti" => environment.params.mortgage_lti = parse_f64(value, line)?,
@@ -94,6 +195,7 @@ fn apply_setting(
         "firm_credit_shortfall_capital_sensitivity" => {
             environment.params.firm_credit_shortfall_capital_sensitivity = parse_f64(value, line)?
         }
+        "theta_dividend" => environment.params.theta_dividend = parse_f64(value, line)?,
         "work_effort_max" => environment.params.work_effort_max = parse_f64(value, line)?,
         "wage_tightness_sensitivity" => {
             environment.params.wage_tightness_sensitivity = parse_f64(value, line)?
@@ -200,23 +302,6 @@ fn apply_setting(
         "policy.firm_bank_visits" => environment.policy.firm_bank_visits = parse_u32(value, line)?,
         "policy.household_bank_visits" => {
             environment.policy.household_bank_visits = parse_u32(value, line)?
-        }
-        "policy.allow_unresolved_blockers" => {
-            environment.policy.allow_unresolved_blockers = parse_bool(value, line)?
-        }
-        "policy.housing_reduction_policy" => {
-            environment.policy.housing_reduction_policy = match value {
-                "literal" | "LiteralPaperFormula" => HousingReductionPolicy::LiteralPaperFormula,
-                "guarded" | "GuardedFractionalReduction" => {
-                    HousingReductionPolicy::GuardedFractionalReduction
-                }
-                _ => {
-                    return Err(ConfigError::Parse {
-                        line,
-                        message: "expected literal or guarded".to_owned(),
-                    });
-                }
-            }
         }
         "policy.goods_clearing_policy" => {
             environment.policy.goods_clearing_policy = match value {

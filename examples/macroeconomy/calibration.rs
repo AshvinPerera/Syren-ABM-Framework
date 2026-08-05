@@ -1,3 +1,12 @@
+/// The model's seven free parameters, set to the paper's Austria values.
+///
+/// These are the only parameters the paper calibrates; everything else in
+/// `CountryParameters` is pinned by the source (Appendix A.3.2, A.5.1, A.9.1,
+/// A.10.1, A.11.1). Setting these manually is therefore a complete substitute
+/// for running the calibration pipeline -- no NPE/NRE machinery is needed.
+///
+/// Values are Table 4 (paper §4.3), NPE posterior for Austria, 1990-Q1 to
+/// 2013-Q1. Override any of them through the `calibration.*` config keys.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CalibrationParameters {
     pub phi_f_q: f64,
@@ -12,6 +21,21 @@ pub struct CalibrationParameters {
 impl CalibrationParameters {
     pub fn austria_npe_table4() -> Self {
         Self {
+            // The first three are *binary* (prior U({0,1})) and are not
+            // estimated by NPE/NRE. The authors ran all eight combinations of
+            // (phi_f_q, phi_dp, phi_cp) = (+/-1, +/-1, +/-1) and selected the
+            // all-zero configuration as the one minimising forecast error --
+            // and it is zero for all 38 countries under both NPE and NRE, not
+            // just Austria (paper Sections 4.3 and 5).
+            //
+            // Zero here is the paper's answer, not a missing value. It switches
+            // off the firm-specific terms: A.60 reduces to
+            // `Qbar_f = (1 + gamma_s) * Q_f(t-1)` and A.73 to
+            // `P_f = (1 + pi^PPI) * P_f(t-1)`, so growth and inflation are
+            // driven by the sectoral and PPI forecasts alone. As a consequence
+            // A.59, A.74 and A.76 are all multiplied out of the trajectory, and
+            // unit cost A.77 becomes an accounting quantity rather than a
+            // driver of prices.
             phi_f_q: 0.0,
             phi_dp: 0.0,
             phi_cp: 0.0,
@@ -38,91 +62,5 @@ impl CalibrationParameters {
 impl Default for CalibrationParameters {
     fn default() -> Self {
         Self::austria_npe_table4()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct NeuralPosteriorConfig {
-    pub method: &'static str,
-    pub flow_or_classifier: &'static str,
-    pub stacks_or_layers: usize,
-    pub blocks: usize,
-    pub hidden_features: usize,
-    pub learning_rate: f64,
-    pub validation_fraction: f64,
-    pub early_stop_patience: usize,
-}
-
-impl NeuralPosteriorConfig {
-    pub fn npe() -> Self {
-        Self {
-            method: "NPE",
-            flow_or_classifier: "Masked Autoregressive Flow with MADE",
-            stacks_or_layers: 5,
-            blocks: 2,
-            hidden_features: 50,
-            learning_rate: 5e-4,
-            validation_fraction: 0.10,
-            early_stop_patience: 20,
-        }
-    }
-
-    pub fn nre() -> Self {
-        Self {
-            method: "NRE",
-            flow_or_classifier: "ResNet classifier",
-            stacks_or_layers: 2,
-            blocks: 0,
-            hidden_features: 50,
-            learning_rate: 5e-4,
-            validation_fraction: 0.10,
-            early_stop_patience: 20,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BayesFactorConfig {
-    pub hidden_sizes: [usize; 4],
-    pub activation: &'static str,
-    pub output: &'static str,
-    pub input_features: usize,
-    pub learning_rate: f64,
-    pub validation_fraction: f64,
-    pub max_epochs: usize,
-    pub early_stop_patience: usize,
-}
-
-impl Default for BayesFactorConfig {
-    fn default() -> Self {
-        Self {
-            hidden_sizes: [32, 32, 32, 16],
-            activation: "ReLU",
-            output: "scalar log Bayes factor",
-            input_features: 5,
-            learning_rate: 1e-3,
-            validation_fraction: 0.20,
-            max_epochs: 500,
-            early_stop_patience: 50,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ForecastExperimentConfig {
-    pub countries: usize,
-    pub initialisation_quarters: usize,
-    pub horizon_quarters: usize,
-    pub trajectories: usize,
-}
-
-impl Default for ForecastExperimentConfig {
-    fn default() -> Self {
-        Self {
-            countries: 38,
-            initialisation_quarters: 20,
-            horizon_quarters: 12,
-            trajectories: 1_000,
-        }
     }
 }

@@ -1,0 +1,48 @@
+# Macroeconomy example configuration.
+#
+# `defaults:` is always applied. `scenarios:` blocks are applied on top when
+# selected with `--scenario <name>`, so each only lists what it changes.
+#
+#   cargo run --release --features "model messaging" --example macroeconomy -- \
+#     --fixture tiny --ticks 40 --firms-per-sector 33 \
+#     --config examples/macroeconomy/config.yaml --scenario wiese_exact
+#
+# Parser accepts a two-level subset of YAML: `key: value`, `#` comments, two
+# space indent. Keys match the fields in `state.rs`; dotted keys reach into the
+# calibration and policy sub-structs.
+
+# Empty on purpose. Every default lives in `state.rs` next to the equation it
+# serves, where the source and reasoning are recorded. Setting them again here
+# would create a second place to disagree with the paper.
+defaults: {}
+
+scenarios:
+
+  # Wiese A.69 and A.80 exactly as printed: the work-effort factor compounds on
+  # the previous wage, and there is no dividend. Collapses around t8 at 595
+  # firms. See docs/deviations.md.
+  wiese_exact:
+    wage_effort_on_base: false
+    theta_dividend: 0.0
+
+  # Only the wage rule reverted. Stable, but firm deposits run away because
+  # nothing returns profit to households.
+  wiese_wage_only:
+    wage_effort_on_base: false
+
+  # Only the dividend removed. Worse than either: the payout drains firms that
+  # the compounding wage is already bleeding.
+  no_dividend:
+    theta_dividend: 0.0
+
+  # Poledna's h^max = 1.0 instead of 1.5, i.e. no overtime. Diagnostic for how
+  # much of the wage path is the A.66 work-effort channel.
+  no_overtime:
+    work_effort_max: 1.0
+
+  # Quarterly reading of the return-on-assets screen. Kept as a record of the
+  # units test in docs/deviations.md: loosening A.27 makes the run
+  # diverge rather than stabilise, which is what ruled the threshold out as the
+  # cause of the collapse.
+  roa_quarterly:
+    return_on_assets: 0.0125

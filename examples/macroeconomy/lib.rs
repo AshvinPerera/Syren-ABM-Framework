@@ -1,10 +1,9 @@
-#![allow(dead_code, unused_imports)]
+#![allow(unused_imports)]
 
 pub mod accounting;
 pub mod calibration;
 pub mod components;
 pub mod config;
-pub mod coverage;
 pub mod data;
 pub mod equations;
 pub mod forecasting;
@@ -21,12 +20,9 @@ use abm_framework::model::{Model, ModelBuilder};
 use abm_framework::ComponentRegistry;
 
 pub use accounting::{AccountingReport, GdpIdentity};
-pub use calibration::{
-    BayesFactorConfig, CalibrationParameters, ForecastExperimentConfig, NeuralPosteriorConfig,
-};
+pub use calibration::CalibrationParameters;
 pub use components::*;
 pub use config::{apply_config_file, apply_config_str, ConfigError};
-pub use coverage::{CoverageStatus, EquationCoverage, EquationCoverageEntry, ReplicationBlocker};
 pub use data::{
     thesis_initialisation_recipe, DataError, DataProvider, FixtureDataProvider, InitialData,
     InitialisationRecipeStep, RealDataProvider,
@@ -39,8 +35,8 @@ pub use forecasting::{
 };
 pub use messages::*;
 pub use state::{
-    GapReportMode, GoodsClearingPolicy, MacroEnvironment, MacroeconomyConfig, PythonLikeRng,
-    ReplicationPolicy, RunMode, MACRO_ENV_KEY,
+    rng_salt, FirmProbe, GoodsClearingPolicy, MacroEnvironment, MacroRng, MacroeconomyConfig,
+    MarketAudit, ModelPolicy, RunMode, MACRO_ENV_KEY,
 };
 pub use systems::{MacroComponentIds, MacroMessageHandles, PhaseKeys};
 
@@ -64,16 +60,16 @@ pub fn build_macroeconomy_model<P>(
 where
     P: DataProvider,
 {
-    let mut data = provider.load(&config)?;
-    if let Some(config_path) = &config.config_path {
-        apply_config_file(config_path, &mut data.environment)?;
-    }
-    validate_replication_policy(&data.environment)?;
+    // The provider applies the config file itself, *before* generating the
+    // population, so the initial state is built against the final parameters.
+    // Re-applying it here would clobber the sector weights the generator
+    // derives from the solved SAM.
+    let data = provider.load(&config)?;
     let (registry, ids) = register_components()?;
 
     let mut builder = ModelBuilder::new()
         .with_component_registry(Arc::clone(&registry))
-        .with_shards(EntityShards::new(2)?);
+        .with_shards(EntityShards::new(shards_for_population(&data))?);
 
     let _macro_key = builder
         .register_environment::<MacroEnvironment>(state::MACRO_ENV_KEY, data.environment.clone())?;
@@ -165,54 +161,45 @@ where
     })
 }
 
-pub fn validate_replication_policy(state: &MacroEnvironment) -> Result<(), Box<dyn Error>> {
-    if state.policy.allow_unresolved_blockers {
-        return Ok(());
-    }
-    let blockers = EquationCoverage::blocker_log();
-    if blockers.is_empty() {
-        return Ok(());
-    }
-    let ids = blockers
-        .iter()
-        .map(|blocker| blocker.id)
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(
-        format!("strict replication requested, but unresolved replication blockers remain: {ids}")
-            .into(),
-    )
-}
-
-pub fn run_forecast_batch(
-    config: ForecastExperimentConfig,
-) -> Result<ForecastBatchSummary, Box<dyn Error>> {
-    Ok(ForecastBatchSummary {
-        countries: config.countries,
-        initialisation_quarters: config.initialisation_quarters,
-        horizon_quarters: config.horizon_quarters,
-        trajectories: config.trajectories,
-        npe: NeuralPosteriorConfig::npe(),
-        nre: NeuralPosteriorConfig::nre(),
-        bayes_factor: BayesFactorConfig::default(),
-    })
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ForecastBatchSummary {
-    pub countries: usize,
-    pub initialisation_quarters: usize,
-    pub horizon_quarters: usize,
-    pub trajectories: usize,
-    pub npe: NeuralPosteriorConfig,
-    pub nre: NeuralPosteriorConfig,
-    pub bayes_factor: BayesFactorConfig,
-}
-
 pub fn macro_state(model: &Model) -> Result<MacroEnvironment, Box<dyn Error>> {
     Ok(model
         .environment()
         .get::<MacroEnvironment>(state::MACRO_ENV_KEY)?)
+}
+
+/// Entities addressable per shard.
+///
+/// `EntityID` packs `| version(32) | shard(10) | index(22) |`, so each shard
+/// holds `2^22 - 1` entities (`INDEX_CAP`, `src/engine/types.rs:101`). The
+/// constant is not re-exported from the crate root, so it is mirrored here.
+pub const ENTITIES_PER_SHARD: usize = (1 << 22) - 1;
+
+/// Spare capacity above the initial population.
+///
+/// Shard count is fixed at construction (`EntityShards::new`) and cannot grow,
+/// so under-provisioning is an unrecoverable mid-run failure. Firm respawn
+/// after bankruptcy and any future loan/property entities all spawn into the
+/// same budget.
+const SHARD_HEADROOM: usize = 2;
+
+/// Derive the shard count from the initial population.
+///
+/// Replaces a hard-coded `EntityShards::new(2)`, which silently capped the
+/// world at 8.39M entities.
+pub fn shards_for_population(data: &InitialData) -> usize {
+    let total = data.firms.len()
+        + data.individuals.len()
+        + data.households.len()
+        + data.banks.len()
+        + data.government_entities.len()
+        + data.government_accounts.len()
+        + data.central_banks.len()
+        + data.properties.len()
+        + data.rest_of_world.len();
+    total
+        .saturating_mul(SHARD_HEADROOM)
+        .div_ceil(ENTITIES_PER_SHARD)
+        .max(1)
 }
 
 fn register_components(

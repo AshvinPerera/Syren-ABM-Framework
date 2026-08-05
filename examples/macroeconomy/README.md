@@ -1,13 +1,16 @@
 # Macroeconomy Example
 
-This example implements the data-driven macroeconomic agent-based model 
-described by Wiese et al on the Syren ABM Framework. It is intended as a 
-paper-aligned example of a multi-market economy built with the Syren ABM 
-Framework.
+A multi-market macroeconomic agent-based model on the Syren ABM Framework,
+structured after Wiese et al. It runs on **synthetic data only**. It is not a
+replication of the authors' results and does not attempt to be: there is no
+empirical calibration target, and the equation-coverage/gap-report machinery
+that once tracked replication fidelity has been retired.
 
-The executable fixture mode is self-contained and uses synthetic data. Real-data
-replication is deliberately fail-fast: the example names the required external
-datasets.
+> **Status: under active reconstruction.** The scheduler, agent types, market
+> structure, and equation library are in place, but several behaviours the
+> source model specifies are missing or wrong, and the current output is
+> economically degenerate (frozen HPI, zero RPI, no new credit). See
+> [Known gaps](#known-gaps) below. The reconstruction plan targets ~2M agents.
 
 ## Sources
 
@@ -22,9 +25,10 @@ Primary model sources:
   macroeconomic agent-based models." University of Oxford DPhil thesis (2024),
   DOI `10.5287/ora-5reg8nv9g`.
 
-The paper remains the equation index for Appendix A.1-A.142. The thesis is used
-as the stronger source where it gives more explicit model structure, parameters,
-initialization detail.
+The paper is the equation index for Appendix A.1-A.142. The thesis is used as
+the stronger source where it gives more explicit model structure, parameters,
+or initialization detail. Equation numbers are cited in comments throughout
+`equations.rs` and `systems.rs`.
 
 ## Model Scope
 
@@ -94,10 +98,10 @@ needed, update wealth and debt, and may go bankrupt.
 
 Banks hold reserves, deposits, loans, equity, and liabilities. They set deposit
 and overdraft rates, supply credit subject to capital and borrower constraints,
-allocate credit away from higher non-performing-loan categories, receive interest,
-write off bad debt, and may become insolvent. The thesis ARDL/error-correction
-interest-rate form is represented, but exact lag-grid and preprocessing choices
-remain unresolved without author code or config.
+allocate credit away from higher non-performing-loan categories, and receive
+interest. **Not yet implemented:** bad-debt write-off, the insolvency bail-in,
+and the ARDL rate pass-through (the helpers exist in `forecasting.rs` but are
+never called, so bank lending rates never move).
 
 The central bank uses the Taylor-rule structure from the paper and thesis. The
 example exposes the transformed Taylor coefficients and keeps the policy-rate
@@ -158,42 +162,39 @@ quarterly macro and financial series, World Bank fiscal/unemployment/NPL series,
 BIS policy rates, ECB HFCS microdata, Compustat firm and bank microdata, and ESRB
 macroprudential mortgage measures.
 
-## Exactness and Gap Analysis
+## Known gaps
 
-Where the paper or thesis gives a unique equation or rule, this example is intended
-to implement that equation or rule directly. The scheduler order, agent categories,
-market sequence, explicit accounting equations, literal housing formulas, thesis
-fixed parameters, log-level AR(1) expectation form, credit-market clearing order,
-ascending-rate bank visits, and goods-market seller-priority formula are
-implemented from the paper/thesis sources. The goods-market clearing pseudocode
-uses the inherited Poledna et al. Online Appendix A.1.1 search-and-matching
-algorithm because the Wiese model is based on that ABM lineage.
+The scheduler order, agent categories, market sequence, accounting equations,
+thesis fixed parameters, log-level AR(1) expectations, credit-market clearing
+order, ascending-rate bank visits, and the goods-market seller-priority formula
+are implemented from the sources. Goods-market clearing uses the inherited
+Poledna et al. Online Appendix A.1.1 search-and-matching algorithm, since the
+Wiese model builds on that ABM lineage.
 
-The example should not yet be described as an author-exact numerical replica of
-the paper's forecasts. The public paper and thesis do not fully specify every
-procedure needed for bit-for-bit replication of the authors' trajectories,
-country-level initial microstates, or posterior forecast distributions. Those
-unknowns are recorded as exact-replication gaps. They are not hidden deviations:
-strict mode refuses to run while any gap remains, and normal fixture runs can
-print the gap report.
+These behaviours are **specified by the source but not implemented**, and each
+one is visible in the output:
 
-Resolved or user-specified exactness policies:
+| Gap | Consequence in a live run |
+| --- | --- |
+| No bad-debt write-off | Loans of bankrupt borrowers accrue interest forever while the borrower's debt fields are zeroed. Bank equity and NPL buckets are wrong; stock-flow consistency is violated. |
+| No firm replacement after bankruptcy | Bankrupt firms become permanent zombies; the productive sector drains over a long run. |
+| No bank bail-in (eq 6.45) | Insolvency sets a flag and nothing else happens. |
+| ARDL pass-through never invoked | Bank lending rates are frozen `Bank::default` constants, so the Taylor rule has no transmission channel at all. |
+| Property revaluation only on sale | `property.value` is written at exactly one site. Untraded properties never revalue, so HPI is frozen. |
+| Housing price/rent reduction formula | Both `HousingReductionPolicy` branches are wrong. The default applies a ~98% haircut per reduction, which is why RPI reads `0.000000`. |
 
-| Item | Resolution | Exactness note |
-| --- | --- | --- |
-| `goods-flow-preservation-pseudocode` | Use the Poledna et al. Online Appendix A.1.1 rule: consumers are randomly ordered, visit domestic or foreign firms selling the requested good, seller probability averages normalized `exp(-phi_GM * price)` and normalized firm size, buyers move to remaining sellers when the preferred seller is short, and unmet demand becomes involuntary saving/excess demand. | Treated as source-resolved for this example because Wiese builds on the Poledna ABM. |
-| `trajectory-exact-randomness` | Use a deterministic Python-like MT19937 stream with 53-bit uniform draws, unbiased Fisher-Yates shuffles, and seeded random/Bernoulli tie policy where exact ties remain after ranking. | This is a user-specified reproducibility policy, not an author-provided RNG convention. It should reproduce this implementation exactly, but it is not claimed to reproduce the authors' private random streams. |
+These parameters are wired but left at zero, which switches the corresponding
+channel off: capital depreciation, wage tightness sensitivity, `phi_dp`/`phi_cp`
+price markups, and the input-output / net-fixed-assets matrices (diagonal only,
+so there is no cross-sector linkage across the 18 sectors).
 
-| Gap | Affects | Missing detail | Why it matters | What would close it |
-| --- | --- | --- | --- | --- |
-| `ar1-missing-data-policy` | A.16-A.21 expectations | The thesis specifies deterministic AR(1) on log levels through `t-1`, but not how to handle missing, zero, negative, revised, or too-short histories. | Expectations drive production, prices, consumption, benefits, investment, and housing decisions. Different edge-case policies can alter paths for countries with sparse or problematic historical series. | User-approved edge-case policy, or author preprocessing code. |
-| `ardl-lag-grid-and-preprocessing` | A.24 bank rates | The thesis gives the ARDL-derived error-correction equation and AIC selection, but not the candidate lag grid, transformations, residual handling, missing-data policy, or rate caps/floors. | Bank rates affect credit approval, debt service, mortgage affordability, firm financing, defaults, bank equity, and downstream production/housing outcomes. | Author ARDL estimation script, coefficient files, or a full per-loan-type estimation specification. |
-| `credit-visit-limits` | A.12 credit market | The thesis confirms applicants sample random subsets of `nLF`/`nLH` banks and visit them by ascending offered rate, but does not give numeric values for `nLF` or `nLH`. | Visit limits change credit approval probability, rate competition, bank concentration, and the amount of unmet credit demand. | Author default config or parameter table giving `nLF` and `nLH`. |
-| `author-initialization-tie-breaks` | initial microstate | The thesis describes sampling, rescaling, and linear-sum-assignment initialization, but not exact weighted-sampling implementation, solver choices, cost scaling, or tie-breaking. | Different microstates can preserve identical country aggregates while changing firm-worker, household-bank, bank-loan, and household-property networks. These networks influence later dynamics. | Author initialization scripts, initialized baseline microstates, or exact assignment/sampling/tie rules. |
+The fixture is also not internally consistent: every firm in it fails the
+model's own ROA credit screen (`borrower_credit_cap`), so no firm can ever
+borrow. That is why `total_loans` declines monotonically.
 
-Separately, real-data ingestion and posterior training require licensed/source
-datasets and author-equivalent preprocessing. Those are data and fitting work,
-not additional published-model equations.
+Real-data ingestion and posterior calibration are out of scope. `RealDataProvider`
+still fails fast naming the datasets it would need, and will be removed when the
+synthetic population generator lands.
 
 ## Running
 
@@ -201,18 +202,6 @@ Fixture run:
 
 ```bash
 cargo run --release --features "model messaging" --example macroeconomy -- --fixture tiny --ticks 8 --seed 42
-```
-
-Fixture run with no final gap report:
-
-```bash
-cargo run --release --features "model messaging" --example macroeconomy -- --fixture tiny --ticks 8 --seed 42 --gap-report none
-```
-
-Fixture run with machine-readable gap output:
-
-```bash
-cargo run --release --features "model messaging" --example macroeconomy -- --fixture tiny --ticks 8 --seed 42 --gap-report json
 ```
 
 Config-file run:
@@ -236,8 +225,7 @@ Per-tick output is printed to stdout as CSV:
 tick,production,ppi,cpi,hpi,rpi,total_loans,gdp_gap,blocked_mortgages,excess_demand
 ```
 
-The final summary and gap report are printed to stderr. The gap report can be
-`text`, `json`, or `none`.
+The completion summary is printed to stderr.
 
 ## Tests
 
@@ -253,6 +241,6 @@ Run all tests that are enabled by the model and messaging features:
 cargo test --features "model messaging" --tests
 ```
 
-The tests check paper equation coverage, thesis-informed parameters, scheduler
-order, accounting identities, market ordering, AR(1) and ARDL helper shape,
-configuration overrides, real-data fail-fast errors, and remaining-gap reporting.
+The tests check thesis-informed parameter defaults, scheduler order, market
+ordering, AR(1)/Taylor/ARDL helper shapes, named equation arithmetic,
+configuration overrides, and reproducibility across thread counts.

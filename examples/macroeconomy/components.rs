@@ -23,6 +23,12 @@ pub struct Firm {
     pub labour: f64,
     pub target_labour: f64,
     pub wage: f64,
+    /// `w_bar_f`: the wage before the A.66 work-effort factor is applied.
+    ///
+    /// Only read when `CountryParameters::wage_effort_on_base` selects the
+    /// Poledna A.26 form, where work effort scales a base wage instead of
+    /// compounding onto the previous one.
+    pub base_wage: f64,
     pub reservation_wage_anchor: f64,
     pub production: f64,
     pub previous_production: f64,
@@ -79,6 +85,7 @@ impl Default for Firm {
             labour: 0.0,
             target_labour: 0.0,
             wage: 0.0,
+            base_wage: 0.0,
             reservation_wage_anchor: 0.0,
             production: 0.0,
             previous_production: 0.0,
@@ -190,6 +197,8 @@ pub struct Household {
     pub disposable_income_after_rent: f64,
     pub desired_house_price: f64,
     pub desired_rent: f64,
+    /// Dividends received last quarter (see `CountryParameters::theta_dividend`).
+    pub dividend_income: f64,
     pub social_benefits_other: f64,
     pub owns_residence: bool,
     pub bankrupt: bool,
@@ -227,6 +236,7 @@ impl Default for Household {
             disposable_income_after_rent: 0.0,
             desired_house_price: 0.0,
             desired_rent: 0.0,
+            dividend_income: 0.0,
             social_benefits_other: 0.0,
             owns_residence: false,
             bankrupt: false,
@@ -273,7 +283,12 @@ impl Default for Bank {
             firm_loan_volume_by_sector: [0.0; SECTORS],
             consumption_loan_volume: 0.0,
             mortgage_volume: 0.0,
-            credit_supply_max: 0.0,
+            // No cap beyond the regulatory one. `bank_credit_supply` already
+            // binds lending to `equity / CAR` less outstanding loans; this
+            // field is an *additional* institution-specific ceiling. Defaulting
+            // it to 0.0 meant any bank not explicitly given a value lent
+            // nothing at all, silently.
+            credit_supply_max: f64::INFINITY,
             short_firm_rate: 0.02,
             long_firm_rate: 0.03,
             household_rate: 0.04,
@@ -328,13 +343,17 @@ impl Default for GovernmentAccount {
             revenue: 0.0,
             deficit: 0.0,
             debt: 0.0,
-            vat_rate: 0.2,
-            income_tax_rate: 0.2,
-            social_insurance_worker_rate: 0.05,
-            social_insurance_firm_rate: 0.05,
-            capital_tax_rate: 0.1,
-            corporate_tax_rate: 0.2,
-            export_tax_rate: 0.0,
+            // Wiese A.6.2: "The income tax rate, corporate tax rate, export
+            // taxes, value-added tax rate, and social insurance rates are taken
+            // directly from the OECD database." These were round-number
+            // placeholders; the values are Poledna Table 1 for Austria.
+            vat_rate: 0.1529,
+            income_tax_rate: 0.2134,
+            social_insurance_worker_rate: 0.1711,
+            social_insurance_firm_rate: 0.2122,
+            capital_tax_rate: 0.2521,
+            corporate_tax_rate: 0.0779,
+            export_tax_rate: 0.003,
             production_tax_rate: 0.02,
             production_tax_by_sector: [0.02; SECTORS],
         }
@@ -345,6 +364,13 @@ impl Default for GovernmentAccount {
 pub struct CentralBank {
     pub id: u32,
     pub country: u16,
+    /// `E^CB(0)`. The residual that closes the initial balance sheet: central
+    /// bank assets (government debt) less reserves held for banks and the net
+    /// position with the rest of the world (Poledna Appendix C.5). Without it
+    /// there is nowhere for the stock-flow closure to land, which is why the
+    /// hand-written fixture could carry bank deposits of 1120 against 6850 of
+    /// actual agent deposits and nothing complained.
+    pub equity: f64,
     pub policy_rate: f64,
     pub predicted_policy_rate: f64,
     pub inflation_target: f64,
@@ -359,6 +385,7 @@ impl Default for CentralBank {
         Self {
             id: 0,
             country: 0,
+            equity: 0.0,
             policy_rate: 0.01,
             predicted_policy_rate: 0.01,
             inflation_target: 0.02,
@@ -425,6 +452,10 @@ pub struct RestOfWorld {
     pub exports: f64,
     pub target_imports: f64,
     pub imports: f64,
+    /// `Y^ROW(0)` and `C^ROW(0)`. A.137 and A.138 index target trade to these
+    /// initial levels, not to the previous quarter's realised flow.
+    pub initial_exports: f64,
+    pub initial_imports: f64,
     pub import_nominal_by_sector: [f64; SECTORS],
     pub import_real_by_sector: [f64; SECTORS],
     pub export_weights: [f64; SECTORS],
@@ -443,6 +474,8 @@ impl Default for RestOfWorld {
             exports: 0.0,
             target_imports: 0.0,
             imports: 0.0,
+            initial_exports: 0.0,
+            initial_imports: 0.0,
             import_nominal_by_sector: [0.0; SECTORS],
             import_real_by_sector: [0.0; SECTORS],
             export_weights: [1.0 / SECTORS as f64; SECTORS],

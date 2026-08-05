@@ -31,6 +31,9 @@ parking_lot = { version = "0.12", features = ["arc_lock"] }
 
 [dev-dependencies]
 criterion = "0.8.1"
+# Integration tests build thread pools of a fixed size to assert that model
+# trajectories are reproducible independently of the thread count.
+rayon = "1.7.0"
 
 wgpu = "29.0.1"
 bytemuck = { version = "1.16", features = ["derive"] }
@@ -146,4 +149,12 @@ path = "examples/sugarscape/sugarscape_v2.rs"
 [[example]]
 name = "macroeconomy"
 path = "examples/macroeconomy/main.rs"
+required-features = ["model", "messaging"]
+
+# The macroeconomy example is self-contained: sources, tests, config, and the
+# model-closure ledger all live under `examples/macroeconomy/`. Cargo looks for
+# integration tests in `tests/`, so the path is given explicitly.
+[[test]]
+name = "macroeconomy"
+path = "examples/macroeconomy/tests.rs"
 required-features = ["model", "messaging"]

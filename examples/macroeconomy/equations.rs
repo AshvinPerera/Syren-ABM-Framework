@@ -111,13 +111,39 @@ pub fn work_effort_a66_a67(
     h_max: f64,
     initial_work_effort: f64,
     labour_input_sum: f64,
+    predicted_demand: f64,
     intermediate_constraint: f64,
     capital_constraint: f64,
 ) -> f64 {
     if initial_work_effort <= 0.0 || labour_input_sum <= 0.0 {
         return initial_work_effort.max(0.0);
     }
-    let multiplier = (intermediate_constraint.min(capital_constraint))
+    // PAPER ERRATUM (docs/errata.md (A.66)): `predicted_demand`
+    // is inside this min.
+    //
+    // A.66 as printed reads `min(h^max, min(M_f, K_f) / (h_f(0) sum_i H_i))`.
+    // Poledna's online appendix A.25, which A.66 cites as its source, is
+    //     alpha_i(t) = alpha_bar_i * min(1.5,
+    //         min(Q_i^s(t), beta_i M_i(t-1), kappa_i K_i(t-1)) / (N_i alpha_bar_i))
+    // -- the inner min includes `Q_i^s`, the firm's *desired supply*. Wiese's
+    // A.72 also carries the demand term (`min(Y_hat_f, H_f, M_f, K_f)`); only
+    // A.66 drops it.
+    //
+    // The term is what makes the rule mean anything: a firm works overtime
+    // because it wants to produce more, not because its warehouse is full.
+    // Without it, A.55 opens every firm at `M_f(0) = Y_f(0)/omega^M` and A.78
+    // with `phi^M = 1` holds that ratio, so `phi^WE` is pinned at
+    // `1/0.85 = 1.176` forever and A.69 compounds wages 17.6% a quarter until
+    // the wage bill exceeds revenue and the economy fails.
+    //
+    // `Q_bar_f` (A.60 predicted demand) is used rather than `Y_hat_f` (A.62
+    // target production): target production depends on `H_f`, which depends on
+    // this factor, so using it would be circular. Predicted demand is Poledna's
+    // `Q^s` in any case -- a supply choice from expected growth and previous
+    // demand, formed before any constraint is applied.
+    let multiplier = predicted_demand
+        .min(intermediate_constraint)
+        .min(capital_constraint)
         / (initial_work_effort * labour_input_sum);
     multiplier.min(h_max).max(0.0) * initial_work_effort
 }
@@ -136,6 +162,54 @@ pub fn price_a73(
         * (1.0 + phi_cp * cost_push)
         * previous_price)
         .max(0.0)
+}
+
+/// A.77: unit costs.
+///
+/// `U_f(t) = w_f(t)/Y_f(t) + sum_s' m_{s's} P_s'(t-1) + sum_s' d_{s's} P_s'(t-1)
+///           + tau^PROD P_f(t-1)`
+///
+/// Only the wage term is divided by output. The intermediate and depreciation
+/// terms are *per unit of output already*, being technology coefficients times
+/// prices.
+///
+/// Computing this as `total_costs / production` instead — as the code did — is
+/// wrong in two ways that compound. Total costs include **restocking**
+/// purchases (A.89 buys `M(t) - M(t-1) + m*Y`, not just the `m*Y` consumed)
+/// and loan interest, neither of which is a unit cost of production. And when
+/// output falls the whole numerator is divided by a collapsing denominator, so
+/// `U_f` explodes; since A.76 feeds `U_f/P_f - 1` straight back into price,
+/// that is a divergent loop.
+pub fn unit_cost_a77(
+    total_wages: f64,
+    production: f64,
+    io_coeffs: &[f64; SECTORS],
+    depreciation_coeffs: &[f64; SECTORS],
+    sector_prices: &[f64; SECTORS],
+    production_tax_rate: f64,
+    previous_price: f64,
+) -> f64 {
+    let labour_cost = ratio(total_wages, production);
+    let intermediate_cost: f64 = io_coeffs
+        .iter()
+        .zip(sector_prices.iter())
+        .map(|(coeff, price)| coeff * price)
+        .sum();
+    let depreciation_cost: f64 = depreciation_coeffs
+        .iter()
+        .zip(sector_prices.iter())
+        .map(|(coeff, price)| coeff * price)
+        .sum();
+    labour_cost + intermediate_cost + depreciation_cost + production_tax_rate * previous_price
+}
+
+/// A.76: cost-push inflation, `U_f(t-1)/P_f(t-1) - 1`.
+///
+/// Deliberately unfloored. The code clamped this at zero, which turned the
+/// pricing rule into a ratchet: prices could rise when costs rose but never
+/// fall back when they eased, so the price level could only drift upward.
+pub fn cost_push_inflation_a76(previous_unit_cost: f64, previous_price: f64) -> f64 {
+    ratio(previous_unit_cost, previous_price) - 1.0
 }
 
 // A.78
@@ -208,7 +282,11 @@ pub fn purchase_cost_a109_literal_pdf(
     let interest = if mortgage_rate.abs() <= 1e-12 {
         0.0
     } else {
-        4.0 * mortgage_rate * principal / (1.0 - (1.0 + mortgage_rate).powf(maturity))
+        // A.109's annuity denominator is `1 - (1 + r*)^{-m_l}`. The PDF prints a
+        // positive exponent, which with r > 0 over 100 quarters makes the
+        // denominator hugely negative and the interest term come out negative
+        // -- so buying looked *cheaper* the higher mortgage rates went.
+        4.0 * mortgage_rate * principal / (1.0 - (1.0 + mortgage_rate).powf(-maturity))
     };
     let expected_revaluation = ((1.0 + predicted_hpi_inflation).powi(4) - 1.0) * property_value;
     principal_repayment + interest - expected_revaluation
@@ -220,8 +298,23 @@ pub fn buy_probability_a110(phi_b: f64, rent_cost: f64, purchase_cost: f64) -> f
 }
 
 // A.113 and A.115 as printed.
-pub fn literal_price_or_rent_reduction_a113_a115(previous: f64, epsilon: f64) -> f64 {
-    (1.0 - epsilon.exp()) * previous
+/// A.113 / A.115: an unsold or unlet property cuts its asking price or rent.
+///
+/// `epsilon` is a normal draw whose exponential is the reduction **as a
+/// percentage**, not as a fraction. The thesis reports `(mu, sigma)` of a
+/// log-normal fitted to observed reductions: `(1.4531, 0.4889)` for sale
+/// prices and `(1.6559, 0.7855)` for rents, giving median haircuts of
+/// `exp(1.4531) = 4.28%` and `exp(1.6559) = 5.24%` respectively.
+///
+/// Reading `exp(epsilon)` as a fraction instead — as `(1 - exp(eps)) * prev`
+/// did — yields a multiplier of `1 - 4.28 = -3.28`, i.e. a negative price.
+///
+/// The clamp guards the far tail: `exp(epsilon) >= 100` needs `epsilon >= 4.6`,
+/// about 6.4 sigma out, but a single such draw would otherwise flip the sign
+/// of a price and poison every downstream index.
+pub fn price_or_rent_reduction_a113_a115(previous: f64, epsilon: f64) -> f64 {
+    let reduction_fraction = (epsilon.exp() / 100.0).clamp(0.0, 0.95);
+    previous * (1.0 - reduction_fraction)
 }
 
 // A.42
