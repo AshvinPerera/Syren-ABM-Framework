@@ -212,6 +212,7 @@ fn aggregate_previous_state_system(
         let properties = collect_rows_by(ecs, |row: &Property| row.id)?;
         let row = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
         let mut state = macro_state(ecs, env_boundary)?;
+        let _acc6 = AccTimer(6, std::time::Instant::now());
         let aggregates = compute_aggregates(
             &state,
             &firms,
@@ -321,6 +322,7 @@ fn target_setting_system(
         // `P_s(t-1)` for A.59's relative-price test.
         let sector_prices_previous = previous_sector_prices(&firms);
 
+        let _acc1 = AccTimer(1, std::time::Instant::now());
         for firm in &mut firms {
             let sector = firm.sector as usize;
             // A.59's case condition, which A.74 shares: apply the idiosyncratic
@@ -1515,6 +1517,7 @@ fn credit_market_system(
             .first()
             .map(|central_bank| central_bank.policy_rate)
             .unwrap_or_default();
+        let _acc4 = AccTimer(4, std::time::Instant::now());
         for bank in &mut banks {
             bank.deposit_rate = policy_rate;
             bank.household_overdraft_rate = bank.household_rate;
@@ -1995,7 +1998,9 @@ fn goods_market_system(
         // purchases. A firm that loses the draw cannot restock, and A.63 then
         // caps its next-quarter output at the fraction of the input buffer it
         // still holds, which cuts its sales and its demand in turn.
+        let _gm_order = std::time::Instant::now();
         let demands = order_demands_firms_first(raw_demands, &mut rng);
+        PROF_GM_NS[4].fetch_add(_gm_order.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
@@ -2074,6 +2079,7 @@ fn goods_market_system(
             // price exceeds the buyer's remaining budget by a factor of 1e9.
             let mut exhausted: Vec<usize> = Vec::new();
             while remaining > 1e-9 && remaining_budget > 1e-9 {
+                let _gm_t = std::time::Instant::now();
                 let available_sellers: Vec<usize> = sellers
                     .iter()
                     .copied()
@@ -2085,15 +2091,20 @@ fn goods_market_system(
                             ) > 1e-9
                     })
                     .collect();
+                PROF_GM_NS[0].fetch_add(_gm_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 if available_sellers.is_empty() {
                     break;
                 }
+                let _gm_w = std::time::Instant::now();
                 let weights = seller_priority_weights(
                     &firms,
                     &available_sellers,
                     state.params.goods_market_phi,
                 );
+                PROF_GM_NS[1].fetch_add(_gm_w.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                let _gm_c = std::time::Instant::now();
                 let firm_idx = available_sellers[weighted_choice(&mut rng, &weights)];
+                PROF_GM_NS[2].fetch_add(_gm_c.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let available = positive_part(
                     firms[firm_idx].production + firms[firm_idx].inventory
                         - firms[firm_idx].sales_quantity,
@@ -2140,6 +2151,8 @@ fn goods_market_system(
             }
             if remaining > 1e-9 {
                 state.audit.goods_excess_demand += remaining;
+                let _gm_e = std::time::Instant::now();
+                let _ = &_gm_e;
                 distribute_excess_demand(
                     &mut firms,
                     sector,
@@ -2274,6 +2287,7 @@ fn realised_accounting_system(
         state.audit.bank_corporate_tax = 0.0;
         state.audit.bank_writeoff_seized = 0.0;
         state.audit.bank_writeoff_lost = 0.0;
+        let _acc0 = AccTimer(0, std::time::Instant::now());
         let loan_settlement = settle_loan_book(
             state.quarter,
             &mut state,
@@ -2454,6 +2468,7 @@ fn realised_accounting_system(
             .map(|household| household.id as usize + 1)
             .max()
             .unwrap_or(0);
+        let _acc2 = AccTimer(2, std::time::Instant::now());
         let mut consumed_by_household = vec![0.0; household_slots];
         let mut capital_by_household = vec![0.0; household_slots];
         for receipt in &receipts {
@@ -2489,6 +2504,7 @@ fn realised_accounting_system(
             }
         }
 
+        let _acc3 = AccTimer(3, std::time::Instant::now());
         for household in &mut households {
             let slot = household.id as usize;
             let consumed = consumed_by_household.get(slot).copied().unwrap_or(0.0);
@@ -2850,6 +2866,7 @@ fn realised_accounting_system(
             }
         }
 
+        let _acc5 = AccTimer(5, std::time::Instant::now());
         update_government_accounts(
             &mut accounts,
             &individuals,
@@ -3057,6 +3074,30 @@ struct SysTimer(usize, std::time::Instant);
 impl Drop for SysTimer {
     fn drop(&mut self) {
         PROF_SYS_NS[self.0].fetch_add(
+            self.1.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+pub static PROF_GM_NS: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+pub static PROF_ACC_NS: [std::sync::atomic::AtomicU64; 8] = [
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Times an accounting block into `PROF_ACC_NS` on drop.
+struct AccTimer(usize, std::time::Instant);
+impl Drop for AccTimer {
+    fn drop(&mut self) {
+        PROF_ACC_NS[self.0].fetch_add(
             self.1.elapsed().as_nanos() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );

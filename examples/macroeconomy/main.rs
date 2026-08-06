@@ -156,6 +156,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("PROF collect={c:.2}s write={w:.2}s rows_collected={n}");
         let names = ["", "aggregate", "expectations", "targets", "labour", "planning",
                      "housing_pre", "credit", "housing_done", "goods", "accounting"];
+        let gm = ["gm_avail_filter", "gm_weights", "gm_choice", "gm_excess", "gm_ordering"];
+        for (i, name) in gm.iter().enumerate() {
+            let v = macroeconomy::systems::PROF_GM_NS[i].load(Relaxed) as f64 / 1e9;
+            if v > 0.005 { eprintln!("  GM  {name:<16} {v:>8.2}s"); }
+        }
+        let acc = ["settle_loans", "firm_loop", "hh_preagg", "hh_loop", "bank_loop",
+                   "government", "aggregates", "spare"];
+        for (i, name) in acc.iter().enumerate() {
+            let v = macroeconomy::systems::PROF_ACC_NS[i].load(Relaxed) as f64 / 1e9;
+            if v > 0.005 { eprintln!("  ACC {name:<14} {v:>8.2}s"); }
+        }
         for (i, name) in names.iter().enumerate() {
             if name.is_empty() { continue; }
             let v = macroeconomy::systems::PROF_SYS_NS[i].load(Relaxed) as f64 / 1e9;
