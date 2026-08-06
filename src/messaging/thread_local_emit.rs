@@ -64,6 +64,14 @@ pub(crate) struct WorkerEmitSlots {
     /// Indexed by `MessageTypeID::index()`.  `None` means the buffer has not
     /// been created yet for this worker.
     slots: UnsafeCell<Vec<Option<AlignedBuffer>>>,
+    /// Stable worker identifier, from [`crate::engine::workers::worker_id`].
+    ///
+    /// The drain path concatenates every worker's staged messages into one
+    /// buffer, so the order workers are visited *is* the message order that
+    /// systems observe. Registration happens on a thread's first emit, which
+    /// is a race, so the registry is kept sorted by this id instead: it is
+    /// dense and stable across runs for Rayon workers.
+    worker_id: u32,
 }
 
 // SAFETY: The emit path writes only to the calling thread's own slots (no
@@ -73,10 +81,11 @@ unsafe impl Send for WorkerEmitSlots {}
 unsafe impl Sync for WorkerEmitSlots {}
 
 impl WorkerEmitSlots {
-    fn new(num_message_types: usize) -> Self {
+    fn new(num_message_types: usize, worker_id: u32) -> Self {
         let slots: Vec<Option<AlignedBuffer>> = (0..num_message_types).map(|_| None).collect();
         WorkerEmitSlots {
             slots: UnsafeCell::new(slots),
+            worker_id,
         }
     }
 }
@@ -114,14 +123,19 @@ pub(crate) fn ensure_worker_registered_fallible(
             return Ok(existing);
         }
 
-        let slots = Arc::new(WorkerEmitSlots::new(num_message_types));
+        let worker_id = crate::engine::workers::worker_id();
+        let slots = Arc::new(WorkerEmitSlots::new(num_message_types, worker_id));
         cell.borrow_mut().insert(runtime_id, Arc::downgrade(&slots));
-        GLOBAL_EMIT_REGISTRY
+        let mut registry = GLOBAL_EMIT_REGISTRY
             .lock()
-            .map_err(|_| ECSError::from(MessagingError::LockPoisoned("global emit registry")))?
-            .entry(runtime_id)
-            .or_default()
-            .push(Arc::clone(&slots));
+            .map_err(|_| ECSError::from(MessagingError::LockPoisoned("global emit registry")))?;
+        let workers = registry.entry(runtime_id).or_default();
+        // Insert in `worker_id` order so the drain concatenation is identical
+        // on every run regardless of which thread emitted first. Registration
+        // is once per thread per runtime, so the linear scan is negligible.
+        let at = workers.partition_point(|w| w.worker_id < worker_id);
+        workers.insert(at, Arc::clone(&slots));
+        drop(registry);
         Ok(slots)
     })
 }

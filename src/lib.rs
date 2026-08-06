@@ -133,6 +133,9 @@ pub mod messaging;
 #[cfg(feature = "model")]
 pub mod model;
 
+#[cfg(feature = "environment")]
+pub mod space;
+
 // -----------------------------------------------------------------------------
 // Prelude (Optional but recommended)
 // -----------------------------------------------------------------------------
