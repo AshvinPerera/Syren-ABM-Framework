@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("PROF collect={c:.2}s write={w:.2}s rows_collected={n}");
         let names = ["", "aggregate", "expectations", "targets", "labour", "planning",
                      "housing_pre", "credit", "housing_done", "goods", "accounting"];
-        let gm = ["gm_avail_filter", "gm_weights", "gm_choice", "gm_excess", "gm_ordering"];
+        let gm = ["gm_avail_filter", "gm_weights", "gm_choice", "gm_sellers_filter", "gm_audit_block"];
         for (i, name) in gm.iter().enumerate() {
             let v = macroeconomy::systems::PROF_GM_NS[i].load(Relaxed) as f64 / 1e9;
             if v > 0.005 { eprintln!("  GM  {name:<16} {v:>8.2}s"); }

@@ -2084,46 +2084,40 @@ fn goods_market_system(
         }
         // Reused across buyers instead of a per-buyer `Vec` with `contains`,
         // which was a linear scan nested inside a linear filter.
+        // A.140 must rank a cheaper seller above a dearer one. This is a
+        // property of the sector, checked once, not per buyer: it was costing
+        // 2.3 s of an 11.9 s system to recompute the same boolean for every
+        // demand message.
+        for members in &sector_members {
+            if members.len() < 2 {
+                continue;
+            }
+            let cheapest = members
+                .iter()
+                .copied()
+                .min_by(|a, b| firms[*a].price.total_cmp(&firms[*b].price));
+            let dearest = members
+                .iter()
+                .copied()
+                .max_by(|a, b| firms[*a].price.total_cmp(&firms[*b].price));
+            if let (Some(low), Some(high)) = (cheapest, dearest) {
+                let low_component = (-phi_gm * firms[low].price).exp();
+                let high_component = (-phi_gm * firms[high].price).exp();
+                state.audit.lower_price_seller_priority_seen |=
+                    firms[low].price < firms[high].price && low_component > high_component;
+            }
+        }
+        let firm_row_index = RowIndex::build(&firms, |firm| firm.id);
         let mut exhausted_flag = vec![false; firms.len()];
         let mut touched: Vec<usize> = Vec::new();
 
         for demand in demands {
             let sector = demand.sector as usize;
-            let sellers: Vec<usize> = sector_members
-                .get(sector)
-                .map(|members| {
-                    members
-                        .iter()
-                        .copied()
-                        .filter(|idx| {
-                            positive_part(
-                                firms[*idx].production + firms[*idx].inventory
-                                    - firms[*idx].sales_quantity,
-                            ) > 0.0
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if sellers.len() >= 2 {
-                let min_price_idx = sellers
-                    .iter()
-                    .copied()
-                    .min_by(|&a, &b| firms[a].price.total_cmp(&firms[b].price))
-                    .unwrap_or(sellers[0]);
-                let max_price_idx = sellers
-                    .iter()
-                    .copied()
-                    .max_by(|&a, &b| firms[a].price.total_cmp(&firms[b].price))
-                    .unwrap_or(sellers[0]);
-                let min_component =
-                    (-state.params.goods_market_phi * firms[min_price_idx].price).exp();
-                let max_component =
-                    (-state.params.goods_market_phi * firms[max_price_idx].price).exp();
-                state.audit.lower_price_seller_priority_seen |= firms[min_price_idx].price
-                    < firms[max_price_idx].price
-                    && min_component > max_component;
-            }
-
+            let buyer_firm_idx = if demand.buyer_kind == BUYER_FIRM {
+                firm_row_index.get(demand.buyer_id)
+            } else {
+                None
+            };
             let mut remaining = demand.quantity;
             let mut remaining_budget = demand.max_spend;
             // Sellers this buyer has already found unusable this round --
@@ -2136,7 +2130,13 @@ fn goods_market_system(
             }
             while remaining > 1e-9 && remaining_budget > 1e-9 {
                 let _gm_t = std::time::Instant::now();
-                let available_sellers: Vec<usize> = sellers
+                // Candidates come straight from the sector membership. The
+                // outer `sellers` filter applied the same availability test one
+                // extra time per buyer, for 5.0 s of an 11.9 s system.
+                let available_sellers: Vec<usize> = sector_members
+                    .get(sector)
+                    .map(|m| m.as_slice())
+                    .unwrap_or(&[])
                     .iter()
                     .copied()
                     .filter(|idx| {
@@ -2192,6 +2192,7 @@ fn goods_market_system(
                     &mut governments,
                     &mut rows,
                     demand,
+                    buyer_firm_idx,
                     quantity,
                     payment,
                 );
@@ -2217,9 +2218,9 @@ fn goods_market_system(
                 let _ = &_gm_e;
                 distribute_excess_demand(
                     &mut firms,
-                    sector,
+                    sector_members.get(sector).map(|m| m.as_slice()).unwrap_or(&[]),
+                    &a140_weight,
                     remaining,
-                    state.params.goods_market_phi,
                 );
                 buffers.emit(
                     messages.excess_demand,
@@ -3559,23 +3560,29 @@ fn weighted_choice(rng: &mut MacroRng, weights: &[f64]) -> usize {
     weights.len() - 1
 }
 
-fn distribute_excess_demand(firms: &mut [Firm], sector: usize, excess: f64, phi_gm: f64) {
-    let seller_indices: Vec<usize> = firms
-        .iter()
-        .enumerate()
-        .filter(|(_, firm)| firm.sector as usize == sector)
-        .map(|(idx, _)| idx)
-        .collect();
-    let weights = seller_priority_weights(firms, &seller_indices, phi_gm);
-    let total = weights.iter().sum::<f64>();
+/// A.10.2: leftover demand is "distributed among sellers as if the allocation
+/// process continues", i.e. in proportion to the same fixed A.140 weights.
+///
+/// Takes the precomputed sector membership and weights rather than rebuilding
+/// them. This runs for every buyer left with unmet demand -- which, with the
+/// model's persistent ~20% excess demand, is most of them -- and it was
+/// rescanning every firm in the economy and recomputing both A.140 denominators
+/// each time.
+fn distribute_excess_demand(
+    firms: &mut [Firm],
+    members: &[usize],
+    weights: &[f64],
+    excess: f64,
+) {
+    let total: f64 = members.iter().map(|idx| weights[*idx]).sum();
     if total <= 1e-12 {
-        if let Some(firm) = firms.iter_mut().find(|firm| firm.sector as usize == sector) {
-            firm.excess_demand += excess;
+        if let Some(idx) = members.first() {
+            firms[*idx].excess_demand += excess;
         }
         return;
     }
-    for (idx, weight) in seller_indices.iter().zip(weights.iter()) {
-        firms[*idx].excess_demand += excess * weight / total;
+    for idx in members {
+        firms[*idx].excess_demand += excess * weights[*idx] / total;
     }
 }
 
@@ -4099,6 +4106,7 @@ fn apply_buyer_goods(
     governments: &mut [GovernmentEntity],
     rows: &mut [RestOfWorld],
     demand: GoodsDemand,
+    buyer_firm_idx: Option<usize>,
     quantity: f64,
     payment: f64,
 ) {
@@ -4108,7 +4116,9 @@ fn apply_buyer_goods(
         // less taxes for firms, income less consumption for households -- so
         // debiting per transaction as well double-counted every purchase.
         BUYER_FIRM => {
-            if let Some(firm) = firms.iter_mut().find(|firm| firm.id == demand.buyer_id) {
+            // Resolved by the caller's index. This ran once per transaction and
+            // scanned every firm in the economy.
+            if let Some(firm) = buyer_firm_idx.and_then(|idx| firms.get_mut(idx)) {
                 match demand.purpose {
                     GOODS_CAPITAL => firm.realised_capital[demand.sector as usize] += quantity,
                     _ => firm.realised_intermediate[demand.sector as usize] += quantity,
