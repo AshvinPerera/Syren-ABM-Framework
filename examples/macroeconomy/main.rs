@@ -162,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let v = macroeconomy::systems::PROF_PL_NS[i].load(Relaxed) as f64 / 1e9;
             if v > 0.005 { eprintln!("  PL  {name:<16} {v:>8.2}s"); }
         }
-        let gm = ["gm_avail_filter", "gm_weights", "gm_choice", "gm_sellers_filter", "gm_audit_block"];
+        let gm = ["gm_avail_filter", "gm_weights", "gm_choice", "gm_settlement", "gm_buyer_loop"];
         for (i, name) in gm.iter().enumerate() {
             let v = macroeconomy::systems::PROF_GM_NS[i].load(Relaxed) as f64 / 1e9;
             if v > 0.005 { eprintln!("  GM  {name:<16} {v:>8.2}s"); }

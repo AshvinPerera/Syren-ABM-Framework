@@ -2187,7 +2187,6 @@ fn goods_market_system(
         // still holds, which cuts its sales and its demand in turn.
         let _gm_order = std::time::Instant::now();
         let demands = order_demands_firms_first(raw_demands, &mut rng);
-        PROF_GM_NS[4].fetch_add(_gm_order.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let mut firm_realised = collect_rows_by(ecs, |row: &FirmRealised| row.id)?;
         let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
@@ -2337,7 +2336,6 @@ fn goods_market_system(
                 samplers[sector_of].set(position_in_sector[idx], weight);
             }
             while remaining > 1e-9 && remaining_budget > 1e-9 {
-                let _gm_t = std::time::Instant::now();
                 // Candidates come straight from the sector membership. The
                 // outer `sellers` filter applied the same availability test one
                 // extra time per buyer, for 5.0 s of an 11.9 s system.
@@ -2345,14 +2343,11 @@ let members = sector_members
                     .get(sector)
                     .map(|m| m.as_slice())
                     .unwrap_or(&[]);
-                PROF_GM_NS[0].fetch_add(_gm_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-                let _gm_c = std::time::Instant::now();
                 let draw = rng.unit_f64();
                 let Some(position) = samplers[sector].sample(draw) else {
                     break;
                 };
                 let firm_idx = members[position];
-                PROF_GM_NS[2].fetch_add(_gm_c.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let available = positive_part(
                     firms[firm_idx].production + firms[firm_idx].inventory
                         - firms[firm_idx].sales_quantity,
@@ -2408,8 +2403,6 @@ let members = sector_members
             }
             if remaining > 1e-9 {
                 state.audit.goods_excess_demand += remaining;
-                let _gm_e = std::time::Instant::now();
-                let _ = &_gm_e;
                 distribute_excess_demand(
                     &mut firms,
                     sector_members.get(sector).map(|m| m.as_slice()).unwrap_or(&[]),
