@@ -148,6 +148,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let state = macro_state(&example.model)?;
     eprintln!("completed {} quarters", state.quarter);
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let c = macroeconomy::systems::PROF_COLLECT_NS.load(Relaxed) as f64 / 1e9;
+        let w = macroeconomy::systems::PROF_WRITE_NS.load(Relaxed) as f64 / 1e9;
+        let n = macroeconomy::systems::PROF_COLLECT_ROWS.load(Relaxed);
+        eprintln!("PROF collect={c:.2}s write={w:.2}s rows_collected={n}");
+        let names = ["", "aggregate", "expectations", "targets", "labour", "planning",
+                     "housing_pre", "credit", "housing_done", "goods", "accounting"];
+        for (i, name) in names.iter().enumerate() {
+            if name.is_empty() { continue; }
+            let v = macroeconomy::systems::PROF_SYS_NS[i].load(Relaxed) as f64 / 1e9;
+            if v > 0.005 { eprintln!("  SYS {name:<14} {v:>8.2}s"); }
+        }
+    }
     eprintln!(
         "housing (cumulative): listings={} sales={} blocked_mortgages={} transfer_value={:.1}",
         state.audit.housing_listings,
