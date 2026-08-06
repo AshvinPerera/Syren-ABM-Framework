@@ -30,9 +30,10 @@ cargo run --release --features "model messaging" --example macroeconomy -- --fix
 | `--config <path> --scenario <name>` | Apply a block from `config.yaml`. |
 | `--ticks N`, `--seed N` | Quarters to run; model seed. |
 | `--trace` | Write `trace_aggregates.csv` and `trace_firms.csv`. |
+| `--profile <path>` | Write a Chrome Trace profile. Needs `--features profiling`. |
 | `--debug-firm <id>` | Per-quarter dump of one firm's internals. |
 
-Set `RAYON_NUM_THREADS=1` for reproducible output — see
-[limitations.md](limitations.md).
+Output is reproducible at any thread count; see
+[limitations.md](limitations.md) for what makes that hold.
 
 Tests: `cargo test --release --features "model messaging" --test macroeconomy`
