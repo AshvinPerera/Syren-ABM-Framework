@@ -1382,6 +1382,16 @@ fn housing_preclear_system(
         // Each mover resolves its own residence; scanning every property per
         // household is O(households x properties).
         let property_positions = RowIndex::build(&properties, |property| property.id);
+        // A.13's "closest price" search, kept ordered instead of rescanned.
+        let mut for_sale = PriceIndex::default();
+        let mut for_rent = PriceIndex::default();
+        for (position, property) in properties.iter().enumerate() {
+            match property.market_status {
+                PROPERTY_FOR_SALE => for_sale.insert(property.price, position),
+                PROPERTY_FOR_RENT => for_rent.insert(property.rent, position),
+                _ => {}
+            }
+        }
 
         for household_idx in household_order {
             let household = &mut households[household_idx];
@@ -1396,15 +1406,14 @@ fn housing_preclear_system(
                 continue;
             }
             if household.owns_residence && household.residence_property_id != NOT_LINKED {
-                if let Some(property) = property_positions
-                    .get(household.residence_property_id)
-                    .map(|position| &mut properties[position])
-                {
+                if let Some(position) = property_positions.get(household.residence_property_id) {
+                    let property = &mut properties[position];
                     property.price =
                         (1.0 + state.forecast.predicted_hpi_inflation) * property.value;
                     property.market_status = PROPERTY_FOR_SALE;
                     property.occupant_household_id = NOT_LINKED;
                     state.audit.housing_listings += 1;
+                    for_sale.insert(property.price, position);
                 }
             }
             let epsilon =
@@ -1417,13 +1426,10 @@ fn housing_preclear_system(
                 * epsilon.exp();
             household.desired_rent = state.params.housing_phi_hr
                 * household.income.max(1.0).powf(state.params.housing_beta_hr);
-            let nearest_sale = closest_property(
-                &properties,
-                PROPERTY_FOR_SALE,
-                household.desired_house_price,
-            );
+            let nearest_sale =
+                for_sale.nearest(household.desired_house_price, |p| properties[p].price);
             let nearest_rent =
-                closest_property(&properties, PROPERTY_FOR_RENT, household.desired_rent);
+                for_rent.nearest(household.desired_rent, |p| properties[p].rent);
             let buy_probability = if let Some(property_idx) = nearest_sale {
                 let property = properties[property_idx];
                 let bank_rate = banks
@@ -1459,11 +1465,9 @@ fn housing_preclear_system(
 
         for household_idx in buyers {
             let household = &mut households[household_idx];
-            if let Some(property_idx) = closest_property(
-                &properties,
-                PROPERTY_FOR_SALE,
-                household.desired_house_price,
-            ) {
+            if let Some(property_idx) =
+                for_sale.nearest(household.desired_house_price, |p| properties[p].price)
+            {
                 let property = &mut properties[property_idx];
                 let financial_wealth =
                     (household.deposits + household.other_financial_assets).max(0.0);
@@ -1471,6 +1475,7 @@ fn housing_preclear_system(
                 household.desired_property_id = property.id;
                 household.desired_mortgage = mortgage_required;
                 property.market_status = PROPERTY_TENTATIVE_SALE;
+                for_sale.remove(property.price, property_idx);
                 buffers.emit(
                     messages.tentative_purchase,
                     TentativePurchase {
@@ -1498,11 +1503,12 @@ fn housing_preclear_system(
         for household_idx in renters {
             let household = &mut households[household_idx];
             if let Some(property_idx) =
-                closest_property(&properties, PROPERTY_FOR_RENT, household.desired_rent)
+                for_rent.nearest(household.desired_rent, |p| properties[p].rent)
             {
                 let property = &mut properties[property_idx];
                 household.desired_property_id = property.id;
                 property.market_status = PROPERTY_TENTATIVE_RENT;
+                for_rent.remove(property.rent, property_idx);
                 buffers.emit(
                     messages.tentative_rental,
                     TentativeRental {
@@ -3240,6 +3246,60 @@ impl SectorSampler {
     }
 }
 
+/// Properties on one side of the housing market, ordered by asking price.
+///
+/// A.13 has a buyer or renter visit "the property whose price or rent is
+/// closest to what they hope to spend". Implemented as a linear `min_by` over
+/// every property that is one scan per house-hunting household, i.e.
+/// O(households x properties).
+///
+/// A `BTreeSet` keyed on the price bits answers the same question with two
+/// range probes. IEEE-754 bit patterns order correctly for non-negative
+/// doubles, which prices and rents are.
+///
+/// The set is mutable because listings appear and offers are taken while the
+/// market clears, and A.13 draws households one at a time against whatever is
+/// still available.
+#[derive(Default)]
+struct PriceIndex {
+    entries: std::collections::BTreeSet<(u64, usize)>,
+}
+
+impl PriceIndex {
+    fn key(value: f64) -> u64 {
+        value.max(0.0).to_bits()
+    }
+
+    fn insert(&mut self, value: f64, position: usize) {
+        self.entries.insert((Self::key(value), position));
+    }
+
+    fn remove(&mut self, value: f64, position: usize) {
+        self.entries.remove(&(Self::key(value), position));
+    }
+
+    /// Closest entry to `desired`. Ties go to the lower position, which is what
+    /// `min_by` over a position-ordered slice returned.
+    fn nearest(&self, desired: f64, price_of: impl Fn(usize) -> f64) -> Option<usize> {
+        let key = Self::key(desired);
+        let below = self.entries.range(..(key, usize::MAX)).next_back().copied();
+        let above = self.entries.range((key, 0)..).next().copied();
+        match (below, above) {
+            (None, None) => None,
+            (Some((_, position)), None) | (None, Some((_, position))) => Some(position),
+            (Some((_, low)), Some((_, high))) => {
+                let low_gap = (price_of(low) - desired).abs();
+                let high_gap = (price_of(high) - desired).abs();
+                if high_gap < low_gap || (high_gap == low_gap && high < low) {
+                    Some(high)
+                } else {
+                    Some(low)
+                }
+            }
+        }
+    }
+}
+
 /// Dense id-to-position index over a collected row set.
 ///
 /// Market clearing walks messages and needs the *borrower* or *property* they
@@ -3574,28 +3634,6 @@ fn compute_aggregates(
     aggregate
 }
 
-fn closest_property(properties: &[Property], status: u8, desired: f64) -> Option<usize> {
-    properties
-        .iter()
-        .enumerate()
-        .filter(|(_, property)| property.market_status == status)
-        .min_by(|(_, a), (_, b)| {
-            let a_price = if status == PROPERTY_FOR_RENT {
-                a.rent
-            } else {
-                a.price
-            };
-            let b_price = if status == PROPERTY_FOR_RENT {
-                b.rent
-            } else {
-                b.price
-            };
-            (a_price - desired)
-                .abs()
-                .total_cmp(&(b_price - desired).abs())
-        })
-        .map(|(idx, _)| idx)
-}
 
 fn lagged_cpi_inflation(state: &MacroEnvironment) -> f64 {
     let lag = state.params.rent_partial_indexation_lag.max(1);
