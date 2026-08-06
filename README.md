@@ -91,7 +91,7 @@ The fast paths, in the order they usually matter:
 | Flag | Enables |
 | --- | --- |
 | `agents` | Agent templates, spawners, lifecycle hooks, and agent handles |
-| `environment` | Typed model environment values and dirty-channel boundary tracking |
+| `environment` | Typed model environment values, dirty-channel boundary tracking, and the `space` module (grids, continuous space, geometry) |
 | `messaging` | Typed brute-force, bucket, spatial, and targeted per-tick messages |
 | `gpu` | `wgpu` compute systems, GPU-safe components, and CPU/GPU mirroring |
 | `messaging_gpu` | GPU-backed message resources and GPU finalisation; includes `messaging` and `gpu` |
@@ -116,7 +116,7 @@ Add the crate from this repository:
 
 ```toml
 [dependencies]
-abm_framework = { git = "https://github.com/AshvinPerera/ABM-Framework.git" }
+abm_framework = { git = "https://github.com/AshvinPerera/Syren-ABM-Framework.git" }
 ```
 
 ### Low-level ECS
@@ -219,8 +219,15 @@ let model = ModelBuilder::new()
 
 The `advanced` module re-exports storage and scheduling internals that are
 deliberately kept out of the root API: `Archetype`, `ChunkBorrow`,
-`EntityShards`, `ECSData`, `ChannelAllocator`, and raw typed-slice casts
-(`cast_slice`, `cast_slice_mut`, `Attribute`, `TypeErasedAttribute`).
+`EntityShards`, `ECSData`, `ChannelAllocator`, raw typed-slice casts
+(`cast_slice`, `cast_slice_mut`, `Attribute`, `TypeErasedAttribute`), and the
+worker-staging primitives `WorkerStage`, `worker_id`, and `max_workers`.
+
+`WorkerStage<T>` gives every Rayon worker its own slot to push into from inside
+a parallel `for_each`, with no lock on the hot path; a boundary drains all slots
+under `&mut self`. Which worker stages which item depends on work stealing, so
+a consumer that needs run-to-run stable output must impose an order after
+draining.
 
 `EntityShards` controls how entity IDs are partitioned across allocation
 shards and is required by both the low-level `ECSManager::with_registry` path
@@ -228,9 +235,22 @@ and `ModelBuilder::with_shards`. The remaining types expose archetype storage
 internals; callers using them directly must uphold the ECS storage invariants
 that the public API normally enforces automatically.
 
-## Current Examples And Tests
+## Examples
 
-The repository uses integration tests as executable examples:
+Two worked models live under `examples/`:
+
+| Example | Features | What it is |
+| --- | --- | --- |
+| `examples/macroeconomy` | `model messaging` | A multi-market macroeconomic ABM implementing appendix equations A.1–A.142 of Wiese et al. (2024) on synthetic data: firms, individuals, households, banks, a central bank, government, properties, and the rest of the world across goods, labour, credit and housing markets. Ten systems per quarterly tick. See [`examples/macroeconomy/README.md`](examples/macroeconomy/README.md). |
+| `examples/sugarscape` | (none) | Epstein–Axtell Sugarscape on a toroidal grid, driven straight from the low-level ECS API. |
+
+```bash
+cargo run --release --features "model messaging" --example macroeconomy -- --fixture tiny --ticks 40 --seed 42
+```
+
+## Tests
+
+The integration tests double as executable specifications:
 
 | Test | Features | What it covers |
 | --- | --- | --- |
@@ -241,6 +261,8 @@ The repository uses integration tests as executable examples:
 | `tests/gpu_dispatch_params.rs` | `gpu` | GPU dispatch parameter passing, write-back, and multi-archetype filtering |
 | `tests/engine_boundary_lifecycle.rs` | (none) | Boundary resource per-slot locking, channel routing, registration collisions, and fallible parallel iteration |
 | `tests/mem_layout.rs` | (none) | Memory layout and alignment assertions for archetype columnar storage, chunk capacity, and typed slice casts |
+| `tests/entity_aware_iteration.rs` | (none) | Entity-aware and fallible iteration paths, including `for_each_entity_fallible` error propagation |
+| `examples/macroeconomy/tests.rs` | `model messaging` | The macroeconomy example: scheduler and market ordering, parameter defaults, equation arithmetic, config overrides, and byte-identical trajectories across seeds and thread counts |
 
 Useful targeted commands:
 
@@ -274,6 +296,7 @@ Criterion benchmarks live under `benches/`. The full set of targets:
 | `scheduler_packing` | — | Stage packing and plan compilation |
 | `scheduler_execution` | — | End-to-end scheduler execution |
 | `structural_mutation` | — | Add/remove component structural changes |
+| `parallel_scaling` | — | Throughput against worker-thread count |
 | `environment_dirty_tracking` | `environment` | Environment dirty-channel overhead |
 | `messaging_finalisation` | `messaging` | Message buffer finalisation |
 | `message_specialisations` | `messaging` | Brute-force, bucket, spatial, targeted dispatch |
@@ -309,18 +332,21 @@ abm_framework::shutdown();
 
 ```
 src/
-  lib.rs                — public API re-exports and prelude
+  lib.rs                — public API re-exports, `advanced` module, and prelude
   engine/               — core ECS: archetypes, entities, components, scheduler,
                           queries, commands, boundaries, borrow tracking, workers
     random.rs           — deterministic seed-keyed RNG (DetRng, splitmix64)
+    worker_stage.rs     — lock-free per-worker staging for parallel collection
   agents/               — agent templates, spawners, batch spawning, handles, registry
   environment/          — typed key-value parameter store with dirty-channel tracking
+  space/                — grids, continuous space, and geometry (behind `environment`)
   messaging/            — per-tick typed message buffers (brute-force, bucket,
                           spatial, targeted) and optional GPU message resources
   model/                — ModelBuilder, Model, nested models, sub-schedulers
   gpu/                  — wgpu compute pipeline, GPU-safe components, CPU/GPU mirroring
   profiling/            — Chrome Trace output
-tests/                  — integration tests (executable examples)
+examples/               — worked models (macroeconomy, sugarscape)
+tests/                  — integration tests (executable specifications)
 benches/                — Criterion benchmarks
 ```
 
