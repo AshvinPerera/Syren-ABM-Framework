@@ -202,13 +202,13 @@ fn aggregate_previous_state_system(
     access.produces.insert(phases.aggregate_done.channel_id());
     FnSystem::new(10, "macro::aggregate_previous_state", access, move |ecs| {
         // Eqs. A.1-A.15: previous-quarter aggregates and GDP identity inputs.
-        let firms = collect_rows::<Firm>(ecs)?;
-        let households = collect_rows::<Household>(ecs)?;
-        let banks = collect_rows::<Bank>(ecs)?;
-        let governments = collect_rows::<GovernmentEntity>(ecs)?;
-        let accounts = collect_rows::<GovernmentAccount>(ecs)?;
-        let properties = collect_rows::<Property>(ecs)?;
-        let row = collect_rows::<RestOfWorld>(ecs)?;
+        let firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
+        let governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
+        let accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
+        let properties = collect_rows_by(ecs, |row: &Property| row.id)?;
+        let row = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
         let mut state = macro_state(ecs, env_boundary)?;
         let aggregates = compute_aggregates(
             &state,
@@ -310,9 +310,9 @@ fn target_setting_system(
     FnSystem::new(30, "macro::firm_individual_targets", access, move |ecs| {
         // Eqs. A.59-A.68 and A.129-A.132: firm targets and individual supply/income targets.
         let mut state = macro_state(ecs, env_boundary)?;
-        let mut firms = collect_rows::<Firm>(ecs)?;
-        let mut individuals = collect_rows::<Individual>(ecs)?;
-        let accounts = collect_rows::<GovernmentAccount>(ecs)?;
+        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
+        let accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
         let account = accounts.first().copied().unwrap_or_default();
         // `P_s(t-1)` for A.59's relative-price test.
         let sector_prices_previous = previous_sector_prices(&firms);
@@ -522,8 +522,8 @@ fn labour_market_system(
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::LABOUR_MARKET);
-        let mut firms = collect_rows::<Firm>(ecs)?;
-        let mut individuals = collect_rows::<Individual>(ecs)?;
+        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
 
         for firm in &mut firms {
             let mut employees: Vec<usize> = individuals
@@ -683,14 +683,14 @@ fn planning_and_production_system(
         let wages: Vec<WagePayment> = buffers.brute_force(messages.wage_payment)?.collect();
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::PLANNING);
-        let mut firms = collect_rows::<Firm>(ecs)?;
-        let mut individuals = collect_rows::<Individual>(ecs)?;
-        let mut households = collect_rows::<Household>(ecs)?;
-        let mut governments = collect_rows::<GovernmentEntity>(ecs)?;
-        let mut accounts = collect_rows::<GovernmentAccount>(ecs)?;
-        let mut central_banks = collect_rows::<CentralBank>(ecs)?;
-        let mut rows = collect_rows::<RestOfWorld>(ecs)?;
-        let properties = collect_rows::<Property>(ecs)?;
+        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
+        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
+        let mut accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
+        let mut central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
+        let mut rows = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
+        let properties = collect_rows_by(ecs, |row: &Property| row.id)?;
 
         let account = accounts.first().copied().unwrap_or_default();
         for central_bank in &mut central_banks {
@@ -1230,9 +1230,9 @@ fn housing_preclear_system(
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::HOUSING_PRECLEAR);
-        let mut households = collect_rows::<Household>(ecs)?;
-        let mut properties = collect_rows::<Property>(ecs)?;
-        let banks = collect_rows::<Bank>(ecs)?;
+        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut properties = collect_rows_by(ecs, |row: &Property| row.id)?;
+        let banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
 
         let cpi_lag = lagged_cpi_inflation(&state);
         // A.108/A.109 need `V*`, the value of housing a household can afford,
@@ -1499,10 +1499,10 @@ fn credit_market_system(
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::CREDIT_MARKET);
-        let mut banks = collect_rows::<Bank>(ecs)?;
-        let mut firms = collect_rows::<Firm>(ecs)?;
-        let mut households = collect_rows::<Household>(ecs)?;
-        let central_banks = collect_rows::<CentralBank>(ecs)?;
+        let mut banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
+        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
         let policy_rate = central_banks
             .first()
             .map(|central_bank| central_bank.policy_rate)
@@ -1861,8 +1861,8 @@ fn housing_completion_system(
             buffers.brute_force(messages.tentative_rental)?.collect();
         let grants: Vec<CreditGrant> = buffers.brute_force(messages.credit_grant)?.collect();
         let mut state = macro_state(ecs, env_boundary)?;
-        let mut households = collect_rows::<Household>(ecs)?;
-        let mut properties = collect_rows::<Property>(ecs)?;
+        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut properties = collect_rows_by(ecs, |row: &Property| row.id)?;
 
         for purchase in purchases {
             let has_mortgage = purchase.mortgage_required <= 1e-9
@@ -1983,10 +1983,10 @@ fn goods_market_system(
         // caps its next-quarter output at the fraction of the input buffer it
         // still holds, which cuts its sales and its demand in turn.
         let demands = order_demands_firms_first(raw_demands, &mut rng);
-        let mut firms = collect_rows::<Firm>(ecs)?;
-        let mut households = collect_rows::<Household>(ecs)?;
-        let mut governments = collect_rows::<GovernmentEntity>(ecs)?;
-        let mut rows = collect_rows::<RestOfWorld>(ecs)?;
+        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
+        let mut rows = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
 
         // Real supply and demand offered to the market this quarter. See
         // `MarketAudit::goods_demand_quantity`.
@@ -2206,15 +2206,15 @@ fn realised_accounting_system(
         // materialising the whole buffer here allocated once per tick for a
         // value that was immediately dropped.
         let mut state = macro_state(ecs, env_boundary)?;
-        let mut firms = collect_rows::<Firm>(ecs)?;
-        let individuals = collect_rows::<Individual>(ecs)?;
-        let mut households = collect_rows::<Household>(ecs)?;
-        let mut banks = collect_rows::<Bank>(ecs)?;
-        let mut accounts = collect_rows::<GovernmentAccount>(ecs)?;
-        let governments = collect_rows::<GovernmentEntity>(ecs)?;
-        let central_banks = collect_rows::<CentralBank>(ecs)?;
-        let properties = collect_rows::<Property>(ecs)?;
-        let rows = collect_rows::<RestOfWorld>(ecs)?;
+        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
+        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
+        let mut accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
+        let governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
+        let central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
+        let properties = collect_rows_by(ecs, |row: &Property| row.id)?;
+        let rows = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
         let policy_rate = central_banks
             .first()
             .map(|central_bank| central_bank.policy_rate)
@@ -2960,9 +2960,31 @@ fn realised_accounting_system(
     })
 }
 
-fn collect_rows<T>(ecs: ECSReference<'_>) -> ECSResult<Vec<T>>
+/// Materialises one component type into a `Vec` for systems that need a global
+/// view (market clearing, which the paper specifies as a randomised sequence
+/// over all participants, cannot be expressed as per-row iteration).
+///
+/// Two properties matter and neither came for free before:
+///
+/// * **No lock.** The previous version pushed into an `Arc<Mutex<Vec<T>>>` from
+///   inside a parallel `for_each`, serialising the whole chunk-disjoint
+///   iteration through one mutex at the first line of every system.
+/// * **Deterministic order.** Push order is work-stealing order, so row order
+///   varied run to run. That was a second source of nondeterminism, independent
+///   of the message drain order, and it silently invalidated any code that
+///   assumed `rows[i].id == i`.
+///
+/// Rows are sorted by model id after collection, so the order is identical on
+/// every run regardless of which worker pushed first.
+///
+/// The push still goes through one mutex. Making it lock-free needs
+/// `engine::workers::worker_id`, which the framework does not export publicly;
+/// `WorkerStage` already exists for exactly this and wants the same export.
+/// Tracked as framework work rather than bodged here.
+fn collect_rows_by<T, F>(ecs: ECSReference<'_>, id: F) -> ECSResult<Vec<T>>
 where
     T: Copy + Send + Sync + 'static,
+    F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
     let rows = Arc::new(Mutex::new(Vec::new()));
     let rows_for_query = Arc::clone(&rows);
@@ -2970,20 +2992,39 @@ where
     ecs.for_each::<(Read<T>,), _>(q, move |row| {
         rows_for_query.lock().unwrap().push(*row.0);
     })?;
-    let out = rows.lock().unwrap().clone();
+    let mut out = rows.lock().unwrap().clone();
+    out.sort_unstable_by_key(id);
     Ok(out)
 }
 
+/// Writes a collected row set back to ECS storage, matching on the model id.
+///
+/// The lookup is an index built once, not a scan per slot. `rows.iter().find()`
+/// inside the `for_each` body made this O(n^2) in agent count, and it runs for
+/// every component type in every system, which made it the single largest term
+/// in the tick at scale: 6e9 comparisons per write-back at 78,000 firms.
+///
+/// Model ids are dense, so the index is a `Vec` keyed on id -- no hashing, and
+/// cache-friendly. Ids at or beyond the row count fall through to `None` and
+/// leave the slot untouched, which is the same behaviour the scan had when it
+/// found no match.
 fn write_rows<T, F>(ecs: ECSReference<'_>, rows: Vec<T>, id: F) -> ECSResult<()>
 where
     T: Copy + Send + Sync + 'static,
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
+    let capacity = rows.iter().map(|row| id(row) as usize + 1).max().unwrap_or(0);
+    let mut index: Vec<u32> = vec![u32::MAX; capacity];
+    for (position, row) in rows.iter().enumerate() {
+        index[id(row) as usize] = position as u32;
+    }
     let q = ecs.query()?.write::<T>()?.build()?;
     ecs.for_each::<(Write<T>,), _>(q, move |slot| {
-        let slot_id = id(slot.0);
-        if let Some(updated) = rows.iter().find(|row| id(row) == slot_id) {
-            *slot.0 = *updated;
+        let slot_id = id(slot.0) as usize;
+        if let Some(&position) = index.get(slot_id) {
+            if position != u32::MAX {
+                *slot.0 = rows[position as usize];
+            }
         }
     })
 }

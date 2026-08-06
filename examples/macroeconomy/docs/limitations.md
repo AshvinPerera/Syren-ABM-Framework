@@ -2,81 +2,51 @@
 
 Measured facts about the current build.
 
-## Nondeterminism
+## Nondeterminism — fixed
 
-**Two identical invocations with the same seed produce different output at 595
-firms.** Set `RAYON_NUM_THREADS=1` for reproducible runs.
+Runs are reproducible at any thread count. Verified over 40 quarters at 595
+firms: 1, 4 and 8 threads all produce an identical hash.
 
-| Threads | Firms | Reproducible |
+The dominant cause was **not** the message drain order. `collect_rows` pushed
+rows into a shared `Vec` from a parallel `for_each`, so row order was
+work-stealing order, and every system that iterated a collected row set
+inherited it. Sorting rows by model id after collection removes it.
+
+Message drain order is still work-stealing dependent, and worker slots now
+register in `worker_id` order rather than first-emit order. That remains
+theoretically observable if a system consumes messages without going through a
+sorted row set; no such path is currently reachable, which is why the runs
+agree. Ordering within a message bucket is the remaining hardening.
+
+## Scale — still open
+
+`write_rows` was O(n^2): a `rows.iter().find()` per slot, for every component
+type in every system. It now builds a dense id index once, so it is O(n).
+
+That did **not** make the model scale. Measured, 3 ticks per point:
+
+| Firms | Individuals | Elapsed |
 |---|---|---|
-| 1 | 595 | yes |
-| 4 | 595 | **no** |
-| 8 | 595 | **no** |
-| 4 | 19 | yes |
+| 595 | 9,571 | 2.2 s |
+| 1,189 | 19,142 | 7.1 s |
+| 2,377 | 38,284 | 85.5 s |
+| 4,753 | 76,568 | 494 s |
 
-Ticks 1–2 are bit-identical; tick 3 diverges by 1.2e-5 relative. That is far too
-large to be accumulated rounding, so it is generated *within* tick 3 by an
-ordering difference.
+Still super-quadratic. Two reasons the fix did not land:
 
-**Mechanism.** Messages are staged per-thread and concatenated by `drain_into`,
-so the order workers are visited is the message order every system observes.
-Downstream the markets do:
+1. **16 `iter().find(..)` / `iter().position(..)` sites remain** in the market
+   loops -- borrower lookup per credit application, property lookup per housing
+   purchase. These are the inverse of a message lookup ("given a message, find
+   its agent") so message specialisation does not address them; they need the
+   same dense index `write_rows` now uses.
+2. **The determinism sort costs.** `collect_rows_by` sorts on every call, 42
+   calls a tick, O(n log n) each. Correct, but it should come from the
+   collection order rather than a sort -- which needs `engine::workers::worker_id`
+   exported so the example can stage per worker like `space` does.
 
-```rust
-let mut block: Vec<GoodsDemand> = demands.iter().filter(..).collect();
-rng.shuffle(&mut block);
-```
-
-A Fisher–Yates shuffle with a fixed stream applies a fixed permutation *to
-positions*. Applied to two differently-ordered inputs it gives two different
-orders — the shuffle preserves the nondeterminism rather than removing it.
-Clearing order then decides which buyer reaches which seller, and A.1's
-search-and-matching is order-sensitive by construction.
-
-Worker registration order has been made stable (workers now register under
-`worker_id()` rather than in first-emit order), but that is **not sufficient**:
-Rayon's work-stealing decides which worker handles which agents, so a given
-worker's buffer does not hold the same messages twice.
-
-The 19-firm case passes only because the workload never splits. Both
-reproducibility tests run the tiny fixture, which is why they pass while the
-model is broken.
-
-**Fix**: give the drained buffer a canonical order independent of which thread
-produced what. See the strategy note in the framework discussion — the
-`Bucket`/`Targeted` message specialisations make this cheaper than a global
-sort.
-
-## Scale
-
-Runtime is super-quadratic and worsening. Three ticks per point:
-
-| Firms | Individuals | Elapsed | Ratio |
-|---|---|---|---|
-| 595 | 9,571 | 2.5 s | — |
-| 1,189 | 19,008 | 8.7 s | 3.5× |
-| 2,377 | 38,016 | 42.5 s | 4.9× |
-| 4,753 | 76,032 | 347 s | 8.2× |
-| 9,506 | 152,064 | timed out (>9 min) | — |
-
-Implied exponents 1.81, 2.29, 3.03 — the signature of an O(n²) algorithm falling
-out of cache.
-
-**Cause**: `systems.rs` contains 16 `iter().find(..)` / `iter().position(..)`
-sites, several inside per-message loops — e.g. `firms.iter().find(..)` per credit
-application, `properties.iter().position(..)` per housing purchase. At 595 firms
-a scan is free; at 78,000 it is ~6e9 comparisons per tick.
-
-The deeper cause is that all eleven message types are declared
-`BruteForceMessage` even though most are addressed to one agent. The framework
-already provides `BucketMessage` and `TargetedMessage` for exactly this.
-
-**Projection to 2M agents**: ~78,700 firms, ~107 hours for 3 ticks, ~59 days for
-40 quarters — for one Monte Carlo draw. The paper averages 500. Not a hardware
-problem.
-
-Note the 595-firm run is already Austria at the paper's 1:1000 scale, so the
-paper's own scale is the *smallest* row above.
+Note these figures are not comparable with any measured before the inactive
+population was added: that change nearly doubled the agent count at every
+`--firms-per-sector` value.
 
 ## Inert subsystems
 
