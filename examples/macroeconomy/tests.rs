@@ -379,3 +379,14 @@ fn named_equation_helpers_match_paper_arithmetic() {
     assert_eq!(bank_liabilities_a42(10.0, 25.0, 20.0, -3.0), 52.0);
     assert_eq!(bank_reserves_a43(5.0, -2.0, 10.0, 4.0), 9.0);
 }
+
+#[test]
+fn component_sizes_are_recorded() {
+    // Row-struct sizes matter: `collect_rows_by` materialises whole rows, so a
+    // system that touches a handful of fields still pulls every byte through
+    // cache. This test documents the sizes rather than constraining them.
+    eprintln!("Firm        {:>6} bytes", std::mem::size_of::<Firm>());
+    eprintln!("Household   {:>6} bytes", std::mem::size_of::<Household>());
+    eprintln!("Individual  {:>6} bytes", std::mem::size_of::<Individual>());
+    eprintln!("Property    {:>6} bytes", std::mem::size_of::<Property>());
+}

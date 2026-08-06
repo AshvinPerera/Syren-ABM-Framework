@@ -749,6 +749,7 @@ fn planning_and_production_system(
             .map(|central_bank| central_bank.policy_rate)
             .unwrap_or_default();
 
+        let _pl0 = PlTimer(0, std::time::Instant::now());
         for individual in &mut individuals {
             individual.income = if individual.labour_status == LABOUR_EMPLOYED {
                 state.aggregates.cpi
@@ -776,6 +777,7 @@ fn planning_and_production_system(
         state.audit.individual_headcount = individuals.len() as u64;
         state.audit.employed_headcount = firms.iter().map(|firm| u64::from(firm.employees)).sum();
 
+        let _pl1 = PlTimer(1, std::time::Instant::now());
         for firm in &mut firms {
             let sector = firm.sector as usize;
             // A.72's labour argument is H_f(t) itself. `firm.labour` already
@@ -969,6 +971,7 @@ fn planning_and_production_system(
         // recompute below was assigning each entity the *whole* sectoral
         // amount, multiplying government demand by the entity count.
         let mut entities_in_sector = [0u32; SECTORS];
+        let _pl2 = PlTimer(2, std::time::Instant::now());
         for government in governments.iter() {
             entities_in_sector[government.sector as usize] += 1;
         }
@@ -1004,6 +1007,7 @@ fn planning_and_production_system(
             )?;
         }
 
+        let _pl3 = PlTimer(3, std::time::Instant::now());
         for row in &mut rows {
             let production_index = ratio(
                 state.aggregates.production,
@@ -1055,6 +1059,7 @@ fn planning_and_production_system(
         }
 
         let mut wage_income_by_household = vec![0.0; households.len()];
+        let _pl4 = PlTimer(4, std::time::Instant::now());
         for wage in wages {
             if let Some(slot) = wage_income_by_household.get_mut(wage.household_id as usize) {
                 *slot += wage.amount;
@@ -1111,6 +1116,7 @@ fn planning_and_production_system(
             }
         }
 
+        let _pl5 = PlTimer(5, std::time::Instant::now());
         for household in households.iter_mut() {
             let slot = household.id as usize;
             let labour_income = predicted_labour_by_household.get(slot).copied().unwrap_or(0.0);
@@ -1189,6 +1195,7 @@ fn planning_and_production_system(
             }
         }
 
+        let _pl6 = PlTimer(6, std::time::Instant::now());
         for account in &mut accounts {
             // Eq. 6.97 as printed is `wU(t) = wU(t-1) / (1 + growth)`, which
             // *shrinks* the benefit when the economy grows -- while the very
@@ -3278,6 +3285,24 @@ struct SysTimer(usize, std::time::Instant);
 impl Drop for SysTimer {
     fn drop(&mut self) {
         PROF_SYS_NS[self.0].fetch_add(
+            self.1.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+pub static PROF_PL_NS: [std::sync::atomic::AtomicU64; 8] = [
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Times a planning block into `PROF_PL_NS` on drop.
+struct PlTimer(usize, std::time::Instant);
+impl Drop for PlTimer {
+    fn drop(&mut self) {
+        PROF_PL_NS[self.0].fetch_add(
             self.1.elapsed().as_nanos() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
