@@ -65,50 +65,91 @@ pub struct Firm {
     pub bankrupt: bool,
 }
 
-/// A firm's per-sector input and capital vectors, held apart from [`Firm`].
+/// The input stocks a firm produces from: `M_{fs'}` and `K_{fs'}`.
 ///
-/// The framework stores one contiguous column per registered component type, so
-/// a query that names [`Firm`] pulls every byte of it. These nine
-/// `[f64; SECTORS]` arrays are 1,296 of the 1,664 bytes a combined struct would
-/// occupy -- 78% of it -- and several systems never read them: the goods market
-/// touches only prices, production, inventory and sales.
-///
-/// Splitting them out lets a system declare just the columns it needs. Systems
-/// that do need both collect both and index them together; ids are dense and
-/// both are collected in id order.
+/// Split from the other per-sector vectors because these two are read by
+/// almost every system -- production limits (A.63/A.64), the capital value in
+/// A.25/A.26, and the A.93 balance sheet -- while the rest are needed by one or
+/// two. The framework stores one column per component, so a system pays only
+/// for the vectors it names.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FirmSectoral {
-    /// Mirrors [`Firm::id`] so the two can be joined.
+pub struct FirmStocks {
+    /// Mirrors [`Firm::id`] so the columns can be joined.
     pub id: u32,
-    /// `M_{fs'}`: stock of intermediate inputs, by supplying sector.
     pub intermediate_stock: [f64; SECTORS],
-    pub initial_intermediate_stock: [f64; SECTORS],
-    /// `K_{fs'}`: stock of capital inputs, by supplying sector.
     pub capital_stock: [f64; SECTORS],
+}
+
+/// Opening stocks and the A.87 capital-installation queue.
+///
+/// Read when setting targets (A.78/A.79 compare against the opening ratio) and
+/// when installing delivered capital; nothing else touches them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FirmStockBaseline {
+    pub id: u32,
+    pub initial_intermediate_stock: [f64; SECTORS],
     pub initial_capital_stock: [f64; SECTORS],
-    /// `M_hat_{fs'}` and `K_hat_{fs'}` from A.78 and A.79.
-    pub target_intermediate: [f64; SECTORS],
-    pub target_capital: [f64; SECTORS],
-    /// What the goods market actually delivered this quarter.
-    pub realised_intermediate: [f64; SECTORS],
-    pub realised_capital: [f64; SECTORS],
-    /// A.87's `T^KD` delay queue: capital bought but not yet usable.
+    /// `T^KD` delay queue: capital bought but not yet usable.
     pub capital_to_install: [f64; SECTORS],
 }
 
-impl Default for FirmSectoral {
+/// `M_hat_{fs'}` and `K_hat_{fs'}` from A.78 and A.79: what the firm intends to
+/// buy this quarter, before credit constraints scale it back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FirmTargets {
+    pub id: u32,
+    pub target_intermediate: [f64; SECTORS],
+    pub target_capital: [f64; SECTORS],
+}
+
+/// What the goods market actually delivered this quarter.
+///
+/// Written per transaction by the goods market and read once by accounting, so
+/// it is kept apart from the stocks the market never touches.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FirmRealised {
+    pub id: u32,
+    pub realised_intermediate: [f64; SECTORS],
+    pub realised_capital: [f64; SECTORS],
+}
+
+impl Default for FirmStocks {
     fn default() -> Self {
         Self {
             id: 0,
             intermediate_stock: [0.0; SECTORS],
-            initial_intermediate_stock: [0.0; SECTORS],
             capital_stock: [0.0; SECTORS],
+        }
+    }
+}
+
+impl Default for FirmStockBaseline {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            initial_intermediate_stock: [0.0; SECTORS],
             initial_capital_stock: [0.0; SECTORS],
+            capital_to_install: [0.0; SECTORS],
+        }
+    }
+}
+
+impl Default for FirmTargets {
+    fn default() -> Self {
+        Self {
+            id: 0,
             target_intermediate: [0.0; SECTORS],
             target_capital: [0.0; SECTORS],
+        }
+    }
+}
+
+impl Default for FirmRealised {
+    fn default() -> Self {
+        Self {
+            id: 0,
             realised_intermediate: [0.0; SECTORS],
             realised_capital: [0.0; SECTORS],
-            capital_to_install: [0.0; SECTORS],
         }
     }
 }

@@ -80,7 +80,10 @@ where
         .with_agent_template(
             AgentTemplate::builder("firm")
                 .with_component::<Firm>(ids.firm)?
-                .with_component::<FirmSectoral>(ids.firm_sectoral)?
+                .with_component::<FirmStocks>(ids.firm_stocks)?
+                .with_component::<FirmStockBaseline>(ids.firm_stock_baseline)?
+                .with_component::<FirmTargets>(ids.firm_targets)?
+                .with_component::<FirmRealised>(ids.firm_realised)?
                 .with_capacity(data.firms.len())
                 .build(),
         )?
@@ -135,7 +138,10 @@ where
 
     builder = builder
         .with_agent_population("firm", ids.firm, data.firms)?
-        .with_agent_population("firm", ids.firm_sectoral, data.firm_sectorals)?
+        .with_agent_population("firm", ids.firm_stocks, data.firm_stocks)?
+        .with_agent_population("firm", ids.firm_stock_baseline, data.firm_stock_baselines)?
+        .with_agent_population("firm", ids.firm_targets, data.firm_targets)?
+        .with_agent_population("firm", ids.firm_realised, data.firm_realised)?
         .with_agent_population("individual", ids.individual, data.individuals)?
         .with_agent_population("household", ids.household, data.households)?
         .with_agent_population("bank", ids.bank, data.banks)?
@@ -213,7 +219,10 @@ fn register_components(
             .map_err(|_| "component registry lock poisoned")?;
         MacroComponentIds {
             firm: reg.register::<Firm>()?,
-            firm_sectoral: reg.register::<FirmSectoral>()?,
+            firm_stocks: reg.register::<FirmStocks>()?,
+            firm_stock_baseline: reg.register::<FirmStockBaseline>()?,
+            firm_targets: reg.register::<FirmTargets>()?,
+            firm_realised: reg.register::<FirmRealised>()?,
             individual: reg.register::<Individual>()?,
             household: reg.register::<Household>()?,
             bank: reg.register::<Bank>()?,

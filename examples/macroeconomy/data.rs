@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use super::components::{
-    FirmSectoral,
+    FirmRealised, FirmStockBaseline, FirmStocks, FirmTargets,
     Bank, CentralBank, Firm, GovernmentAccount, GovernmentEntity, Household, Individual, Property,
     RestOfWorld, LABOUR_EMPLOYED, LABOUR_INACTIVE, LABOUR_UNEMPLOYED, NOT_LINKED, PROPERTY_FOR_RENT,
     PROPERTY_FOR_SALE, PROPERTY_OWNER_OCCUPIED, PROPERTY_RENTAL, SECTORS,
@@ -249,7 +249,10 @@ pub fn thesis_initialisation_recipe() -> Vec<InitialisationRecipeStep> {
 pub struct InitialData {
     pub environment: MacroEnvironment,
     pub firms: Vec<Firm>,
-    pub firm_sectorals: Vec<FirmSectoral>,
+    pub firm_stocks: Vec<FirmStocks>,
+    pub firm_stock_baselines: Vec<FirmStockBaseline>,
+    pub firm_targets: Vec<FirmTargets>,
+    pub firm_realised: Vec<FirmRealised>,
     pub individuals: Vec<Individual>,
     pub households: Vec<Household>,
     pub banks: Vec<Bank>,
@@ -561,7 +564,10 @@ pub fn synthetic_population(
     let account_template = GovernmentAccount::default();
     let production_tax = account_template.production_tax_by_sector[0];
     let mut firms = Vec::with_capacity(firm_count as usize);
-    let mut firm_sectorals = Vec::with_capacity(firm_count as usize);
+    let mut firm_stocks = Vec::with_capacity(firm_count as usize);
+    let mut firm_stock_baselines = Vec::with_capacity(firm_count as usize);
+    let mut firm_targets = Vec::with_capacity(firm_count as usize);
+    let mut firm_realised = Vec::with_capacity(firm_count as usize);
     for i in 0..firm_count as usize {
         let sector = firm_sector[i];
         let output = firm_output[i];
@@ -612,27 +618,34 @@ pub fn synthetic_population(
             ..Firm::default()
         };
         // A.55/A.56: enough of every input for 1/omega quarters of production.
-        let mut sectoral = FirmSectoral {
+        let mut stocks = FirmStocks {
             id: firm.id,
-            ..FirmSectoral::default()
+            ..FirmStocks::default()
+        };
+        let mut baseline = FirmStockBaseline {
+            id: firm.id,
+            ..FirmStockBaseline::default()
         };
         for s in 0..SECTORS {
-            sectoral.intermediate_stock[s] =
+            stocks.intermediate_stock[s] =
                 environment.params.io_matrix[sector][s] * output / OMEGA_INTERMEDIATE;
-            sectoral.initial_intermediate_stock[s] = sectoral.intermediate_stock[s];
-            sectoral.capital_stock[s] =
+            baseline.initial_intermediate_stock[s] = stocks.intermediate_stock[s];
+            stocks.capital_stock[s] =
                 environment.params.net_fixed_assets_matrix[sector][s] * output / OMEGA_CAPITAL;
-            sectoral.initial_capital_stock[s] = sectoral.capital_stock[s];
+            baseline.initial_capital_stock[s] = stocks.capital_stock[s];
         }
+        firm_targets.push(FirmTargets { id: firm.id, ..FirmTargets::default() });
+        firm_realised.push(FirmRealised { id: firm.id, ..FirmRealised::default() });
         firms.push(firm);
-        firm_sectorals.push(sectoral);
+        firm_stocks.push(stocks);
+        firm_stock_baselines.push(baseline);
     }
 
     // Debt apportioned by capital share and deposits by operating-surplus
     // share, exactly as Poledna C.1 does with national-accounts aggregates.
-    let capital_value: Vec<f64> = firm_sectorals
+    let capital_value: Vec<f64> = firm_stocks
         .iter()
-        .map(|sectoral| sectoral.capital_stock.iter().sum::<f64>())
+        .map(|stocks| stocks.capital_stock.iter().sum::<f64>())
         .collect();
     let total_capital: f64 = capital_value.iter().sum();
     let total_firm_debt = debt_to_capital * total_capital;
@@ -657,7 +670,7 @@ pub fn synthetic_population(
     let total_surplus: f64 = surplus.iter().sum();
     // One quarter of operating surplus held as working capital.
     let total_firm_deposits = total_surplus;
-    for (i, (firm, sectoral)) in firms.iter_mut().zip(firm_sectorals.iter()).enumerate() {
+    for (i, (firm, stocks)) in firms.iter_mut().zip(firm_stocks.iter()).enumerate() {
         let capital_share = if total_capital > 1e-12 {
             capital_value[i] / total_capital
         } else {
@@ -679,10 +692,10 @@ pub fn synthetic_population(
         // A.93 at P = 1.
         firm.equity = firm.deposits
             + firm.price * firm.inventory
-            + sectoral
+            + stocks
                 .intermediate_stock
                 .iter()
-                .chain(sectoral.capital_stock.iter())
+                .chain(stocks.capital_stock.iter())
                 .sum::<f64>()
             - (firm.short_debt + firm.long_debt);
     }
@@ -1137,7 +1150,10 @@ pub fn synthetic_population(
     InitialData {
         environment,
         firms,
-        firm_sectorals,
+        firm_stocks,
+        firm_stock_baselines,
+        firm_targets,
+        firm_realised,
         individuals,
         households,
         banks,

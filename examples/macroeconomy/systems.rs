@@ -52,7 +52,10 @@ struct BadDebt {
 #[derive(Clone, Copy, Debug)]
 pub struct MacroComponentIds {
     pub firm: ComponentID,
-    pub firm_sectoral: ComponentID,
+    pub firm_stocks: ComponentID,
+    pub firm_stock_baseline: ComponentID,
+    pub firm_targets: ComponentID,
+    pub firm_realised: ComponentID,
     pub individual: ComponentID,
     pub household: ComponentID,
     pub bank: ComponentID,
@@ -316,14 +319,14 @@ fn target_setting_system(
         // Eqs. A.59-A.68 and A.129-A.132: firm targets and individual supply/income targets.
         let mut state = macro_state(ecs, env_boundary)?;
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_sectorals = collect_rows_by(ecs, |row: &FirmSectoral| row.id)?;
+        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
         let accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
         let account = accounts.first().copied().unwrap_or_default();
         // `P_s(t-1)` for A.59's relative-price test.
         let sector_prices_previous = previous_sector_prices(&firms);
 
-        for (firm, sectoral) in firms.iter_mut().zip(firm_sectorals.iter_mut()) {
+        for (firm, stocks) in firms.iter_mut().zip(firm_stocks.iter_mut()) {
             let sector = firm.sector as usize;
             // A.59's case condition, which A.74 shares: apply the idiosyncratic
             // growth term only when the firm faced excess demand *and* priced
@@ -373,11 +376,11 @@ fn target_setting_system(
                 firm.profits,
             );
             let intermediate_constraint = min_input_constraint_a63_a64(
-                &sectoral.intermediate_stock,
+                &stocks.intermediate_stock,
                 &state.params.io_matrix[sector],
             );
             let capital_constraint = min_input_constraint_a63_a64(
-                &sectoral.capital_stock,
+                &stocks.capital_stock,
                 &state.params.net_fixed_assets_matrix[sector],
             );
             // A.128 fixes individual labour inputs at H_i = 1, and A.8.1 sets
@@ -503,7 +506,7 @@ fn target_setting_system(
         }
 
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_sectorals, |row: &FirmSectoral| row.id)?;
+        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
         state.push_phase("target_setting");
         set_phase_and_state(ecs, env_boundary, phases.targets_done, state)
@@ -531,7 +534,7 @@ fn labour_market_system(
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::LABOUR_MARKET);
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_sectorals = collect_rows_by(ecs, |row: &FirmSectoral| row.id)?;
+        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
 
         // A.141 fires from each firm's own payroll. Filtering the whole
@@ -628,14 +631,14 @@ fn labour_market_system(
         // just changed. Leaving `phi^WE` at the value computed in
         // `firm_individual_targets` let `H_f` drift above `min(M_f, K_f)` --
         // the `labour_over_materials` counter ran 4.2 to 16.3 in quarters 4-8.
-        for (firm, sectoral) in firms.iter_mut().zip(firm_sectorals.iter_mut()) {
+        for (firm, stocks) in firms.iter_mut().zip(firm_stocks.iter_mut()) {
             let sector = firm.sector as usize;
             let intermediate_constraint = min_input_constraint_a63_a64(
-                &sectoral.intermediate_stock,
+                &stocks.intermediate_stock,
                 &state.params.io_matrix[sector],
             );
             let capital_constraint = min_input_constraint_a63_a64(
-                &sectoral.capital_stock,
+                &stocks.capital_stock,
                 &state.params.net_fixed_assets_matrix[sector],
             );
             let labour_supply = firm.employees as f64;
@@ -665,7 +668,7 @@ fn labour_market_system(
         }
 
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_sectorals, |row: &FirmSectoral| row.id)?;
+        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
         state.audit.labour_fired_before_hiring = true;
         state.push_phase("labour_market");
@@ -704,7 +707,9 @@ fn planning_and_production_system(
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::PLANNING);
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_sectorals = collect_rows_by(ecs, |row: &FirmSectoral| row.id)?;
+        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
+        let mut firm_stock_baseline = collect_rows_by(ecs, |row: &FirmStockBaseline| row.id)?;
+        let mut firm_targets = collect_rows_by(ecs, |row: &FirmTargets| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
@@ -784,7 +789,12 @@ fn planning_and_production_system(
         state.audit.employed_headcount = firms.iter().map(|firm| u64::from(firm.employees)).sum();
 
         let _pl1 = PlTimer(1, std::time::Instant::now());
-        for (firm, sectoral) in firms.iter_mut().zip(firm_sectorals.iter_mut()) {
+        for (((firm, stocks), baseline), targets) in firms
+            .iter_mut()
+            .zip(firm_stocks.iter_mut())
+            .zip(firm_stock_baseline.iter())
+            .zip(firm_targets.iter_mut())
+        {
             let sector = firm.sector as usize;
             // A.72's labour argument is H_f(t) itself. `firm.labour` already
             // holds it: A.65 is applied in `firm_individual_targets`, and the
@@ -797,11 +807,11 @@ fn planning_and_production_system(
             // and compounded.)
             let labour_constraint = firm.labour.max(0.0);
             let intermediate_constraint = min_input_constraint_a63_a64(
-                &sectoral.intermediate_stock,
+                &stocks.intermediate_stock,
                 &state.params.io_matrix[sector],
             );
             let capital_constraint = min_input_constraint_a63_a64(
-                &sectoral.capital_stock,
+                &stocks.capital_stock,
                 &state.params.net_fixed_assets_matrix[sector],
             );
             firm.production = firm
@@ -868,21 +878,21 @@ fn planning_and_production_system(
                 });
             }
             for s in 0..SECTORS {
-                sectoral.target_intermediate[s] = target_intermediate_a78(
+                targets.target_intermediate[s] = target_intermediate_a78(
                     state.params.io_matrix[sector][s],
                     firm.target_production,
                     state.params.firm_input_adjustment,
-                    sectoral.intermediate_stock[s],
-                    sectoral.initial_intermediate_stock[s],
+                    stocks.intermediate_stock[s],
+                    baseline.initial_intermediate_stock[s],
                     firm.production,
                     firm.initial_production,
                 );
-                sectoral.target_capital[s] = target_capital_a79(
+                targets.target_capital[s] = target_capital_a79(
                     state.params.capital_compensation_matrix[sector][s],
                     firm.target_production,
                     state.params.firm_capital_adjustment,
-                    sectoral.capital_stock[s],
-                    sectoral.initial_capital_stock[s],
+                    stocks.capital_stock[s],
+                    baseline.initial_capital_stock[s],
                     firm.production,
                     firm.initial_production,
                 );
@@ -932,10 +942,10 @@ fn planning_and_production_system(
             // A.81/A.82: `[predicted deposits - cost of the inputs]^-`, valued
             // at `P_s'(t-1)`. `[x]^-` is a non-negative shortfall magnitude.
             let intermediate_cost = (0..SECTORS)
-                .map(|s| previous_sector_prices[s] * sectoral.target_intermediate[s])
+                .map(|s| previous_sector_prices[s] * targets.target_intermediate[s])
                 .sum::<f64>();
             let capital_cost = (0..SECTORS)
-                .map(|s| previous_sector_prices[s] * sectoral.target_capital[s])
+                .map(|s| previous_sector_prices[s] * targets.target_capital[s])
                 .sum::<f64>();
             firm.target_short_loan = negative_abs(predicted_deposits - intermediate_cost);
             firm.target_long_loan =
@@ -965,7 +975,7 @@ fn planning_and_production_system(
                         loan_class: LOAN_FIRM_LONG,
                         sector: firm.sector,
                         amount: firm.target_long_loan,
-                        collateral: sectoral.capital_stock.iter().sum(),
+                        collateral: stocks.capital_stock.iter().sum(),
                         income: firm.predicted_profits,
                     },
                 )?;
@@ -1233,7 +1243,9 @@ fn planning_and_production_system(
         }
 
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_sectorals, |row: &FirmSectoral| row.id)?;
+        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
+        write_rows(ecs, firm_stock_baseline, |row: &FirmStockBaseline| row.id)?;
+        write_rows(ecs, firm_targets, |row: &FirmTargets| row.id)?;
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, governments, |government: &GovernmentEntity| {
@@ -1565,7 +1577,8 @@ fn credit_market_system(
         let mut rng = state.rng(ecs.run_context(), rng_salt::CREDIT_MARKET);
         let mut banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_sectorals = collect_rows_by(ecs, |row: &FirmSectoral| row.id)?;
+        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
+        let mut firm_targets = collect_rows_by(ecs, |row: &FirmTargets| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
         let policy_rate = central_banks
@@ -1697,7 +1710,7 @@ fn credit_market_system(
                     let allowed = borrower_credit_cap(
                         &state,
                         &firms,
-                        &firm_sectorals,
+                        &firm_stocks,
                         &households,
                         &firm_index,
                         &household_index_for_caps,
@@ -1710,10 +1723,10 @@ fn credit_market_system(
                         // can be attributed to one or the other.
                         if let Some(position) = firm_index.get(app.borrower_id) {
                             let firm = &firms[position];
-                            let sectoral = &firm_sectorals[position];
+                            let stocks = &firm_stocks[position];
                             let sp = sector_prices_for_caps;
                             let cv: f64 = (0..SECTORS)
-                                .map(|s| sp[s] * sectoral.capital_stock[s])
+                                .map(|s| sp[s] * stocks.capital_stock[s])
                                 .sum();
                             let dbt = firm.short_debt + firm.long_debt + firm.overdraft;
                             let od = negative_abs(firm.deposits);
@@ -1832,26 +1845,26 @@ fn credit_market_system(
         }
 
         let previous_sector_prices = previous_sector_prices(&firms);
-        for (firm, sectoral) in firms.iter_mut().zip(firm_sectorals.iter_mut()) {
+        for (firm, targets) in firms.iter_mut().zip(firm_targets.iter_mut()) {
             for s in 0..SECTORS {
                 let previous_sector_price = previous_sector_prices[s];
-                sectoral.target_intermediate[s] = constrained_goods_target_a83_a84(
-                    sectoral.target_intermediate[s],
+                targets.target_intermediate[s] = constrained_goods_target_a83_a84(
+                    targets.target_intermediate[s],
                     state.params.firm_credit_shortfall_intermediate_sensitivity,
                     firm.target_short_loan,
                     firm.granted_short_loan,
                     state.forecast.predicted_ppi_inflation,
                     previous_sector_price,
                 );
-                sectoral.target_capital[s] = constrained_goods_target_a83_a84(
-                    sectoral.target_capital[s],
+                targets.target_capital[s] = constrained_goods_target_a83_a84(
+                    targets.target_capital[s],
                     state.params.firm_credit_shortfall_capital_sensitivity,
                     firm.target_long_loan,
                     firm.granted_long_loan,
                     state.forecast.predicted_ppi_inflation,
                     previous_sector_price,
                 );
-                if sectoral.target_intermediate[s] > 0.0 {
+                if targets.target_intermediate[s] > 0.0 {
                     buffers.emit(
                         messages.goods_demand,
                         GoodsDemand {
@@ -1859,12 +1872,12 @@ fn credit_market_system(
                             buyer_id: firm.id,
                             purpose: GOODS_INTERMEDIATE,
                             sector: s as u8,
-                            quantity: sectoral.target_intermediate[s],
+                            quantity: targets.target_intermediate[s],
                             max_spend: firm.deposits.max(0.0),
                         },
                     )?;
                 }
-                if sectoral.target_capital[s] > 0.0 {
+                if targets.target_capital[s] > 0.0 {
                     buffers.emit(
                         messages.goods_demand,
                         GoodsDemand {
@@ -1872,7 +1885,7 @@ fn credit_market_system(
                             buyer_id: firm.id,
                             purpose: GOODS_CAPITAL,
                             sector: s as u8,
-                            quantity: sectoral.target_capital[s],
+                            quantity: targets.target_capital[s],
                             max_spend: firm.deposits.max(0.0),
                         },
                     )?;
@@ -1913,7 +1926,8 @@ fn credit_market_system(
 
         write_rows(ecs, banks, |bank: &Bank| bank.id)?;
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_sectorals, |row: &FirmSectoral| row.id)?;
+        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
+        write_rows(ecs, firm_targets, |row: &FirmTargets| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
         state.push_phase("credit_market");
         set_phase_and_state(ecs, env_boundary, phases.credit_done, state)
@@ -2077,7 +2091,7 @@ fn goods_market_system(
         let demands = order_demands_firms_first(raw_demands, &mut rng);
         PROF_GM_NS[4].fetch_add(_gm_order.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_sectorals = collect_rows_by(ecs, |row: &FirmSectoral| row.id)?;
+        let mut firm_realised = collect_rows_by(ecs, |row: &FirmRealised| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
         let mut rows = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
@@ -2271,7 +2285,7 @@ let members = sector_members
                 }
                 apply_buyer_goods(
                     &mut firms,
-                    &mut firm_sectorals,
+                    &mut firm_realised,
                     &mut households,
                     &mut governments,
                     &mut rows,
@@ -2326,7 +2340,7 @@ let members = sector_members
         }
 
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_sectorals, |row: &FirmSectoral| row.id)?;
+        write_rows(ecs, firm_realised, |row: &FirmRealised| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, governments, |government: &GovernmentEntity| {
             government.id
@@ -2382,7 +2396,9 @@ fn realised_accounting_system(
         // value that was immediately dropped.
         let mut state = macro_state(ecs, env_boundary)?;
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_sectorals = collect_rows_by(ecs, |row: &FirmSectoral| row.id)?;
+        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
+        let mut firm_stock_baseline = collect_rows_by(ecs, |row: &FirmStockBaseline| row.id)?;
+        let mut firm_realised = collect_rows_by(ecs, |row: &FirmRealised| row.id)?;
         let individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
@@ -2449,7 +2465,12 @@ fn realised_accounting_system(
         let previous_prices = previous_sector_prices(&firms);
 
         let _acc1 = AccTimer(1, std::time::Instant::now());
-        for (firm, sectoral) in firms.iter_mut().zip(firm_sectorals.iter_mut()) {
+        for (((firm, stocks), baseline), realised) in firms
+            .iter_mut()
+            .zip(firm_stocks.iter_mut())
+            .zip(firm_stock_baseline.iter_mut())
+            .zip(firm_realised.iter_mut())
+        {
             let sector = firm.sector as usize;
             let previous_inventory = firm.inventory;
             let previous_production = firm.production;
@@ -2459,12 +2480,12 @@ fn realised_accounting_system(
                 // `m_{s's} * Y_f(t)`, not by what the firm sold. Using
                 // `sales_quantity` decouples input usage from output and lets
                 // stocks drift arbitrarily against production.
-                sectoral.intermediate_stock[s] = positive_part(
-                    sectoral.intermediate_stock[s]
+                stocks.intermediate_stock[s] = positive_part(
+                    stocks.intermediate_stock[s]
                         - state.params.io_matrix[sector][s] * firm.production
-                        + sectoral.realised_intermediate[s],
+                        + realised.realised_intermediate[s],
                 );
-                let installed_capital = sectoral.capital_to_install[s];
+                let installed_capital = baseline.capital_to_install[s];
                 // A.87: K_fs'(t) = [K_fs'(t-1) - d_{s's} Y_f(t) + K~(t-T^KD)]^+
                 //
                 // Capital is consumed in proportion to *production*, through
@@ -2472,14 +2493,14 @@ fn realised_accounting_system(
                 // stock. The stock-proportional form is a different model: it
                 // decays capital a firm is not using and leaves a producing
                 // firm's capital untouched by how hard it produces.
-                sectoral.capital_stock[s] = positive_part(
-                    sectoral.capital_stock[s]
+                stocks.capital_stock[s] = positive_part(
+                    stocks.capital_stock[s]
                         - state.params.capital_compensation_matrix[sector][s] * firm.production
                         + installed_capital,
                 );
-                sectoral.capital_to_install[s] = sectoral.realised_capital[s];
-                sectoral.realised_intermediate[s] = 0.0;
-                sectoral.realised_capital[s] = 0.0;
+                baseline.capital_to_install[s] = realised.realised_capital[s];
+                realised.realised_intermediate[s] = 0.0;
+                realised.realised_capital[s] = 0.0;
             }
             // A.88: Q_f(t) = Q~_f(t) + Y~^E_f(t) -- units sold plus *this
             // firm's* share of what buyers could not source. The `ExcessDemand`
@@ -2567,7 +2588,7 @@ fn realised_accounting_system(
             // stock. It previously counted inventory and capital as bare
             // quantities and omitted M entirely.
             let stock_value: f64 = (0..SECTORS)
-                .map(|s| previous_prices[s] * (sectoral.intermediate_stock[s] + sectoral.capital_stock[s]))
+                .map(|s| previous_prices[s] * (stocks.intermediate_stock[s] + stocks.capital_stock[s]))
                 .sum();
             firm.equity = firm.deposits + firm.price * firm.inventory + stock_value
                 - firm.short_debt
@@ -2983,7 +3004,7 @@ fn realised_accounting_system(
             firms.iter().map(|f| firm_wage_bill(f)).sum::<f64>() / employed_now;
         state.audit.firm_trace.clear();
         if state.policy.trace {
-            for (firm, sectoral) in firms.iter().zip(firm_sectorals.iter()) {
+            for (firm, stocks) in firms.iter().zip(firm_stocks.iter()) {
                 state.audit.firm_trace.push(FirmProbe {
                     id: firm.id,
                     employees: firm.employees,
@@ -2991,11 +3012,11 @@ fn realised_accounting_system(
                     initial_work_effort: firm.initial_work_effort,
                     labour: firm.labour,
                     intermediate_constraint: min_input_constraint_a63_a64(
-                        &sectoral.intermediate_stock,
+                        &stocks.intermediate_stock,
                         &state.params.io_matrix[firm.sector as usize],
                     ),
                     capital_constraint: min_input_constraint_a63_a64(
-                        &sectoral.capital_stock,
+                        &stocks.capital_stock,
                         &state.params.net_fixed_assets_matrix[firm.sector as usize],
                     ),
                     target_production: firm.target_production,
@@ -3156,7 +3177,9 @@ fn realised_accounting_system(
         state.quarter += 1;
 
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_sectorals, |row: &FirmSectoral| row.id)?;
+        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
+        write_rows(ecs, firm_stock_baseline, |row: &FirmStockBaseline| row.id)?;
+        write_rows(ecs, firm_realised, |row: &FirmRealised| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, banks, |bank: &Bank| bank.id)?;
         write_rows(ecs, accounts, |account: &GovernmentAccount| account.id)?;
@@ -4183,7 +4206,7 @@ fn bank_class_credit_supply(
 fn borrower_credit_cap(
     state: &MacroEnvironment,
     firms: &[Firm],
-    firm_sectorals: &[FirmSectoral],
+    firm_stocks: &[FirmStocks],
     households: &[Household],
     firm_index: &RowIndex,
     household_index: &RowIndex,
@@ -4194,14 +4217,14 @@ fn borrower_credit_cap(
     match app.loan_class {
         LOAN_FIRM_SHORT | LOAN_FIRM_LONG => firm_index
             .get(app.borrower_id)
-            .map(|position| (&firms[position], &firm_sectorals[position]))
-            .map(|(firm, sectoral)| {
+            .map(|position| (&firms[position], &firm_stocks[position]))
+            .map(|(firm, stocks)| {
                 // `sum_s P_s(t) K_fs(t)` -- the *value* of the capital stock.
                 // Summing the bare quantities understated it by the whole price
                 // level, and at the corrected `k_{s's}` magnitudes that is the
                 // difference between a firm being bankable and not.
                 let capital_value: f64 = (0..SECTORS)
-                    .map(|s| sector_prices[s] * sectoral.capital_stock[s])
+                    .map(|s| sector_prices[s] * stocks.capital_stock[s])
                     .sum();
                 let debt = firm.short_debt + firm.long_debt + firm.overdraft;
                 let overdraft = negative_abs(firm.deposits);
@@ -4376,7 +4399,7 @@ fn apply_loan(
 
 fn apply_buyer_goods(
     firms: &mut [Firm],
-    firm_sectorals: &mut [FirmSectoral],
+    firm_realised: &mut [FirmRealised],
     households: &mut [Household],
     governments: &mut [GovernmentEntity],
     rows: &mut [RestOfWorld],
@@ -4393,12 +4416,12 @@ fn apply_buyer_goods(
         BUYER_FIRM => {
             // Resolved by the caller's index. This ran once per transaction and
             // scanned every firm in the economy.
-            if let Some(sectoral) =
-                buyer_firm_idx.and_then(|idx| firm_sectorals.get_mut(idx))
+            if let Some(realised) =
+                buyer_firm_idx.and_then(|idx| firm_realised.get_mut(idx))
             {
                 match demand.purpose {
-                    GOODS_CAPITAL => sectoral.realised_capital[demand.sector as usize] += quantity,
-                    _ => sectoral.realised_intermediate[demand.sector as usize] += quantity,
+                    GOODS_CAPITAL => realised.realised_capital[demand.sector as usize] += quantity,
+                    _ => realised.realised_intermediate[demand.sector as usize] += quantity,
                 }
             }
         }
