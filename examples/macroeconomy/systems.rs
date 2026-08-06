@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use abm_framework::environment::{EnvKey, EnvironmentBoundary};
 use abm_framework::messaging::{Capacity, MessageBufferSet, MessageHandle};
 use abm_framework::model::ModelBuilder;
+use abm_framework::advanced::WorkerStage;
 use abm_framework::{AccessSets, ComponentID, ECSReference, ECSResult, FnSystem, Read, Write};
 
 use super::accounting::{negative_abs, positive_part, AccountingReport, GdpIdentity};
@@ -1547,6 +1548,11 @@ fn credit_market_system(
         state.audit.cap_dte_zero = 0;
         state.audit.cap_roe_zero = 0;
         state.audit.credit_visits_ordered_by_rate = true;
+        // Built once for the whole clearing pass. The A.36 arrival order is
+        // randomised per loan class, so the loop cannot be restructured to walk
+        // agents instead of applications; the lookup has to be indexed.
+        let firm_index = RowIndex::build(&firms, |firm| firm.id);
+        let household_index = RowIndex::build(&households, |household| household.id);
         for loan_class in [
             LOAN_FIRM_SHORT,
             LOAN_FIRM_LONG,
@@ -1567,7 +1573,7 @@ fn credit_market_system(
                 // so a screen that no firm can clear starves the whole economy
                 // of working capital without appearing anywhere in the CSV.
                 if app.borrower_kind == BUYER_FIRM {
-                    if let Some(firm) = firms.iter().find(|firm| firm.id == app.borrower_id) {
+                    if let Some(firm) = firm_index.get(app.borrower_id).map(|i| &firms[i]) {
                         let assets =
                             firm.short_debt + firm.long_debt + firm.overdraft + firm.equity;
                         let roa = ratio(firm.predicted_profits, assets);
@@ -1580,7 +1586,7 @@ fn credit_market_system(
                     }
                 }
                 if app.loan_class == LOAN_MORTGAGE {
-                    if let Some(h) = households.iter().find(|h| h.id == app.borrower_id) {
+                    if let Some(h) = household_index.get(app.borrower_id).map(|i| &households[i]) {
                         let (ltv, lti, dsti) = mortgage_caps(h, &state.params, 0.0);
                         let cap = ltv.min(lti).min(dsti).max(0.0);
                         state.audit.mortgage_cap_sum += cap;
@@ -1620,7 +1626,7 @@ fn credit_market_system(
                     if app.borrower_kind == BUYER_FIRM {
                         // Recompute A.25 and A.26 separately so a zero joint cap
                         // can be attributed to one or the other.
-                        if let Some(firm) = firms.iter().find(|f| f.id == app.borrower_id) {
+                        if let Some(firm) = firm_index.get(app.borrower_id).map(|i| &firms[i]) {
                             let sp = previous_sector_prices(&firms);
                             let cv: f64 = (0..SECTORS)
                                 .map(|s| sp[s] * firm.capital_stock[s])
@@ -1864,6 +1870,8 @@ fn housing_completion_system(
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut properties = collect_rows_by(ecs, |row: &Property| row.id)?;
 
+        let property_index = RowIndex::build(&properties, |property| property.id);
+        let household_index = RowIndex::build(&households, |household| household.id);
         for purchase in purchases {
             let has_mortgage = purchase.mortgage_required <= 1e-9
                 || grants.iter().any(|grant| {
@@ -1872,7 +1880,7 @@ fn housing_completion_system(
                         && grant.loan_class == LOAN_MORTGAGE
                         && grant.amount + 1e-9 >= purchase.mortgage_required
                 });
-            let Some(property_idx) = properties.iter().position(|p| p.id == purchase.property_id)
+            let Some(property_idx) = property_index.get(purchase.property_id)
             else {
                 continue;
             };
@@ -1881,12 +1889,8 @@ fn housing_completion_system(
                 state.audit.mortgage_blocked_purchases += 1;
                 continue;
             }
-            let buyer_idx = households
-                .iter()
-                .position(|h| h.id == purchase.household_id);
-            let seller_idx = households
-                .iter()
-                .position(|h| h.id == purchase.seller_household_id);
+            let buyer_idx = household_index.get(purchase.household_id);
+            let seller_idx = household_index.get(purchase.seller_household_id);
             if let Some(idx) = buyer_idx {
                 let mut remaining_payment = purchase.price;
                 let deposit_payment = households[idx].deposits.min(remaining_payment);
@@ -1920,11 +1924,11 @@ fn housing_completion_system(
         }
 
         for rental in rentals {
-            let Some(property_idx) = properties.iter().position(|p| p.id == rental.property_id)
+            let Some(property_idx) = property_index.get(rental.property_id)
             else {
                 continue;
             };
-            if let Some(idx) = households.iter().position(|h| h.id == rental.household_id) {
+            if let Some(idx) = household_index.get(rental.household_id) {
                 households[idx].residence_property_id = rental.property_id;
                 households[idx].owns_residence = false;
                 households[idx].deposits -= rental.annual_rent / 4.0;
@@ -2960,6 +2964,38 @@ fn realised_accounting_system(
     })
 }
 
+/// Dense id-to-position index over a collected row set.
+///
+/// Market clearing walks messages and needs the *borrower* or *property* they
+/// name -- the inverse of a message lookup, so message specialisation does not
+/// help. Written as `rows.iter().find(..)` inside the message loop it is
+/// O(messages x agents): ~6e9 comparisons a tick at 78,000 firms.
+///
+/// Model ids are dense, so this is a `Vec` rather than a map: no hashing, and
+/// contiguous. Ids beyond the row count return `None`, matching what the scan
+/// did when it found nothing.
+struct RowIndex {
+    positions: Vec<u32>,
+}
+
+impl RowIndex {
+    fn build<T>(rows: &[T], id: impl Fn(&T) -> u32) -> Self {
+        let capacity = rows.iter().map(|row| id(row) as usize + 1).max().unwrap_or(0);
+        let mut positions = vec![u32::MAX; capacity];
+        for (position, row) in rows.iter().enumerate() {
+            positions[id(row) as usize] = position as u32;
+        }
+        Self { positions }
+    }
+
+    fn get(&self, id: u32) -> Option<usize> {
+        match self.positions.get(id as usize) {
+            Some(&position) if position != u32::MAX => Some(position as usize),
+            _ => None,
+        }
+    }
+}
+
 /// Materialises one component type into a `Vec` for systems that need a global
 /// view (market clearing, which the paper specifies as a randomised sequence
 /// over all participants, cannot be expressed as per-row iteration).
@@ -2974,25 +3010,32 @@ fn realised_accounting_system(
 ///   of the message drain order, and it silently invalidated any code that
 ///   assumed `rows[i].id == i`.
 ///
-/// Rows are sorted by model id after collection, so the order is identical on
-/// every run regardless of which worker pushed first.
+/// Rows are staged per worker and concatenated in `worker_id` order, then
+/// sorted by model id.
 ///
-/// The push still goes through one mutex. Making it lock-free needs
-/// `engine::workers::worker_id`, which the framework does not export publicly;
-/// `WorkerStage` already exists for exactly this and wants the same export.
-/// Tracked as framework work rather than bodged here.
+/// Both properties are load-bearing. The lock-free staging keeps the ECS's
+/// chunk-disjoint parallelism, which an `Arc<Mutex<Vec<T>>>` push discarded at
+/// the first line of every system. The id ordering makes runs reproducible at
+/// any thread count: work stealing decides which worker sees which rows, so
+/// neither the per-worker split nor the concatenation is stable on its own.
+///
+/// This is the pattern `abm_framework::space` uses after its counting sort,
+/// for the same reason.
 fn collect_rows_by<T, F>(ecs: ECSReference<'_>, id: F) -> ECSResult<Vec<T>>
 where
     T: Copy + Send + Sync + 'static,
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
-    let rows = Arc::new(Mutex::new(Vec::new()));
-    let rows_for_query = Arc::clone(&rows);
+    let stage: WorkerStage<T> = WorkerStage::new();
     let q = ecs.query()?.read::<T>()?.build()?;
-    ecs.for_each::<(Read<T>,), _>(q, move |row| {
-        rows_for_query.lock().unwrap().push(*row.0);
+    // `push` takes `&self` and writes only the calling worker's slot, so a
+    // shared borrow is enough and no lock is taken on the hot path.
+    ecs.for_each::<(Read<T>,), _>(q, |row| {
+        stage.push(*row.0);
     })?;
-    let mut out = rows.lock().unwrap().clone();
+    let mut stage = stage;
+    let mut out = Vec::new();
+    stage.drain_into(&mut out);
     out.sort_unstable_by_key(id);
     Ok(out)
 }
@@ -3500,9 +3543,11 @@ fn update_government_accounts(
 
 #[derive(Clone, Debug, Default)]
 struct LoanSettlementSummary {
-    bank_interest: Vec<(u32, f64)>,
-    firm_interest: Vec<(u32, f64)>,
-    household_interest: Vec<(u32, f64)>,
+    // Indexed by agent id, not an association list. `add_amount` ran a linear
+    // find per settled loan, which is O(loans x agents) across a tick.
+    bank_interest: Vec<f64>,
+    firm_interest: Vec<f64>,
+    household_interest: Vec<f64>,
 }
 
 impl LoanSettlementSummary {
@@ -3613,23 +3658,19 @@ fn settle_loan_book(
     settlement
 }
 
-fn add_amount(items: &mut Vec<(u32, f64)>, id: u32, amount: f64) {
+fn add_amount(items: &mut Vec<f64>, id: u32, amount: f64) {
     if amount == 0.0 {
         return;
     }
-    if let Some((_, value)) = items.iter_mut().find(|(item_id, _)| *item_id == id) {
-        *value += amount;
-    } else {
-        items.push((id, amount));
+    let slot = id as usize;
+    if items.len() <= slot {
+        items.resize(slot + 1, 0.0);
     }
+    items[slot] += amount;
 }
 
-fn lookup_amount(items: &[(u32, f64)], id: u32) -> f64 {
-    items
-        .iter()
-        .find(|(item_id, _)| *item_id == id)
-        .map(|(_, value)| *value)
-        .unwrap_or_default()
+fn lookup_amount(items: &[f64], id: u32) -> f64 {
+    items.get(id as usize).copied().unwrap_or_default()
 }
 
 fn offered_rate(bank: &Bank, loan_class: u8) -> f64 {

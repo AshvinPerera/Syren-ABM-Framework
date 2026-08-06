@@ -31,7 +31,7 @@ pub mod storage;
 pub mod systems;
 pub mod types;
 pub mod workers;
-pub(crate) mod worker_stage;
+pub mod worker_stage;
 
 #[cfg(feature = "gpu")]
 pub mod dirty;

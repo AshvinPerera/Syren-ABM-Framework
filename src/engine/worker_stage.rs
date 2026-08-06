@@ -25,7 +25,7 @@ use std::sync::Mutex;
 use crate::engine::workers::{max_workers, worker_id};
 
 /// Lock-free per-worker staging for values produced inside parallel stages.
-pub(crate) struct WorkerStage<T> {
+pub struct WorkerStage<T> {
     /// One slot per Rayon pool worker, indexed by `worker_id()`.
     slots: Vec<UnsafeCell<Vec<T>>>,
     /// Fallback for foreign-thread worker ids (sparse, near `u32::MAX`).
@@ -45,7 +45,7 @@ unsafe impl<T: Send> Sync for WorkerStage<T> {}
 
 impl<T: Send> WorkerStage<T> {
     /// Creates a stage sized for the current Rayon pool.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let workers = max_workers() as usize;
         Self {
             slots: (0..workers).map(|_| UnsafeCell::new(Vec::new())).collect(),
@@ -55,7 +55,7 @@ impl<T: Send> WorkerStage<T> {
 
     /// Appends `value` to the calling worker's slot (Phase A).
     #[inline]
-    pub(crate) fn push(&self, value: T) {
+    pub fn push(&self, value: T) {
         let id = worker_id() as usize;
         if let Some(slot) = self.slots.get(id) {
             // SAFETY: this slot belongs exclusively to the calling worker
@@ -70,7 +70,7 @@ impl<T: Send> WorkerStage<T> {
     }
 
     /// Moves every staged item into `out`, slot order then overflow (Phase B).
-    pub(crate) fn drain_into(&mut self, out: &mut Vec<T>) {
+    pub fn drain_into(&mut self, out: &mut Vec<T>) {
         for slot in &mut self.slots {
             out.append(slot.get_mut());
         }
@@ -80,7 +80,7 @@ impl<T: Send> WorkerStage<T> {
     }
 
     /// Discards every staged item without deallocating slot capacity.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         for slot in &mut self.slots {
             slot.get_mut().clear();
         }

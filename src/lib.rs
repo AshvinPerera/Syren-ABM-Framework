@@ -119,6 +119,8 @@ pub mod advanced {
     pub use crate::engine::entity::EntityShards;
     pub use crate::engine::manager::ECSData;
     pub use crate::engine::storage::{cast_slice, cast_slice_mut, Attribute, TypeErasedAttribute};
+    pub use crate::engine::worker_stage::WorkerStage;
+    pub use crate::engine::workers::{max_workers, worker_id};
 }
 
 #[cfg(feature = "agents")]
