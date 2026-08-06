@@ -146,11 +146,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if tracing {
-        std::fs::write("trace_aggregates.csv", agg_rows.join("
+        let dir = config
+            .trace_dir
+            .clone()
+            .ok_or("--trace requires an output directory")?;
+        std::fs::create_dir_all(&dir)?;
+        let aggregates = dir.join("trace_aggregates.csv");
+        let firms = dir.join("trace_firms.csv");
+        std::fs::write(&aggregates, agg_rows.join("
 "))?;
-        std::fs::write("trace_firms.csv", firm_rows.join("
+        std::fs::write(&firms, firm_rows.join("
 "))?;
-        eprintln!("wrote trace_aggregates.csv and trace_firms.csv");
+        eprintln!("wrote {} and {}", aggregates.display(), firms.display());
     }
     let state = macro_state(&example.model)?;
     if config.profile_path.is_some() {
@@ -238,6 +245,8 @@ fn parse_args(
                 ));
             }
             "--trace" => {
+                let dir = args.next().ok_or("--trace requires an output directory")?;
+                config.trace_dir = Some(PathBuf::from(dir));
                 config.policy.trace = true;
             }
             "--debug-firm" => {
@@ -246,7 +255,7 @@ fn parse_args(
             }
             "-h" | "--help" => {
                 println!(
-                    "Usage: cargo run --release --features \"model messaging\" --example macroeconomy -- --fixture tiny --ticks 8 --seed 42 [--config path] [--debug-firm id]"
+                    "Usage: cargo run --release --features \"model messaging\" --example macroeconomy -- --fixture tiny --ticks 8 --seed 42 [--config path] [--scenario name] [--firms-per-sector n] [--trace out-dir] [--profile out.json] [--debug-firm id]"
                 );
                 std::process::exit(0);
             }

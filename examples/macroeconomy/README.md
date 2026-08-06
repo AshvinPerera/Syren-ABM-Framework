@@ -106,7 +106,7 @@ cargo run --release --features "model messaging" --example macroeconomy -- --fix
 | `--firms-per-sector N` | Population scale. 33 ≈ Austria at the 1:1000 factor. |
 | `--ticks N`, `--seed N` | Quarters to run; model seed. |
 | `--config <path> --scenario <name>` | Apply a block from `config.yaml`. |
-| `--trace` | Write `trace_aggregates.csv` and `trace_firms.csv`. |
+| `--trace <dir>` | Write `trace_aggregates.csv` and `trace_firms.csv` into `<dir>`, which is created if needed. |
 | `--profile <path>` | Write a Chrome Trace profile. Needs `--features profiling`. |
 | `--debug-firm <id>` | Per-quarter dump of one firm's internals. |
 | `--data-dir <path> --country <code> --initialisation <yyyy-Qn>` | Real-data mode. |

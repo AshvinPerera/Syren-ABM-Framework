@@ -5,7 +5,3 @@
 .vs/
 .idea/
 .vscode/
-
-# macroeconomy example --trace output
-/trace_aggregates.csv
-/trace_firms.csv

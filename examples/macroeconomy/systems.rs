@@ -2174,6 +2174,10 @@ fn goods_market_system(
         // Real supply and demand offered to the market this quarter. See
         // `MarketAudit::goods_demand_quantity`.
         state.audit.goods_demand_quantity = demands.iter().map(|d| d.quantity).sum();
+        // Per-tick, like the two quantities either side of it. The clearing
+        // loop below accumulates into this field, so it has to start at zero
+        // each quarter or it reads as a running total against per-tick levels.
+        state.audit.goods_excess_demand = 0.0;
         // A.60 feeds Q_f(t-1) forward multiplicatively, so a t=1 shortfall of
         // realised demand against production never washes out. Attribute the
         // demand side by buyer and purpose to locate any missing component.

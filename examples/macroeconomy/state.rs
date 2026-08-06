@@ -38,6 +38,10 @@ pub struct MacroeconomyConfig {
     pub scenario: Option<String>,
     /// Where to write a Chrome Trace profile, if `--profile` was given.
     pub profile_path: Option<PathBuf>,
+    /// Directory for the `--trace` CSVs. The example never writes them to the
+    /// working directory: a diagnostic dump should not land in whatever
+    /// repository the run happened to start from.
+    pub trace_dir: Option<PathBuf>,
     pub policy: ModelPolicy,
     /// Firms per sector. The paper runs Austria at 1:1000, giving ~600 firms
     /// over 18 sectors -- about 33 each. The default of 1 is a test fixture.
@@ -56,6 +60,7 @@ impl Default for MacroeconomyConfig {
             config_path: None,
             scenario: None,
             profile_path: None,
+            trace_dir: None,
             policy: ModelPolicy::default(),
             firms_per_sector: 1,
         }
@@ -599,6 +604,8 @@ pub struct MarketAudit {
     pub credit_visits_ordered_by_rate: bool,
     pub mortgage_blocked_purchases: u32,
     pub lower_price_seller_priority_seen: bool,
+    /// Quantity of demand left unserved after clearing, summed over the
+    /// buyers of **this quarter**. Reset by the goods market each tick.
     pub goods_excess_demand: f64,
     pub last_expectation_fit_observations: usize,
     pub phase_log: Vec<String>,
