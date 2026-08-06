@@ -1365,6 +1365,10 @@ fn housing_preclear_system(
         rng.shuffle(&mut household_order);
         let mut buyers = Vec::new();
         let mut renters = Vec::new();
+        // Each mover resolves its own residence; scanning every property per
+        // household is O(households x properties).
+        let property_positions = RowIndex::build(&properties, |property| property.id);
+
         for household_idx in household_order {
             let household = &mut households[household_idx];
             let needs_home = household.residence_property_id == NOT_LINKED;
@@ -1378,9 +1382,9 @@ fn housing_preclear_system(
                 continue;
             }
             if household.owns_residence && household.residence_property_id != NOT_LINKED {
-                if let Some(property) = properties
-                    .iter_mut()
-                    .find(|property| property.id == household.residence_property_id)
+                if let Some(property) = property_positions
+                    .get(household.residence_property_id)
+                    .map(|position| &mut properties[position])
                 {
                     property.price =
                         (1.0 + state.forecast.predicted_hpi_inflation) * property.value;
