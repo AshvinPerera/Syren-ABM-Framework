@@ -6,7 +6,7 @@ typed environments, typed per-tick messaging, and an optional `wgpu` compute
 backend.
 
 The crate is maintained with a documented public API, feature-gated subsystems,
-correctness-oriented integration tests, and explicit release validation gates.
+and correctness-oriented integration tests.
 
 ## Status
 
