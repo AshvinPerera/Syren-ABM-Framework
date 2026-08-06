@@ -154,6 +154,67 @@ impl Default for FirmRealised {
     }
 }
 
+/// `T^RW`'s window of past wages, used to set a reservation wage.
+///
+/// Kept out of [`Individual`] because the labour market -- the system that
+/// iterates individuals most -- never reads it, and it is 64 of the 120 bytes
+/// a combined struct would occupy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndividualWageHistory {
+    /// Mirrors [`Individual::id`] so the columns can be joined.
+    pub id: u32,
+    pub wage_history: [f64; 8],
+}
+
+impl Default for IndividualWageHistory {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            wage_history: [0.0; 8],
+        }
+    }
+}
+
+/// A household's sectoral demand: `C_hat_{hs}` from A.105 and `K_hat_{hs}` from
+/// A.106.
+///
+/// The housing and goods markets read neither, so they are held apart from the
+/// scalars those systems do read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HouseholdDemand {
+    pub id: u32,
+    pub consumption_target: [f64; SECTORS],
+    pub investment_target: [f64; SECTORS],
+}
+
+impl Default for HouseholdDemand {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            consumption_target: [0.0; SECTORS],
+            investment_target: [0.0; SECTORS],
+        }
+    }
+}
+
+/// The windows A.105 smooths consumption over and A.28/A.30 assess income on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HouseholdHistory {
+    pub id: u32,
+    pub consumption_history: [f64; 12],
+    pub income_history: [f64; 2],
+}
+
+impl Default for HouseholdHistory {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            consumption_history: [0.0; 12],
+            income_history: [0.0; 2],
+        }
+    }
+}
+
 impl Default for Firm {
     fn default() -> Self {
         Self {
@@ -216,7 +277,6 @@ pub struct Individual {
     pub labour_input: f64,
     pub predicted_income: f64,
     pub income: f64,
-    pub wage_history: [f64; 8],
 }
 
 impl Default for Individual {
@@ -232,7 +292,6 @@ impl Default for Individual {
             labour_input: 1.0,
             predicted_income: 0.0,
             income: 0.0,
-            wage_history: [0.0; 8],
         }
     }
 }
@@ -246,11 +305,7 @@ pub struct Household {
     pub desired_property_id: u32,
     pub income: f64,
     pub previous_income: f64,
-    pub income_history: [f64; 2],
     pub predicted_income: f64,
-    pub consumption_target: [f64; SECTORS],
-    pub investment_target: [f64; SECTORS],
-    pub consumption_history: [f64; 12],
     pub saving_rate: f64,
     pub investment_rate: f64,
     pub deposits: f64,
@@ -285,11 +340,7 @@ impl Default for Household {
             desired_property_id: NOT_LINKED,
             income: 0.0,
             previous_income: 0.0,
-            income_history: [0.0; 2],
             predicted_income: 0.0,
-            consumption_target: [0.0; SECTORS],
-            investment_target: [0.0; SECTORS],
-            consumption_history: [0.0; 12],
             saving_rate: 0.1,
             investment_rate: 0.05,
             deposits: 0.0,

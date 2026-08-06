@@ -57,7 +57,10 @@ pub struct MacroComponentIds {
     pub firm_targets: ComponentID,
     pub firm_realised: ComponentID,
     pub individual: ComponentID,
+    pub individual_wage_history: ComponentID,
     pub household: ComponentID,
+    pub household_demand: ComponentID,
+    pub household_history: ComponentID,
     pub bank: ComponentID,
     pub government_entity: ComponentID,
     pub government_account: ComponentID,
@@ -310,6 +313,8 @@ fn target_setting_system(
     access.write.set(ids.firm);
     access.write.set(ids.individual);
     access.read.set(ids.government_account);
+    access.write.set(ids.firm_stocks);
+    access.write.set(ids.individual_wage_history);
     access
         .consumes
         .insert(phases.expectations_done.channel_id());
@@ -321,6 +326,8 @@ fn target_setting_system(
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
+        let mut individual_wage_histories =
+            collect_rows_by(ecs, |row: &IndividualWageHistory| row.id)?;
         let accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
         let account = accounts.first().copied().unwrap_or_default();
         // `P_s(t-1)` for A.59's relative-price test.
@@ -478,7 +485,10 @@ fn target_setting_system(
             firm.excess_demand = 0.0;
         }
 
-        for individual in &mut individuals {
+        for (individual, wage_history) in individuals
+            .iter_mut()
+            .zip(individual_wage_histories.iter_mut())
+        {
             match individual.labour_status {
                 LABOUR_UNEMPLOYED => {
                     individual.labour_input /= 1.0 + state.params.unemployment_growth_h;
@@ -489,7 +499,7 @@ fn target_setting_system(
                 _ => individual.labour_input = 0.0,
             }
             let average_wage =
-                individual.wage_history.iter().sum::<f64>() / individual.wage_history.len() as f64;
+                wage_history.wage_history.iter().sum::<f64>() / wage_history.wage_history.len() as f64;
             individual.reservation_wage =
                 (state.forecast.predicted_cpi * account.unemployment_benefit).max(average_wage);
             individual.predicted_income = if individual.labour_status == LABOUR_EMPLOYED {
@@ -508,6 +518,7 @@ fn target_setting_system(
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
         write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
+        write_rows(ecs, individual_wage_histories, |row: &IndividualWageHistory| row.id)?;
         state.push_phase("target_setting");
         set_phase_and_state(ecs, env_boundary, phases.targets_done, state)
     })
@@ -523,6 +534,7 @@ fn labour_market_system(
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
     access.write.set(ids.individual);
+    access.write.set(ids.firm_stocks);
     access.consumes.insert(phases.targets_done.channel_id());
     access.produces.insert(messages.labour_offer.channel_id());
     access.produces.insert(messages.wage_payment.channel_id());
@@ -692,6 +704,12 @@ fn planning_and_production_system(
     access.write.set(ids.central_bank);
     access.write.set(ids.rest_of_world);
     access.read.set(ids.property);
+    access.write.set(ids.firm_stock_baseline);
+    access.write.set(ids.firm_stocks);
+    access.write.set(ids.firm_targets);
+    access.write.set(ids.household_demand);
+    access.write.set(ids.household_history);
+    access.write.set(ids.individual_wage_history);
     access.consumes.insert(phases.labour_done.channel_id());
     access.consumes.insert(messages.wage_payment.channel_id());
     access.produces.insert(messages.goods_demand.channel_id());
@@ -711,7 +729,11 @@ fn planning_and_production_system(
         let mut firm_stock_baseline = collect_rows_by(ecs, |row: &FirmStockBaseline| row.id)?;
         let mut firm_targets = collect_rows_by(ecs, |row: &FirmTargets| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
+        let mut individual_wage_histories =
+            collect_rows_by(ecs, |row: &IndividualWageHistory| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut household_demands = collect_rows_by(ecs, |row: &HouseholdDemand| row.id)?;
+        let mut household_histories = collect_rows_by(ecs, |row: &HouseholdHistory| row.id)?;
         let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
         let mut accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
         let mut central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
@@ -761,7 +783,10 @@ fn planning_and_production_system(
             .unwrap_or_default();
 
         let _pl0 = PlTimer(0, std::time::Instant::now());
-        for individual in &mut individuals {
+        for (individual, wage_history) in individuals
+            .iter_mut()
+            .zip(individual_wage_histories.iter_mut())
+        {
             individual.income = if individual.labour_status == LABOUR_EMPLOYED {
                 state.aggregates.cpi
                     * individual.wage
@@ -773,8 +798,8 @@ fn planning_and_production_system(
             } else {
                 0.0
             };
-            individual.wage_history.rotate_left(1);
-            individual.wage_history[7] = individual.wage;
+            wage_history.wage_history.rotate_left(1);
+            wage_history.wage_history[7] = individual.wage;
         }
 
         // `P_s'(t-1)` for the A.81/A.82 financing needs.
@@ -1133,7 +1158,11 @@ fn planning_and_production_system(
         }
 
         let _pl5 = PlTimer(5, std::time::Instant::now());
-        for household in households.iter_mut() {
+        for ((household, demand), history) in households
+            .iter_mut()
+            .zip(household_demands.iter_mut())
+            .zip(household_histories.iter_mut())
+        {
             let slot = household.id as usize;
             let labour_income = predicted_labour_by_household.get(slot).copied().unwrap_or(0.0);
             let rent_income = rent_by_household.get(slot).copied().unwrap_or(0.0);
@@ -1155,22 +1184,22 @@ fn planning_and_production_system(
             // already CPI-scaled and net of tax (A.133). Adding the raw
             // `WagePayment` amounts on top counted every wage twice -- once
             // taxed, once gross.
-            let history_consumption = household.consumption_history.iter().sum::<f64>()
-                / household.consumption_history.len() as f64;
+            let history_consumption = history.consumption_history.iter().sum::<f64>()
+                / history.consumption_history.len() as f64;
             let target_total = ((1.0 - household.saving_rate)
                 * state.forecast.predicted_cpi
                 * account.unemployment_benefit)
                 .max((1.0 - household.saving_rate) * household.predicted_income)
                 .max(state.params.phi_consumption_history * history_consumption);
             for s in 0..SECTORS {
-                household.consumption_target[s] =
+                demand.consumption_target[s] =
                     state.params.cpi_weights[s] / (1.0 + account.vat_rate) * target_total;
-                household.investment_target[s] = state.params.household_investment_weights[s]
+                demand.investment_target[s] = state.params.household_investment_weights[s]
                     / (1.0 + account.capital_tax_rate)
                     * household.investment_rate
                     * household.predicted_income;
             }
-            let desired_consumption = household.consumption_target.iter().sum::<f64>();
+            let desired_consumption = demand.consumption_target.iter().sum::<f64>();
             let quarterly_rent = rent_paid_by_household
                 .get(household.id as usize)
                 .copied()
@@ -1247,7 +1276,10 @@ fn planning_and_production_system(
         write_rows(ecs, firm_stock_baseline, |row: &FirmStockBaseline| row.id)?;
         write_rows(ecs, firm_targets, |row: &FirmTargets| row.id)?;
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
+        write_rows(ecs, individual_wage_histories, |row: &IndividualWageHistory| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
+        write_rows(ecs, household_demands, |row: &HouseholdDemand| row.id)?;
+        write_rows(ecs, household_histories, |row: &HouseholdHistory| row.id)?;
         write_rows(ecs, governments, |government: &GovernmentEntity| {
             government.id
         })?;
@@ -1558,6 +1590,10 @@ fn credit_market_system(
     access.write.set(ids.firm);
     access.write.set(ids.household);
     access.read.set(ids.central_bank);
+    access.write.set(ids.firm_stocks);
+    access.write.set(ids.firm_targets);
+    access.write.set(ids.household_demand);
+    access.read.set(ids.household_history);
     access
         .consumes
         .insert(phases.housing_preclear_done.channel_id());
@@ -1580,6 +1616,8 @@ fn credit_market_system(
         let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
         let mut firm_targets = collect_rows_by(ecs, |row: &FirmTargets| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut household_demands = collect_rows_by(ecs, |row: &HouseholdDemand| row.id)?;
+        let household_histories = collect_rows_by(ecs, |row: &HouseholdHistory| row.id)?;
         let central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
         let policy_rate = central_banks
             .first()
@@ -1671,8 +1709,10 @@ fn credit_market_system(
                     }
                 }
                 if app.loan_class == LOAN_MORTGAGE {
-                    if let Some(h) = household_index.get(app.borrower_id).map(|i| &households[i]) {
-                        let (ltv, lti, dsti) = mortgage_caps(h, &state.params, 0.0);
+                    if let Some(position) = household_index.get(app.borrower_id) {
+                        let h = &households[position];
+                        let hist = &household_histories[position];
+                        let (ltv, lti, dsti) = mortgage_caps(h, hist, &state.params, 0.0);
                         let cap = ltv.min(lti).min(dsti).max(0.0);
                         state.audit.mortgage_cap_sum += cap;
                         state.audit.mortgage_req_sum += app.amount;
@@ -1712,6 +1752,7 @@ fn credit_market_system(
                         &firms,
                         &firm_stocks,
                         &households,
+                        &household_histories,
                         &firm_index,
                         &household_index_for_caps,
                         &sector_prices_for_caps,
@@ -1893,9 +1934,9 @@ fn credit_market_system(
             }
         }
 
-        for household in &households {
+        for (household, demand) in households.iter().zip(household_demands.iter()) {
             for s in 0..SECTORS {
-                if household.consumption_target[s] > 0.0 {
+                if demand.consumption_target[s] > 0.0 {
                     buffers.emit(
                         messages.goods_demand,
                         GoodsDemand {
@@ -1903,12 +1944,12 @@ fn credit_market_system(
                             buyer_id: household.id,
                             purpose: GOODS_CONSUMPTION,
                             sector: s as u8,
-                            quantity: household.consumption_target[s],
+                            quantity: demand.consumption_target[s],
                             max_spend: household.deposits.max(0.0),
                         },
                     )?;
                 }
-                if household.investment_target[s] > 0.0 {
+                if demand.investment_target[s] > 0.0 {
                     buffers.emit(
                         messages.goods_demand,
                         GoodsDemand {
@@ -1916,7 +1957,7 @@ fn credit_market_system(
                             buyer_id: household.id,
                             purpose: GOODS_CAPITAL,
                             sector: s as u8,
-                            quantity: household.investment_target[s],
+                            quantity: demand.investment_target[s],
                             max_spend: household.deposits.max(0.0),
                         },
                     )?;
@@ -1929,6 +1970,7 @@ fn credit_market_system(
         write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
         write_rows(ecs, firm_targets, |row: &FirmTargets| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
+        write_rows(ecs, household_demands, |row: &HouseholdDemand| row.id)?;
         state.push_phase("credit_market");
         set_phase_and_state(ecs, env_boundary, phases.credit_done, state)
     })
@@ -1944,6 +1986,7 @@ fn housing_completion_system(
     let mut access = AccessSets::default();
     access.write.set(ids.household);
     access.write.set(ids.property);
+    access.write.set(ids.firm_realised);
     access.consumes.insert(phases.credit_done.channel_id());
     access
         .consumes
@@ -2059,6 +2102,7 @@ fn goods_market_system(
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
+    access.write.set(ids.firm_realised);
     access.write.set(ids.household);
     access.write.set(ids.government_entity);
     access.write.set(ids.rest_of_world);
@@ -2363,6 +2407,10 @@ fn realised_accounting_system(
     access.write.set(ids.household);
     access.write.set(ids.bank);
     access.write.set(ids.government_account);
+    access.write.set(ids.firm_realised);
+    access.write.set(ids.firm_stock_baseline);
+    access.write.set(ids.firm_stocks);
+    access.write.set(ids.household_history);
     access.read.set(ids.individual);
     access.read.set(ids.government_entity);
     access.read.set(ids.central_bank);
@@ -2401,6 +2449,7 @@ fn realised_accounting_system(
         let mut firm_realised = collect_rows_by(ecs, |row: &FirmRealised| row.id)?;
         let individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
+        let mut household_histories = collect_rows_by(ecs, |row: &HouseholdHistory| row.id)?;
         let mut banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
         let mut accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
         let governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
@@ -2676,11 +2725,11 @@ fn realised_accounting_system(
         }
 
         let _acc3 = AccTimer(3, std::time::Instant::now());
-        for household in &mut households {
+        for (household, history) in households.iter_mut().zip(household_histories.iter_mut()) {
             let slot = household.id as usize;
             let consumed = consumed_by_household.get(slot).copied().unwrap_or(0.0);
-            household.consumption_history.rotate_left(1);
-            household.consumption_history[11] = consumed;
+            history.consumption_history.rotate_left(1);
+            history.consumption_history[11] = consumed;
             // A.123. Household deposits previously received *nothing*: there
             // was no income credit anywhere in the model, so wages were paid by
             // firms and vanished. Loan instalments and new credit are already
@@ -2761,8 +2810,8 @@ fn realised_accounting_system(
             };
             household.dividend_income = dividend_pool * share;
             household.deposits += household.dividend_income;
-            household.income_history.rotate_left(1);
-            household.income_history[1] = household.income;
+            history.income_history.rotate_left(1);
+            history.income_history[1] = household.income;
             household.previous_income = household.income;
         }
 
@@ -3181,6 +3230,7 @@ fn realised_accounting_system(
         write_rows(ecs, firm_stock_baseline, |row: &FirmStockBaseline| row.id)?;
         write_rows(ecs, firm_realised, |row: &FirmRealised| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
+        write_rows(ecs, household_histories, |row: &HouseholdHistory| row.id)?;
         write_rows(ecs, banks, |bank: &Bank| bank.id)?;
         write_rows(ecs, accounts, |account: &GovernmentAccount| account.id)?;
         state.push_phase("realised_accounting");
@@ -4208,6 +4258,7 @@ fn borrower_credit_cap(
     firms: &[Firm],
     firm_stocks: &[FirmStocks],
     households: &[Household],
+    household_histories: &[HouseholdHistory],
     firm_index: &RowIndex,
     household_index: &RowIndex,
     sector_prices: &[f64; SECTORS],
@@ -4269,10 +4320,10 @@ fn borrower_credit_cap(
             .unwrap_or(0.0),
         LOAN_HOUSEHOLD_CONSUMPTION => household_index
             .get(app.borrower_id)
-            .map(|position| &households[position])
-            .map(|household| {
-                let six_month_income = household.income_history.iter().sum::<f64>()
-                    / household.income_history.len() as f64;
+            .map(|position| (&households[position], &household_histories[position]))
+            .map(|(household, history)| {
+                let six_month_income = history.income_history.iter().sum::<f64>()
+                    / history.income_history.len() as f64;
                 positive_part(
                     state.params.consumption_lti * six_month_income
                         - household.consumption_debt
@@ -4282,10 +4333,10 @@ fn borrower_credit_cap(
             .unwrap_or(0.0),
         LOAN_MORTGAGE => household_index
             .get(app.borrower_id)
-            .map(|position| &households[position])
-            .map(|household| {
-                let six_month_income = household.income_history.iter().sum::<f64>()
-                    / household.income_history.len() as f64;
+            .map(|position| (&households[position], &household_histories[position]))
+            .map(|(household, history)| {
+                let six_month_income = history.income_history.iter().sum::<f64>()
+                    / history.income_history.len() as f64;
                 let ltv = state.params.mortgage_ltv / (1.0 - state.params.mortgage_ltv).max(1e-9)
                     * (household.deposits + household.other_financial_assets).max(0.0);
                 // A.30's income base is *annual*. Baptista et al. (2016) Eq.
@@ -4325,11 +4376,12 @@ fn borrower_credit_cap(
 /// separately so the binding one can be attributed.
 fn mortgage_caps(
     household: &Household,
+    history: &HouseholdHistory,
     params: &super::state::CountryParameters,
     rate: f64,
 ) -> (f64, f64, f64) {
     let six_month_income =
-        household.income_history.iter().sum::<f64>() / household.income_history.len() as f64;
+        history.income_history.iter().sum::<f64>() / history.income_history.len() as f64;
     let ltv = params.mortgage_ltv / (1.0f64 - params.mortgage_ltv).max(1e-9)
         * (household.deposits + household.other_financial_assets).max(0.0);
     let lti = params.mortgage_lti * QUARTERS_PER_YEAR * six_month_income

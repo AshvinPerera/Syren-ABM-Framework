@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use super::components::{
-    FirmRealised, FirmStockBaseline, FirmStocks, FirmTargets,
+    HouseholdDemand, HouseholdHistory, IndividualWageHistory, FirmRealised, FirmStockBaseline, FirmStocks, FirmTargets,
     Bank, CentralBank, Firm, GovernmentAccount, GovernmentEntity, Household, Individual, Property,
     RestOfWorld, LABOUR_EMPLOYED, LABOUR_INACTIVE, LABOUR_UNEMPLOYED, NOT_LINKED, PROPERTY_FOR_RENT,
     PROPERTY_FOR_SALE, PROPERTY_OWNER_OCCUPIED, PROPERTY_RENTAL, SECTORS,
@@ -249,6 +249,9 @@ pub fn thesis_initialisation_recipe() -> Vec<InitialisationRecipeStep> {
 pub struct InitialData {
     pub environment: MacroEnvironment,
     pub firms: Vec<Firm>,
+    pub individual_wage_histories: Vec<IndividualWageHistory>,
+    pub household_demands: Vec<HouseholdDemand>,
+    pub household_histories: Vec<HouseholdHistory>,
     pub firm_stocks: Vec<FirmStocks>,
     pub firm_stock_baselines: Vec<FirmStockBaseline>,
     pub firm_targets: Vec<FirmTargets>,
@@ -864,7 +867,6 @@ pub fn synthetic_population(
             residence_property_id: id,
             income: gross,
             previous_income: gross,
-            income_history: [gross, gross],
             predicted_income: gross,
             deposits,
             other_financial_assets: other_financial,
@@ -874,7 +876,6 @@ pub fn synthetic_population(
             mortgage_debt: MORTGAGE_TO_VALUE * property_wealth,
             social_benefits_other: other_benefits_per_household,
             owns_residence: id < owner_count,
-            consumption_history: [0.0; 12],
             ..Household::default()
         });
     }
@@ -907,6 +908,7 @@ pub fn synthetic_population(
     };
     let saving_rate = saving_rate.clamp(0.0, 0.95);
     let investment_rate = investment_rate.clamp(0.0, 0.95);
+    let mut household_histories = Vec::with_capacity(households.len());
     for household in &mut households {
         household.saving_rate = saving_rate;
         household.investment_rate = investment_rate;
@@ -914,7 +916,13 @@ pub fn synthetic_population(
         // or every household opens above its own consumption function.
         let opening = (1.0 - saving_rate) * household.predicted_income
             / (1.0 + account_template.vat_rate);
-        household.consumption_history = [opening; 12];
+        household_histories.push(HouseholdHistory {
+            id: household.id,
+            consumption_history: [opening; 12],
+            // A.28/A.30 read the last two quarters of income; both are seeded
+            // at the opening figure so the first tick has a window.
+            income_history: [household.income, household.income],
+        });
     }
 
     // ---- 7. Government, banks, rest of world --------------------------
@@ -1154,6 +1162,23 @@ pub fn synthetic_population(
         firm_stock_baselines,
         firm_targets,
         firm_realised,
+        individual_wage_histories: individuals
+            .iter()
+            .map(|individual| IndividualWageHistory {
+                id: individual.id,
+                // A.131's reservation wage averages the window, so it opens at
+                // the individual's own wage rather than at zero.
+                wage_history: [individual.wage; 8],
+            })
+            .collect(),
+        household_demands: households
+            .iter()
+            .map(|household| HouseholdDemand {
+                id: household.id,
+                ..HouseholdDemand::default()
+            })
+            .collect(),
+        household_histories,
         individuals,
         households,
         banks,
@@ -1359,6 +1384,5 @@ fn individual(
         labour_input: 1.0,
         predicted_income: wage,
         income: wage,
-        wage_history: [wage; 8],
     }
 }

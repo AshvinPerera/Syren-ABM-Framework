@@ -90,12 +90,15 @@ where
         .with_agent_template(
             AgentTemplate::builder("individual")
                 .with_component::<Individual>(ids.individual)?
+                .with_component::<IndividualWageHistory>(ids.individual_wage_history)?
                 .with_capacity(data.individuals.len())
                 .build(),
         )?
         .with_agent_template(
             AgentTemplate::builder("household")
                 .with_component::<Household>(ids.household)?
+                .with_component::<HouseholdDemand>(ids.household_demand)?
+                .with_component::<HouseholdHistory>(ids.household_history)?
                 .with_capacity(data.households.len())
                 .build(),
         )?
@@ -143,7 +146,10 @@ where
         .with_agent_population("firm", ids.firm_targets, data.firm_targets)?
         .with_agent_population("firm", ids.firm_realised, data.firm_realised)?
         .with_agent_population("individual", ids.individual, data.individuals)?
+        .with_agent_population("individual", ids.individual_wage_history, data.individual_wage_histories)?
         .with_agent_population("household", ids.household, data.households)?
+        .with_agent_population("household", ids.household_demand, data.household_demands)?
+        .with_agent_population("household", ids.household_history, data.household_histories)?
         .with_agent_population("bank", ids.bank, data.banks)?
         .with_agent_population(
             "government_entity",
@@ -224,7 +230,10 @@ fn register_components(
             firm_targets: reg.register::<FirmTargets>()?,
             firm_realised: reg.register::<FirmRealised>()?,
             individual: reg.register::<Individual>()?,
+            individual_wage_history: reg.register::<IndividualWageHistory>()?,
             household: reg.register::<Household>()?,
+            household_demand: reg.register::<HouseholdDemand>()?,
+            household_history: reg.register::<HouseholdHistory>()?,
             bank: reg.register::<Bank>()?,
             government_entity: reg.register::<GovernmentEntity>()?,
             government_account: reg.register::<GovernmentAccount>()?,
