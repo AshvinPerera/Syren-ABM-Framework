@@ -21,8 +21,11 @@ pub enum ModelError {
         "agent template `{template}` was given columns of differing lengths: expected {expected}, found {found}"
     )]
     AgentPopulationLengthMismatch {
+        /// Name of the agent template whose columns disagreed.
         template: String,
+        /// Length established by the first column supplied for the template.
         expected: usize,
+        /// Length of the column that disagreed with it.
         found: usize,
     },
 
