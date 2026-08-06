@@ -108,6 +108,14 @@ pub type RowID = u32;
 pub type ChunkID = u16;
 
 /// Maximum number of rows per chunk.
+///
+/// Chunks are sized in **rows, not bytes**: a chunk of a 4-byte component
+/// occupies 64 KiB while a chunk of a 64-byte component occupies 1 MiB. This
+/// keeps every column of an archetype row-aligned at the same `(chunk, row)`
+/// coordinates, at the cost of per-chunk memory footprint scaling with
+/// component size. Byte-targeted chunk sizing was considered and rejected:
+/// row-splitting during parallel iteration already decouples task granularity
+/// from chunk size, which was the main argument for byte-sized chunks.
 pub const CHUNK_CAP: usize = 16_384;
 
 /// Unique identifier for a component type.

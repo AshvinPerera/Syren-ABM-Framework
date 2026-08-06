@@ -24,12 +24,14 @@ pub mod error;
 pub mod manager;
 pub mod plan_display;
 pub mod query;
+pub mod random;
 pub mod reduce;
 pub mod scheduler;
 pub mod storage;
 pub mod systems;
 pub mod types;
 pub mod workers;
+pub mod worker_stage;
 
 #[cfg(feature = "gpu")]
 pub mod dirty;

@@ -34,11 +34,19 @@ use crate::engine::entity::Entity;
 use crate::engine::types::{AgentTemplateId, ComponentID};
 
 /// One component column in a dynamically-typed spawn batch.
+///
+/// The column is carried as a **single** type-erased `Vec<T>` (one heap
+/// allocation per column) rather than one box per value; the storage layer
+/// downcasts it once and bulk-copies chunk-sized runs.
 pub struct BatchColumn {
     /// Component identifier for this column.
     pub component_id: ComponentID,
-    /// One value per entity in the batch.
-    pub values: Vec<Box<dyn Any + Send>>,
+    /// The whole column: a `Box<dyn Any + Send>` containing a `Vec<T>` whose
+    /// `T` matches the registered storage type for `component_id`.
+    pub values: Box<dyn Any + Send>,
+    /// Element count recorded at construction, used for validation without
+    /// downcasting.
+    pub len: usize,
 }
 
 /// Dynamically-typed batch payload for spawning many entities with one signature.
@@ -272,10 +280,45 @@ pub enum Command {
     ///
     /// ## Behaviour
     /// - Moves the entity to a new archetype that excludes the component.
-    /// - The removed component value is dropped.    
+    /// - The removed component value is dropped.
     Remove {
         /// Target entity losing the component.
         entity: Entity,
+        /// Identifier of the component type to remove.
+        component_id: ComponentID,
+    },
+
+    /// Adds one component to many entities in a single columnar migration.
+    ///
+    /// The values travel as **one** type-erased `Vec<T>` (no per-value
+    /// boxing) and shared component data moves between archetypes in bitwise
+    /// row copies under one lock acquisition per column. All target entities
+    /// must currently share one archetype (issue one batch per agent
+    /// template); the batch is atomic - any failure leaves the world
+    /// unchanged.
+    AddComponentBatch {
+        /// Target entities, all in the same archetype, none already carrying
+        /// the component.
+        entities: Vec<Entity>,
+        /// Identifier of the component type to add.
+        component_id: ComponentID,
+        /// A `Box<dyn Any + Send>` containing a `Vec<T>` with one value per
+        /// entity, in `entities` order.
+        values: Box<dyn Any + Send>,
+        /// Element count recorded at construction for validation.
+        len: usize,
+    },
+
+    /// Removes one component from many entities in columnar migrations.
+    ///
+    /// Entities may span archetypes (grouped internally; each group migrates
+    /// atomically). Entities that do not carry the component are skipped,
+    /// matching the per-entity [`Remove`](Command::Remove) no-op behaviour.
+    /// Removal that would leave an entity with no components is rejected -
+    /// use [`DespawnBatchTagged`](Command::DespawnBatchTagged) instead.
+    RemoveComponentBatch {
+        /// Target entities.
+        entities: Vec<Entity>,
         /// Identifier of the component type to remove.
         component_id: ComponentID,
     },

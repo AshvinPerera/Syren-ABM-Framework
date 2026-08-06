@@ -198,7 +198,15 @@ impl ComponentRegistry {
     /// - Otherwise allocates a new ID, stores a `ComponentDesc`, and registers
     ///   a corresponding `TypeErasedAttribute` factory.
     ///
+    /// ## Zero-sized types
+    ///
+    /// Zero-sized components are rejected: archetype storage exposes columns
+    /// as byte views, and a ZST column has no bytes to view. For tag/marker
+    /// components use a one-byte payload instead (e.g. `struct Tag(pub u8);`)
+    /// and, for exclusion filters, `QueryBuilder::without::<T>()`.
+    ///
     /// ## Errors
+    /// - Returns `RegistryError::ZeroSizedComponent` if `size_of::<T>() == 0`.
     /// - Returns `RegistryError::Frozen` if the registry is frozen.
     /// - Returns `RegistryError::CapacityExceeded` if `COMPONENT_CAP` is exceeded.
     pub fn register<T: 'static + Send + Sync>(&mut self) -> Result<ComponentID, RegistryError> {

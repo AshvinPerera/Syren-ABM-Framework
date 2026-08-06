@@ -43,7 +43,7 @@
 use std::any::TypeId;
 use std::fmt;
 
-use crate::engine::types::{ChunkID, RowID};
+use crate::engine::types::{ChunkID, ComponentID, RowID};
 
 use super::attribute::AttributeError;
 use super::primitives::{CapacityError, ShardBoundsError, StaleEntityError};
@@ -132,6 +132,24 @@ pub enum SpawnError {
         got: (ChunkID, RowID),
     },
 
+    /// A batch column's element count disagreed with the batch entity count,
+    /// or a column append landed at an unexpected storage offset.
+    BatchColumnMismatch {
+        /// Component whose column mismatched.
+        component_id: ComponentID,
+        /// Expected element count / offset.
+        expected: usize,
+        /// Actual element count / offset.
+        actual: usize,
+    },
+
+    /// The set of batch columns did not exactly cover the batch signature
+    /// (missing, duplicate, or unknown column).
+    BatchColumnSet {
+        /// Offending component id.
+        component_id: ComponentID,
+    },
+
     /// A shard mutex was poisoned (panic occurred while holding it).
     ShardLockPoisoned,
 
@@ -166,6 +184,18 @@ impl fmt::Display for SpawnError {
                 f,
                 "component storages became misaligned; expected position {:?}, got {:?}",
                 expected, got
+            ),
+            SpawnError::BatchColumnMismatch {
+                component_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "batch column for component {component_id} mismatched: expected {expected}, got {actual}"
+            ),
+            SpawnError::BatchColumnSet { component_id } => write!(
+                f,
+                "batch columns do not match the batch signature (component {component_id})"
             ),
             SpawnError::ShardLockPoisoned => write!(f, "shard lock poisoned"),
             SpawnError::InvalidComponentId => write!(f, "invalid component id"),

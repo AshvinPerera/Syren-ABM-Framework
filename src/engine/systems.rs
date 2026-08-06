@@ -460,6 +460,11 @@ where
     /// - `name`: Human-readable name, useful for debugging and profiling.
     /// - `access`: Declared component access used for scheduling.
     /// - `f`: The function or closure executed when the system runs.
+    ///
+    /// Prefer [`from_queries`](Self::from_queries) when the system's access is
+    /// fully determined by the queries it runs; hand-written `AccessSets` can
+    /// silently drift from what the system actually touches, which the borrow
+    /// tracker only catches at runtime.
     pub fn new(id: SystemID, name: &'static str, access: AccessSets, f: F) -> Self {
         Self {
             id,
@@ -467,6 +472,90 @@ where
             access,
             f,
         }
+    }
+
+    /// Creates a function-backed system whose component access is **derived**
+    /// from the queries it executes, eliminating declared-versus-used drift.
+    ///
+    /// The read/write signatures of every query are unioned. A component that
+    /// one query reads and another writes is declared **write-only** in the
+    /// merged set: write access already forces exclusive scheduling, and the
+    /// queries themselves run sequentially inside the system body, so this
+    /// normalisation is both sufficient for correctness and required for
+    /// [`AccessSets::validate`] (which rejects read/write self-aliases).
+    ///
+    /// Channel dependencies are not derivable from queries; attach them with
+    /// [`produces`](Self::produces) / [`consumes`](Self::consumes):
+    ///
+    /// ```text
+    /// let system = FnSystem::from_queries(3, "trade", &[&q_read, &q_write], move |ecs| {
+    ///     /* run q_read / q_write here */
+    ///     Ok(())
+    /// })
+    /// .consumes(orders_channel)
+    /// .produces(receipts_channel);
+    /// ```
+    pub fn from_queries(
+        id: SystemID,
+        name: &'static str,
+        queries: &[&crate::engine::query::BuiltQuery],
+        f: F,
+    ) -> Self {
+        let mut access = AccessSets::default();
+        for query in queries {
+            let derived = query.access_sets();
+            for (word, other) in access
+                .read
+                .components
+                .iter_mut()
+                .zip(derived.read.components.iter())
+            {
+                *word |= other;
+            }
+            for (word, other) in access
+                .write
+                .components
+                .iter_mut()
+                .zip(derived.write.components.iter())
+            {
+                *word |= other;
+            }
+        }
+        // Normalise: a component both read (by one query) and written (by
+        // another) is declared write-only; see the doc comment above.
+        for (read_word, write_word) in access
+            .read
+            .components
+            .iter_mut()
+            .zip(access.write.components.iter())
+        {
+            *read_word &= !write_word;
+        }
+
+        Self {
+            id,
+            name,
+            access,
+            f,
+        }
+    }
+
+    /// Declares that this system produces `channel` this tick.
+    ///
+    /// Producers are scheduled strictly before consumers of the same channel.
+    #[must_use]
+    pub fn produces(mut self, channel: ChannelID) -> Self {
+        self.access.produces.insert(channel);
+        self
+    }
+
+    /// Declares that this system consumes `channel` this tick.
+    ///
+    /// Consumers are scheduled strictly after all producers of the channel.
+    #[must_use]
+    pub fn consumes(mut self, channel: ChannelID) -> Self {
+        self.access.consumes.insert(channel);
+        self
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "abm_framework"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.87"
 description = "A parallel Rust framework for agent-based models with ECS storage, scheduling, messaging, environments, and optional GPU execution."
@@ -31,6 +31,9 @@ parking_lot = { version = "0.12", features = ["arc_lock"] }
 
 [dev-dependencies]
 criterion = "0.8.1"
+# Integration tests build thread pools of a fixed size to assert that model
+# trajectories are reproducible independently of the thread count.
+rayon = "1.7.0"
 
 wgpu = "29.0.1"
 bytemuck = { version = "1.16", features = ["derive"] }
@@ -96,6 +99,10 @@ name = "scheduler_execution"
 harness = false
 
 [[bench]]
+name = "parallel_scaling"
+harness = false
+
+[[bench]]
 name = "message_specialisations"
 harness = false
 required-features = ["messaging"]
@@ -134,3 +141,20 @@ required-features = ["gpu"]
 name = "gpu_message_finalisation"
 harness = false
 required-features = ["model", "messaging_gpu"]
+
+[[example]]
+name = "sugarscape"
+path = "examples/sugarscape/sugarscape_v2.rs"
+
+[[example]]
+name = "macroeconomy"
+path = "examples/macroeconomy/main.rs"
+required-features = ["model", "messaging"]
+
+# The macroeconomy example is self-contained: sources, tests, config, and the
+# model-closure ledger all live under `examples/macroeconomy/`. Cargo looks for
+# integration tests in `tests/`, so the path is given explicitly.
+[[test]]
+name = "macroeconomy"
+path = "examples/macroeconomy/tests.rs"
+required-features = ["model", "messaging"]

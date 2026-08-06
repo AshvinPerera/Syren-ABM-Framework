@@ -14,6 +14,21 @@ pub enum ModelError {
     #[error(transparent)]
     Agent(#[from] crate::agents::AgentError),
 
+    /// Two component columns supplied for one agent template disagreed on how
+    /// many agents they describe. Every column of a template must cover the
+    /// same entities.
+    #[error(
+        "agent template `{template}` was given columns of differing lengths: expected {expected}, found {found}"
+    )]
+    AgentPopulationLengthMismatch {
+        /// Name of the agent template whose columns disagreed.
+        template: String,
+        /// Length established by the first column supplied for the template.
+        expected: usize,
+        /// Length of the column that disagreed with it.
+        found: usize,
+    },
+
     /// Message registration failed.
     #[cfg(feature = "messaging")]
     #[error(transparent)]

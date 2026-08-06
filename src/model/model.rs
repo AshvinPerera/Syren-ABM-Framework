@@ -65,10 +65,13 @@ impl Model {
             for sub in &mut self.sub_schedulers {
                 let ecs = self.ecs.world_ref();
                 let agents = &mut self.agents;
-                sub.scheduler_mut()
-                    .run_with_lifecycle_events(ecs, |events| {
-                        Self::flush_agent_hooks(agents, ecs, events)
-                    })?;
+                let seed = sub.scheduler().global_seed();
+                sub.scheduler_mut().run_with_context_and_lifecycle_events(
+                    ecs,
+                    seed,
+                    self.tick_count,
+                    |events| Self::flush_agent_hooks(agents, ecs, events),
+                )?;
             }
 
             let mut nested_models = std::mem::take(&mut self.nested_models);
@@ -83,9 +86,13 @@ impl Model {
 
             let ecs = self.ecs.world_ref();
             let agents = &mut self.agents;
-            self.scheduler.run_with_lifecycle_events(ecs, |events| {
-                Self::flush_agent_hooks(agents, ecs, events)
-            })?;
+            let seed = self.scheduler.global_seed();
+            self.scheduler.run_with_context_and_lifecycle_events(
+                ecs,
+                seed,
+                self.tick_count,
+                |events| Self::flush_agent_hooks(agents, ecs, events),
+            )?;
             self.ecs.world_ref().clear_borrows();
             match self.ecs.apply_deferred_commands_with_events() {
                 Ok(events) => {
@@ -173,6 +180,9 @@ impl Model {
     }
 
     /// Spawns a single-column batch of agents and returns the created entities.
+    ///
+    /// The column is carried as one `Vec<T>` end to end - no per-value boxing
+    /// - and applied through the columnar bulk-spawn path.
     pub fn spawn_agent_batch<T>(
         &mut self,
         template_name: &str,
@@ -182,27 +192,30 @@ impl Model {
     where
         T: Any + Send + 'static,
     {
-        let values = values
-            .into_iter()
-            .map(|value| Box::new(value) as Box<dyn Any + Send>)
-            .collect();
-        self.spawn_agent_batch_boxed(template_name, component_id, values)
+        let len = values.len();
+        self.spawn_agent_batch_erased(template_name, vec![(component_id, Box::new(values))], len)
     }
 
-    pub(crate) fn spawn_agent_batch_boxed(
+    /// Spawns one batch of agents, setting every supplied component column on
+    /// the same entities.
+    ///
+    /// Taking the columns together is what allows an agent to be modelled as
+    /// several small components rather than one wide struct: a query then names
+    /// only the columns it reads, instead of dragging every field of a combined
+    /// struct through cache. Spawning one batch per column would create one set
+    /// of entities per column instead.
+    pub(crate) fn spawn_agent_batch_erased(
         &mut self,
         template_name: &str,
-        component_id: crate::ComponentID,
-        values: Vec<Box<dyn Any + Send>>,
+        columns: Vec<(crate::ComponentID, Box<dyn Any + Send>)>,
+        len: usize,
     ) -> Result<Vec<Entity>, super::error::ModelError> {
         let template_id = self.agents.id(template_name)?;
-        let count = values.len();
-        let batch = self
-            .agents
-            .get(template_name)?
-            .batch(count)?
-            .set_boxed_column(component_id, values)?
-            .into_spawn_batch();
+        let mut builder = self.agents.get(template_name)?.batch(len)?;
+        for (component_id, values) in columns {
+            builder = builder.set_erased_column(component_id, values, len)?;
+        }
+        let batch = builder.into_spawn_batch();
         self.ecs
             .world_ref()
             .defer(Command::SpawnBatchTagged { batch, template_id })?;

@@ -19,7 +19,7 @@ use super::specialisations::brute_force::{BruteForceBuffer, BruteForceIter};
 use super::specialisations::bucket::{BucketBuffer, BucketIter};
 use super::specialisations::spatial::{SpatialBuffer, SpatialQueryIter};
 use super::specialisations::targeted::{InboxIter, TargetedBuffer};
-use super::thread_local_emit::{self, MessageRuntimeID};
+use super::thread_local_emit::{self, MessageEmitter, MessageRuntimeID};
 
 #[cfg(feature = "messaging_gpu")]
 use super::gpu::{targeted_index_words, GpuFinaliseOutput, GpuMessageResource};
@@ -165,6 +165,12 @@ impl MessageBufferSet {
     }
 
     /// Emits one message into this model's per-worker staging buffers.
+    ///
+    /// Each call re-resolves the calling thread's staging slot (thread-local
+    /// lookup plus an `Arc` upgrade). Fine for occasional messages; for
+    /// per-agent hot loops obtain a [`MessageEmitter`] via
+    /// [`emitter`](Self::emitter), which resolves once and then pushes
+    /// directly.
     pub fn emit<M: Message>(&self, handle: MessageHandle<M>, msg: M) -> ECSResult<()> {
         self.validate_handle(handle)?;
         let desc = self.registry.descriptor(handle.message_type_id);
@@ -178,6 +184,29 @@ impl MessageBufferSet {
             msg,
         )?;
         Ok(())
+    }
+
+    /// Returns a cached per-thread emitter for `handle`'s message type.
+    ///
+    /// The emitter performs the per-thread slot resolution **once**; each
+    /// subsequent [`MessageEmitter::emit`] is a direct buffer push. It is
+    /// `!Send`: construct it on the thread that emits (at the top of a
+    /// sequential system body, or inside each parallel closure) and let it
+    /// drop before the boundary stage finalises this channel.
+    pub fn emitter<M: Message>(
+        &self,
+        handle: MessageHandle<M>,
+    ) -> ECSResult<MessageEmitter<'_, M>> {
+        self.validate_handle(handle)?;
+        let desc = self.registry.descriptor(handle.message_type_id);
+        MessageEmitter::new(
+            self.runtime_id,
+            self.registry.descriptors().len(),
+            handle.message_type_id,
+            desc.item_size,
+            desc.item_align,
+            desc.capacity.initial,
+        )
     }
 
     /// Iterates all messages for a brute-force message type.
@@ -636,6 +665,43 @@ mod tests {
             .tick_finalise(&mut ctx, &[handle.channel_id()])
             .unwrap();
         assert_eq!(buffers.brute_force(handle).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn emitter_matches_per_call_emit() {
+        let mut alloc = ChannelAllocator::new();
+        let mut registry = MessageRegistry::new();
+        let handle = registry
+            .register_brute_force::<GlobalMsg>(&mut alloc, Capacity::unbounded(8))
+            .unwrap();
+        registry.freeze();
+        let mut buffers = MessageBufferSet::new(Arc::new(registry)).unwrap();
+
+        // Interleave the cached-emitter path with the per-call path; the
+        // drained result must contain every message exactly once.
+        {
+            let emitter = buffers.emitter(handle).unwrap();
+            for i in 0..64u32 {
+                if i % 2 == 0 {
+                    emitter.emit(GlobalMsg(i));
+                } else {
+                    buffers.emit(handle, GlobalMsg(i)).unwrap();
+                }
+            }
+        }
+
+        let mut ctx = BoundaryContext::empty();
+        buffers
+            .tick_finalise(&mut ctx, &[handle.channel_id()])
+            .unwrap();
+        let mut got: Vec<u32> = buffers
+            .brute_force(handle)
+            .unwrap()
+            .map(|message| message.0)
+            .collect();
+        got.sort_unstable();
+        let expected: Vec<u32> = (0..64).collect();
+        assert_eq!(got, expected);
     }
 
     #[test]

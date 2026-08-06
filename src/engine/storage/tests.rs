@@ -332,6 +332,166 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Position validation (regression: row >= CHUNK_CAP must error, not panic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn swap_remove_rejects_row_beyond_chunk_capacity() {
+        let mut attr: Attribute<u64> = Attribute::default();
+        // Two full chunks, so `chunk*CHUNK_CAP + row < length` holds for the
+        // out-of-range row below and the old index-only check would pass.
+        for i in 0..(2 * CHUNK_CAP) {
+            attr.push(i as u64).unwrap();
+        }
+
+        let result = attr.swap_remove(0, (CHUNK_CAP + 5) as u32);
+        assert!(
+            matches!(result, Err(crate::engine::error::AttributeError::Position(_))),
+            "expected Position error, got {result:?}"
+        );
+        assert_eq!(attr.length, 2 * CHUNK_CAP, "attribute must be unchanged");
+    }
+
+    #[test]
+    fn take_swap_remove_rejects_row_beyond_chunk_capacity() {
+        let mut attr: Attribute<u64> = Attribute::default();
+        for i in 0..(2 * CHUNK_CAP) {
+            attr.push(i as u64).unwrap();
+        }
+
+        let result = attr.take_swap_remove(0, (CHUNK_CAP + 5) as u32);
+        assert!(
+            matches!(result, Err(crate::engine::error::AttributeError::Position(_))),
+            "expected Position error, got Ok/other"
+        );
+        assert_eq!(attr.length, 2 * CHUNK_CAP, "attribute must be unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // Chunk hysteresis
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn boundary_oscillation_reuses_the_spare_chunk() {
+        let mut attr: Attribute<u64> = Attribute::default();
+        for i in 0..CHUNK_CAP {
+            attr.push(i as u64).unwrap();
+        }
+
+        // Cross the boundary once to allocate chunk 1.
+        attr.push(0).unwrap();
+        assert_eq!(attr.chunk_count(), 2);
+
+        // Retiring the trailing chunk parks it in the spare slot...
+        attr.swap_remove(1, 0).unwrap();
+        assert_eq!(attr.chunk_count(), 1);
+        assert!(attr.spare_chunk.is_some(), "popped chunk must be retained");
+
+        // ...and the next boundary crossing takes it back without allocating.
+        for _ in 0..100 {
+            attr.push(0).unwrap();
+            assert!(attr.spare_chunk.is_none(), "spare must be reused");
+            attr.swap_remove(1, 0).unwrap();
+            assert!(attr.spare_chunk.is_some(), "spare must be recaptured");
+        }
+        assert_eq!(attr.length, CHUNK_CAP);
+    }
+
+    #[test]
+    fn truncate_to_drops_tail_and_keeps_prefix() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut attr: Attribute<DropCounter> = Attribute::default();
+        for _ in 0..(CHUNK_CAP + 10) {
+            attr.push(DropCounter(Arc::clone(&counter))).unwrap();
+        }
+
+        attr.truncate_to(5).unwrap();
+        assert_eq!(attr.length, 5);
+        assert_eq!(counter.load(Ordering::Relaxed), CHUNK_CAP + 5);
+        assert_eq!(attr.chunk_count(), 1);
+
+        // Truncating beyond the current length is rejected.
+        assert!(attr.truncate_to(6).is_err());
+
+        attr.truncate_to(0).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), CHUNK_CAP + 10);
+        assert_eq!(attr.length, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Batched-migration primitives: exactly-one-drop accounting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_row_move_primitives_drop_each_value_exactly_once() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut source: Attribute<DropCounter> = Attribute::default();
+        for _ in 0..100 {
+            source.push(DropCounter(Arc::clone(&counter))).unwrap();
+        }
+        let mut destination: Attribute<DropCounter> = Attribute::default();
+
+        // Copy phase: bitwise copies, no ownership transfer yet.
+        let rows = [(0u16, 99u32), (0, 50), (0, 5)]; // descending
+        let (start, count) = destination.extend_from_rows(&source, &rows).unwrap();
+        assert_eq!((start, count), (0, 3));
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "copy phase must not drop");
+
+        // Commit phase: forgotten removal transfers ownership to destination.
+        for &(chunk, row) in &rows {
+            source.swap_remove_forgotten(chunk, row).unwrap();
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "commit must not drop");
+        assert_eq!(source.length, 97);
+        assert_eq!(destination.length, 3);
+
+        drop(source);
+        assert_eq!(counter.load(Ordering::Relaxed), 97);
+        drop(destination);
+        assert_eq!(counter.load(Ordering::Relaxed), 100, "every value dropped exactly once");
+    }
+
+    #[test]
+    fn truncate_forgotten_discards_copies_without_dropping() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut source: Attribute<DropCounter> = Attribute::default();
+        for _ in 0..10 {
+            source.push(DropCounter(Arc::clone(&counter))).unwrap();
+        }
+        let mut destination: Attribute<DropCounter> = Attribute::default();
+        let rows: Vec<(u16, u32)> = (0..10).map(|row| (0u16, row as u32)).collect();
+        destination.extend_from_rows(&source, &rows).unwrap();
+
+        // Rollback: the copies are discarded, source still owns everything.
+        destination.truncate_forgotten(0).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(destination.length, 0);
+
+        drop(destination);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        drop(source);
+        assert_eq!(counter.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn extend_permuted_from_vec_applies_the_order() {
+        let mut attr: Attribute<u32> = Attribute::default();
+        attr.extend_permuted_from_vec(vec![10, 11, 12, 13], &[3, 1, 2, 0])
+            .unwrap();
+        let observed: Vec<u32> = attr.iter().copied().collect();
+        assert_eq!(observed, vec![13, 11, 12, 10]);
+
+        // Length mismatch and out-of-range indices are rejected untouched.
+        assert!(attr
+            .extend_permuted_from_vec(vec![1, 2], &[0])
+            .is_err());
+        assert!(attr
+            .extend_permuted_from_vec(vec![1, 2], &[0, 5])
+            .is_err());
+        assert_eq!(attr.length, 4);
+    }
+
+    // -----------------------------------------------------------------------
     // Debug impl
     // -----------------------------------------------------------------------
 

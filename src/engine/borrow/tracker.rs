@@ -185,7 +185,7 @@ impl BorrowTracker {
                         requested: AccessKind::Read,
                     });
                 }
-                if spins % 1024 == 0 {
+                if spins.is_multiple_of(1024) {
                     std::thread::yield_now();
                 } else {
                     std::hint::spin_loop();
@@ -207,13 +207,20 @@ impl BorrowTracker {
 
             spins += 1;
             if spins > self.spin_limit {
+                // CAS contention path: derive the holder from the live state
+                // rather than assuming a writer.
+                let held = if state.load(Ordering::Acquire) == 1 {
+                    AccessKind::Write
+                } else {
+                    AccessKind::Read
+                };
                 return Err(ExecutionError::BorrowConflict {
                     component_id,
-                    held: AccessKind::Write,
+                    held,
                     requested: AccessKind::Read,
                 });
             }
-            if spins % 1024 == 0 {
+            if spins.is_multiple_of(1024) {
                 std::thread::yield_now();
             } else {
                 std::hint::spin_loop();
@@ -300,7 +307,7 @@ impl BorrowTracker {
                         requested: AccessKind::Write,
                     });
                 }
-                if spins % 1024 == 0 {
+                if spins.is_multiple_of(1024) {
                     std::thread::yield_now();
                 } else {
                     std::hint::spin_loop();
@@ -319,13 +326,20 @@ impl BorrowTracker {
 
             spins += 1;
             if spins > self.spin_limit {
+                // CAS contention path: derive the holder from the live state
+                // rather than assuming readers.
+                let held = if state.load(Ordering::Acquire) == 1 {
+                    AccessKind::Write
+                } else {
+                    AccessKind::Read
+                };
                 return Err(ExecutionError::BorrowConflict {
                     component_id,
-                    held: AccessKind::Read,
+                    held,
                     requested: AccessKind::Write,
                 });
             }
-            if spins % 1024 == 0 {
+            if spins.is_multiple_of(1024) {
                 std::thread::yield_now();
             } else {
                 std::hint::spin_loop();

@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// - read_ptrs[(chunk * n_reads) + i]  => (ptr, bytes) for read component i in that chunk
 /// - write_ptrs[(chunk * n_writes) + i] => (ptr, bytes) for write component i in that chunk
 pub(super) struct ChunkView {
-    pub chunk_count: usize,
     pub chunk_lens: Vec<usize>,
     pub n_reads: usize,
     pub n_writes: usize,
@@ -25,7 +24,10 @@ pub(super) struct ChunkView {
 // - valid for the duration of for_each_abstraction_unchecked
 // - protected by phase discipline (no structural mutation)
 // - protected by BorrowGuard (no aliasing violations)
-// - chunk-disjoint across parallel tasks
+// - row-range-disjoint across parallel tasks: `plan_work_tasks` assigns each
+//   (chunk, row range) to exactly one task, and ranges within a chunk never
+//   overlap, so the mutable sub-slices materialised by `fill_range_slices` /
+//   `fill_row_slices` in different tasks never alias.
 
 unsafe impl Send for ChunkView {}
 unsafe impl Sync for ChunkView {}

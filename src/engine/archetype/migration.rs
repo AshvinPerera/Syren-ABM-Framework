@@ -324,7 +324,7 @@ impl Archetype {
                     })?;
             Self::ensure_capacity(&mut dest_meta, destination_chunk as usize + 1);
             dest_meta.entity_positions[destination_chunk as usize][destination_row as usize] =
-                Some(entity);
+                entity;
         }
 
         shards
@@ -352,16 +352,18 @@ impl Archetype {
             Some((last_chunk, last_row)) => {
                 Self::ensure_capacity(&mut src_meta, last_chunk as usize + 1);
 
-                let swapped_entity = src_meta.entity_positions[last_chunk as usize]
-                    [last_row as usize]
-                    .ok_or(MoveError::MetadataFailure {
+                let swapped_entity =
+                    src_meta.entity_positions[last_chunk as usize][last_row as usize];
+                if swapped_entity == Entity::PLACEHOLDER {
+                    return Err(MoveError::MetadataFailure {
                         entity: None,
                         source_archetype: None,
                         destination_archetype: None,
-                    })?;
+                    });
+                }
 
                 src_meta.entity_positions[source_chunk as usize][source_row as usize] =
-                    Some(swapped_entity);
+                    swapped_entity;
 
                 shards
                     .set_location(
@@ -378,10 +380,12 @@ impl Archetype {
                         destination_archetype: None,
                     })?;
 
-                src_meta.entity_positions[last_chunk as usize][last_row as usize] = None;
+                src_meta.entity_positions[last_chunk as usize][last_row as usize] =
+                    Entity::PLACEHOLDER;
             }
             None => {
-                src_meta.entity_positions[source_chunk as usize][source_row as usize] = None;
+                src_meta.entity_positions[source_chunk as usize][source_row as usize] =
+                    Entity::PLACEHOLDER;
             }
         }
 
@@ -739,6 +743,239 @@ impl Archetype {
         Ok(destination_position)
     }
 
+    /// Migrates a batch of rows from this archetype into `destination` in a
+    /// copy-then-commit transaction, without per-value boxing.
+    ///
+    /// ## Contract (enforced by the caller, `ECSData`)
+    /// - `targets` is sorted **descending** by linear row index and free of
+    ///   duplicates, so each commit-phase swap-remove's backfill row (always
+    ///   the current last row) can never itself be a pending target and the
+    ///   preflighted positions stay valid throughout (same proof as
+    ///   `despawn_rows_batch`).
+    /// - For an add-migration, `added_column` carries the new component's
+    ///   values as one type-erased `Vec<T>` plus `order`, mapping the k-th
+    ///   processed target to its index in the caller's input order.
+    /// - For a remove-migration, `removed_component` names the column whose
+    ///   values are dropped; every other source column is shared.
+    ///
+    /// ## Transaction
+    /// **Copy phase (fallible):** every shared column is bitwise gather-copied
+    /// onto the destination tail (`extend_from_rows_dyn`; ownership stays with
+    /// the source), then the added column (if any) is appended
+    /// (`extend_permuted_from_vec_any`; ownership moves). On any failure the
+    /// destination tail is discarded - `truncate_forgotten` for bitwise
+    /// copies, `truncate_to` for the owned added column - and the source is
+    /// untouched: the batch is a no-op.
+    ///
+    /// **Commit phase:** source rows are removed in target order -
+    /// `swap_remove_forgotten_dyn` for shared columns (destination now owns
+    /// the values), plain dropping `swap_remove_dyn` for a removed column -
+    /// with per-target backfill agreement checks; then source metadata,
+    /// destination metadata, and grouped shard location updates are applied.
+    /// Copy-phase validation makes commit failures internal-invariant
+    /// violations, consistent with the per-entity migration path.
+    pub(crate) fn migrate_rows_batch(
+        &mut self,
+        destination: &mut Archetype,
+        shards: &EntityShards,
+        targets: &[(Entity, ChunkID, RowID)],
+        added_column: Option<(ComponentID, Box<dyn Any + Send>, Vec<usize>)>,
+        removed_component: Option<ComponentID>,
+    ) -> ECSResult<()> {
+        let count = targets.len();
+        if count == 0 {
+            return Ok(());
+        }
+
+        let destination_start = destination.length()?;
+        destination.reserve_additional_rows(count)?;
+
+        let added_id = added_column.as_ref().map(|(id, _, _)| *id);
+        let rows: Vec<(ChunkID, RowID)> = targets
+            .iter()
+            .map(|&(_, chunk, row)| (chunk, row))
+            .collect();
+
+        // Shared columns = every destination component except the added one
+        // (ascending id order, which `iterate_over_components` provides).
+        let shared: Vec<ComponentID> = destination
+            .signature
+            .iterate_over_components()
+            .filter(|cid| Some(*cid) != added_id)
+            .collect();
+
+        // ------------------------------------------------ copy phase
+        let rollback_copies = |archetype: &Archetype, copied: &[ComponentID]| {
+            for &cid in copied {
+                if let Some(attr) = archetype.find_component(cid) {
+                    if let Ok(mut guard) = attr.write() {
+                        let _ = guard.truncate_forgotten(destination_start);
+                    }
+                }
+            }
+        };
+
+        let mut copied_shared: Vec<ComponentID> = Vec::with_capacity(shared.len());
+        for &component_id in &shared {
+            let source_attr = self
+                .find_component(component_id)
+                .ok_or(MoveError::InconsistentStorage)?;
+            let destination_attr = destination
+                .find_component(component_id)
+                .ok_or(MoveError::InconsistentStorage)?;
+
+            let source_guard = source_attr
+                .read()
+                .map_err(|_| MoveError::InconsistentStorage)?;
+            let mut destination_guard = Self::lock_write_move(destination_attr, component_id)?;
+
+            match destination_guard.extend_from_rows_dyn(source_guard.as_ref(), &rows) {
+                Ok((start, appended)) if start == destination_start && appended == count => {
+                    copied_shared.push(component_id);
+                }
+                Ok((start, _)) => {
+                    drop(destination_guard);
+                    copied_shared.push(component_id);
+                    rollback_copies(destination, &copied_shared);
+                    return Err(MoveError::RowMisalignment {
+                        expected: Self::append_position_for_len(destination_start)?,
+                        got: Self::append_position_for_len(start)?,
+                        component_id,
+                    }
+                    .into());
+                }
+                Err(source_error) => {
+                    drop(destination_guard);
+                    rollback_copies(destination, &copied_shared);
+                    return Err(MoveError::PushFromFailed {
+                        component_id,
+                        source_error,
+                    }
+                    .into());
+                }
+            }
+        }
+
+        if let Some((component_id, values, order)) = added_column {
+            let destination_attr = destination
+                .find_component(component_id)
+                .ok_or(MoveError::InconsistentStorage)?;
+            let mut destination_guard = Self::lock_write_move(destination_attr, component_id)?;
+            match destination_guard.extend_permuted_from_vec_any(values, &order) {
+                Ok((start, appended)) if start == destination_start && appended == count => {}
+                Ok(_) => {
+                    // The added column owns its values: drop them.
+                    let _ = destination_guard.truncate_to(destination_start);
+                    drop(destination_guard);
+                    rollback_copies(destination, &copied_shared);
+                    return Err(MoveError::InconsistentStorage.into());
+                }
+                Err(source_error) => {
+                    drop(destination_guard);
+                    rollback_copies(destination, &copied_shared);
+                    return Err(MoveError::PushFailed {
+                        component_id,
+                        source_error,
+                    }
+                    .into());
+                }
+            }
+        }
+
+        // ------------------------------------------------ commit phase
+        // Acquire every source column write lock up front (ascending id),
+        // then the source metadata lock - the global lock-ordering contract.
+        let mut guards = Vec::with_capacity(self.components.len());
+        for (component_id, attr) in self.components.iter() {
+            let guard = Self::lock_write_move(attr, *component_id)?;
+            guards.push((*component_id, guard));
+        }
+
+        let mut meta = self
+            .meta
+            .write()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+
+        let mut pending_moves: Vec<(Entity, EntityLocation)> = Vec::new();
+
+        for &(_entity, chunk, row) in targets {
+            let mut moved_from: Option<(ChunkID, RowID)> = None;
+            let mut first = true;
+            for (component_id, guard) in guards.iter_mut() {
+                let removed_here = Some(*component_id) == removed_component;
+                let pos = if removed_here {
+                    guard.as_mut().swap_remove_dyn(chunk, row)
+                } else {
+                    guard.as_mut().swap_remove_forgotten_dyn(chunk, row)
+                }
+                .map_err(|source_error| MoveError::SwapRemoveError {
+                    component_id: *component_id,
+                    source_error,
+                })?;
+
+                if first {
+                    moved_from = pos;
+                    first = false;
+                } else if pos != moved_from {
+                    return Err(MoveError::InconsistentSwapInfo.into());
+                }
+            }
+
+            Self::ensure_capacity(&mut meta, chunk as usize + 1);
+            if let Some((moved_chunk, moved_row)) = moved_from {
+                let moved_entity =
+                    meta.entity_positions[moved_chunk as usize][moved_row as usize];
+                if moved_entity == Entity::PLACEHOLDER {
+                    return Err(InternalViolation::DespawnMovedSlotMissingEntity.into());
+                }
+                meta.entity_positions[chunk as usize][row as usize] = moved_entity;
+                pending_moves.push((
+                    moved_entity,
+                    EntityLocation {
+                        archetype: self.archetype_id,
+                        chunk,
+                        row,
+                    },
+                ));
+                meta.entity_positions[moved_chunk as usize][moved_row as usize] =
+                    Entity::PLACEHOLDER;
+            } else {
+                meta.entity_positions[chunk as usize][row as usize] = Entity::PLACEHOLDER;
+            }
+
+            meta.length = meta.length.saturating_sub(1);
+        }
+
+        if meta.length == 0 {
+            meta.entity_positions.clear();
+        }
+        drop(meta);
+        drop(guards);
+
+        // Destination metadata (positions + length) in one pass.
+        let migrated: Vec<Entity> = targets.iter().map(|&(entity, _, _)| entity).collect();
+        destination.commit_batch_rows(destination_start, &migrated)?;
+
+        // New locations: backfilled source entities first (order-preserving
+        // for chained moves), then the migrated entities' destination rows.
+        for (offset, &entity) in migrated.iter().enumerate() {
+            let index = destination_start + offset;
+            pending_moves.push((
+                entity,
+                EntityLocation {
+                    archetype: destination.archetype_id,
+                    chunk: (index / CHUNK_CAP) as ChunkID,
+                    row: (index % CHUNK_CAP) as RowID,
+                },
+            ));
+        }
+        shards
+            .set_locations_grouped(&pending_moves)
+            .map_err(ECSError::from)?;
+
+        Ok(())
+    }
+
     fn preflight_migration(
         &self,
         destination: &Archetype,
@@ -775,7 +1012,8 @@ impl Archetype {
                 .entity_positions
                 .get(source_position.0 as usize)
                 .and_then(|chunk| chunk.get(source_position.1 as usize))
-                .and_then(|slot| *slot);
+                .copied()
+                .filter(|entity| *entity != Entity::PLACEHOLDER);
             if source_slot != Some(entity) {
                 return Err(MoveError::MetadataFailure {
                     entity: Some(entity.to_raw()),
@@ -788,7 +1026,8 @@ impl Archetype {
                     .entity_positions
                     .get(chunk as usize)
                     .and_then(|chunk_meta| chunk_meta.get(row as usize))
-                    .and_then(|slot| *slot);
+                    .copied()
+                .filter(|entity| *entity != Entity::PLACEHOLDER);
                 if swapped_slot.is_none() {
                     return Err(MoveError::MetadataFailure {
                         entity: Some(entity.to_raw()),
@@ -812,7 +1051,8 @@ impl Archetype {
                 .entity_positions
                 .get(destination_position.0 as usize)
                 .and_then(|chunk| chunk.get(destination_position.1 as usize))
-                .and_then(|slot| *slot)
+                .copied()
+                .filter(|entity| *entity != Entity::PLACEHOLDER)
                 .is_some();
             if occupied {
                 return Err(MoveError::MetadataFailure {

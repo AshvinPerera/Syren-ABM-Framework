@@ -22,6 +22,13 @@
 //! never blocked by one another. Only a write on the *same key* requires
 //! exclusive access.
 //!
+//! ## Access pattern
+//!
+//! [`Environment::get`] performs a string-keyed map lookup, a lock
+//! acquisition, and a clone. That is cheap once per system invocation but not
+//! per agent: read the parameters you need into locals **before** entering a
+//! `for_each`, not inside the per-agent closure.
+//!
 //! ## Dirty tracking
 //!
 //! Every successful call to [`set`](Environment::set) inserts the entry's

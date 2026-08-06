@@ -34,7 +34,9 @@ pub(crate) mod profiling;
 
 // Core ECS manager and world access
 
-pub use engine::manager::{BoundaryHandle, ECSManager, ECSReference, Read, Write};
+pub use engine::manager::{
+    BoundaryHandle, ECSManager, ECSReference, EntityQueryParam, QueryParam, Read, Write,
+};
 
 // Entity types
 
@@ -71,11 +73,12 @@ pub use engine::scheduler::{Scheduler, Stage};
 // Deferred commands
 
 pub use engine::commands::Command;
+pub use engine::commands::{BatchColumn, SpawnBatch};
 
 // Error types
 
 pub use engine::error::{
-    AttributeError, ECSError, ECSResult, ExecutionError, MoveError, SpawnError,
+    AttributeError, ECSError, ECSResult, ExecutionError, MoveError, RegistryError, SpawnError,
 };
 
 // User-attributable error context for boundary access.
@@ -93,7 +96,8 @@ pub use engine::types::{BoundaryID, ChannelID};
 #[cfg(feature = "gpu")]
 pub use engine::types::{GPUAccessMode, GPUResourceID};
 
-pub use engine::activation::ActivationOrder;
+pub use engine::activation::{ActivationOrder, RunContext};
+pub use engine::random::DetRng;
 pub use engine::boundary::{BoundaryChannelProfile, BoundaryContext, BoundaryResource};
 pub use engine::dot_export::DotExport;
 pub use engine::plan_display::PlanDisplay;
@@ -115,6 +119,8 @@ pub mod advanced {
     pub use crate::engine::entity::EntityShards;
     pub use crate::engine::manager::ECSData;
     pub use crate::engine::storage::{cast_slice, cast_slice_mut, Attribute, TypeErasedAttribute};
+    pub use crate::engine::worker_stage::WorkerStage;
+    pub use crate::engine::workers::{max_workers, worker_id};
 }
 
 #[cfg(feature = "agents")]
@@ -129,6 +135,9 @@ pub mod messaging;
 #[cfg(feature = "model")]
 pub mod model;
 
+#[cfg(feature = "environment")]
+pub mod space;
+
 // -----------------------------------------------------------------------------
 // Prelude (Optional but recommended)
 // -----------------------------------------------------------------------------
@@ -142,6 +151,6 @@ pub mod model;
 pub mod prelude {
     pub use crate::{
         BuiltQuery, ComponentRegistry, ECSManager, ECSReference, Entity, FnSystem, QueryBuilder,
-        QueryComponent, QuerySignature, Signature, System, SystemBackend,
+        QueryComponent, QuerySignature, RunContext, Signature, System, SystemBackend,
     };
 }

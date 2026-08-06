@@ -183,7 +183,7 @@ fn model_agent_benchmarks(c: &mut Criterion) {
                     .unwrap()
                     .with_system(FnSystem::new(1, "increment", access1, move |ecs| {
                         let q = ecs.query()?.write::<BenchAgent>()?.build()?;
-                        ecs.for_each::<(Write<BenchAgent>,)>(q, &|agent| {
+                        ecs.for_each::<(Write<BenchAgent>,), _>(q, |agent| {
                             agent.0.value = agent.0.value.wrapping_add(1);
                         })?;
                         Ok(())

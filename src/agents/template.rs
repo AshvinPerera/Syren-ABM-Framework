@@ -40,6 +40,15 @@ use super::hooks::{DespawnBatchHook, DespawnHook, SpawnBatchHook, SpawnHook};
 /// type registered for the corresponding [`ComponentID`].
 pub type DefaultFactory = Box<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>;
 
+/// Factory closure that produces a whole default **column** for batch spawns.
+///
+/// Given a row count `n`, returns a `Box<dyn Any + Send>` containing a
+/// `Vec<T>` of `n` default values, where `T` is the component type
+/// registered for the corresponding [`ComponentID`]. Batch spawning uses
+/// this instead of invoking the per-value [`DefaultFactory`] `n` times and
+/// boxing each result individually.
+pub type ColumnFactory = Box<dyn Fn(usize) -> Box<dyn Any + Send> + Send + Sync>;
+
 /// Named, typed descriptor for a class of agents.
 ///
 /// Registered once at world setup via
@@ -58,6 +67,9 @@ pub struct AgentTemplate {
     /// Maps each `ComponentID` in `signature` to a factory that produces the
     /// default component value for that slot.
     pub(crate) defaults: HashMap<ComponentID, DefaultFactory>,
+    /// Maps each `ComponentID` in `signature` to a factory producing a
+    /// whole default column (`Vec<T>`) for batch spawns.
+    pub(crate) column_defaults: HashMap<ComponentID, ColumnFactory>,
     pub(crate) on_spawn: Option<SpawnHook>,
     pub(crate) on_despawn: Option<DespawnHook>,
     pub(crate) on_spawn_batch: Option<SpawnBatchHook>,
@@ -74,6 +86,7 @@ impl AgentTemplate {
             name: name.into(),
             signature: Signature::default(),
             defaults: HashMap::new(),
+            column_defaults: HashMap::new(),
             on_spawn: None,
             on_despawn: None,
             on_spawn_batch: None,
@@ -194,6 +207,7 @@ pub struct AgentTemplateBuilder {
     name: String,
     signature: Signature,
     defaults: HashMap<ComponentID, DefaultFactory>,
+    column_defaults: HashMap<ComponentID, ColumnFactory>,
     on_spawn: Option<SpawnHook>,
     on_despawn: Option<DespawnHook>,
     on_spawn_batch: Option<SpawnBatchHook>,
@@ -227,23 +241,34 @@ impl AgentTemplateBuilder {
             id,
             Box::new(|| Box::new(T::default()) as Box<dyn Any + Send>),
         );
+        self.column_defaults.insert(
+            id,
+            Box::new(|count| {
+                let column: Vec<T> = (0..count).map(|_| T::default()).collect();
+                Box::new(column) as Box<dyn Any + Send>
+            }),
+        );
         Ok(self)
     }
 
-    /// Registers a component with an explicit factory closure.
+    /// Registers a component with an explicit typed factory closure.
     ///
     /// Use this when the component's meaningful default differs from its
     /// [`Default`] implementation, or when [`Default`] is not implemented.
+    ///
+    /// The factory is typed (returns `T`, not a box) so the template can
+    /// derive both the per-value default used by single spawns and the
+    /// columnar default (`Vec<T>`) used by batch spawns.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError::DuplicateComponent`] if `id` is already in the
     /// signature.
-    pub fn with_component_factory(
-        mut self,
-        id: ComponentID,
-        factory: DefaultFactory,
-    ) -> AgentResult<Self> {
+    pub fn with_component_factory<T, F>(mut self, id: ComponentID, factory: F) -> AgentResult<Self>
+    where
+        T: Any + Send + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+    {
         if self
             .signature
             .try_has(id)
@@ -254,7 +279,19 @@ impl AgentTemplateBuilder {
         self.signature
             .try_set(id)
             .map_err(|_| AgentError::invalid_component_id(id))?;
-        self.defaults.insert(id, factory);
+        let factory = std::sync::Arc::new(factory);
+        let per_value = std::sync::Arc::clone(&factory);
+        self.defaults.insert(
+            id,
+            Box::new(move || Box::new(per_value()) as Box<dyn Any + Send>),
+        );
+        self.column_defaults.insert(
+            id,
+            Box::new(move |count| {
+                let column: Vec<T> = (0..count).map(|_| factory()).collect();
+                Box::new(column) as Box<dyn Any + Send>
+            }),
+        );
         Ok(self)
     }
 
@@ -297,6 +334,7 @@ impl AgentTemplateBuilder {
             name: self.name,
             signature: self.signature,
             defaults: self.defaults,
+            column_defaults: self.column_defaults,
             on_spawn: self.on_spawn,
             on_despawn: self.on_despawn,
             on_spawn_batch: self.on_spawn_batch,
@@ -366,10 +404,7 @@ mod tests {
     #[test]
     fn explicit_factory_is_stored() {
         let tmpl = AgentTemplate::builder("B")
-            .with_component_factory(
-                7,
-                Box::new(|| Box::new(Health(42.0)) as Box<dyn Any + Send>),
-            )
+            .with_component_factory(7, || Health(42.0))
             .unwrap()
             .build();
         assert!(tmpl.has_component(7).unwrap());

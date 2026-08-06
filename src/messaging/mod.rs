@@ -33,4 +33,6 @@ pub use registry::{Capacity, MessageDescriptor, MessageRegistry, SpatialConfig, 
 
 pub use buffer_set::MessageBufferSet;
 
+pub use thread_local_emit::MessageEmitter;
+
 pub use specialisations::{BruteForceIter, BucketIter, InboxIter, SpatialQueryIter};

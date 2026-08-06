@@ -102,7 +102,10 @@ struct PendingGpuMessageResource {
 struct PendingAgentPopulation {
     template_name: String,
     component_id: crate::ComponentID,
-    values: Vec<Box<dyn Any + Send>>,
+    /// The whole column as one type-erased `Vec<T>`.
+    values: Box<dyn Any + Send>,
+    /// Element count recorded at registration.
+    len: usize,
 }
 
 impl ModelBuilder {
@@ -201,13 +204,12 @@ impl ModelBuilder {
     {
         let template_name = template_name.into();
         self.agents.get(&template_name)?;
+        let len = values.len();
         self.pending_agent_populations.push(PendingAgentPopulation {
             template_name,
             component_id,
-            values: values
-                .into_iter()
-                .map(|value| Box::new(value) as Box<dyn Any + Send>)
-                .collect(),
+            values: Box::new(values),
+            len,
         });
         Ok(self)
     }
@@ -557,12 +559,34 @@ impl ModelBuilder {
             tick_count: 0,
         };
 
+        // Group by template so an agent declared with several components is
+        // spawned once with all of its columns, not once per column.
+        let mut grouped: Vec<(String, usize, Vec<(crate::ComponentID, Box<dyn Any + Send>)>)> =
+            Vec::new();
         for population in self.pending_agent_populations {
-            model.spawn_agent_batch_boxed(
-                &population.template_name,
-                population.component_id,
-                population.values,
-            )?;
+            match grouped
+                .iter_mut()
+                .find(|(name, _, _)| *name == population.template_name)
+            {
+                Some((_, len, columns)) => {
+                    if *len != population.len {
+                        return Err(ModelError::AgentPopulationLengthMismatch {
+                            template: population.template_name,
+                            expected: *len,
+                            found: population.len,
+                        });
+                    }
+                    columns.push((population.component_id, population.values));
+                }
+                None => grouped.push((
+                    population.template_name,
+                    population.len,
+                    vec![(population.component_id, population.values)],
+                )),
+            }
+        }
+        for (template_name, len, columns) in grouped {
+            model.spawn_agent_batch_erased(&template_name, columns, len)?;
         }
 
         Ok(model)

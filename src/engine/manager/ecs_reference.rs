@@ -28,6 +28,7 @@ use std::sync::atomic::Ordering;
 use parking_lot::ArcRwLockReadGuard;
 use parking_lot::RawRwLock;
 
+use crate::engine::activation::RunContext;
 use crate::engine::borrow::BorrowGuard;
 use crate::engine::boundary::BoundaryResource;
 use crate::engine::commands::{Command, CommandEvents};
@@ -45,7 +46,7 @@ use crate::{ComponentID, Entity};
 use super::data::ECSData;
 use super::ecs_manager::{CommandDrainError, ECSManager};
 use super::iteration::IterationScope;
-use super::query_param::{QueryParam, Read, Write};
+use super::query_param::{EntityQueryParam, QueryParam, Read, Write};
 
 /// A non-owning handle granting access to ECS data.
 ///
@@ -105,6 +106,15 @@ impl<'a> ECSReference<'a> {
         Ok(QueryBuilder::with_registry(self.manager.registry()))
     }
 
+    /// Returns deterministic context for the system currently running on this
+    /// thread.
+    ///
+    /// Code running outside the scheduler receives the zero-valued default.
+    #[inline]
+    pub fn run_context(&self) -> RunContext {
+        crate::engine::activation::current_run_context()
+    }
+
     /// Returns a typed handle to a registered boundary resource.
     ///
     /// The returned [`crate::BoundaryHandle`] owns a clone of the resource's `Arc`
@@ -145,21 +155,23 @@ impl<'a> ECSReference<'a> {
             guard.slots[id as usize].clone()
         };
 
-        // Type-check before acquiring the read guard so the type-mismatch
-        // path doesn't pay for a lock acquisition.
-        {
-            let probe = slot.read();
-            if !probe.as_any().is::<R>() {
+        // Acquire the per-resource read guard once and resolve the typed
+        // pointer here, so `Deref` is a plain pointer read instead of a
+        // downcast per call.
+        let guard = slot.read_arc();
+        let typed = match guard.as_any().downcast_ref::<R>() {
+            Some(resource) => TypedResourcePtr(std::ptr::NonNull::from(resource)),
+            None => {
                 return Err(ECSError::from(ExecutionError::BoundaryAccessFailed {
                     reason: crate::engine::error::BoundaryAccessFailure::TypeMismatch,
                     id,
                 }));
             }
-        }
+        };
 
-        let read_guard = slot.read_arc();
         Ok(BoundaryHandle {
-            guard: read_guard,
+            guard,
+            typed,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -213,6 +225,54 @@ impl<'a> ECSReference<'a> {
         data.for_each_abstraction_fallible_unchecked(query, f)
     }
 
+    /// Entity-aware parallel chunk iteration.
+    ///
+    /// Same safety contract as [`Self::for_each_abstraction`], but the closure
+    /// also receives a row-aligned entity slice for each chunk.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `query`'s read and write component order matches
+    /// the raw byte-slice contract expected by `f`.
+    pub unsafe fn for_each_entity_abstraction(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) + Send + Sync,
+    ) -> ECSResult<()> {
+        let _phase = self.manager.phase_read()?;
+        let _iter_scope = IterationScope::new(&self.manager.active_iters);
+        let _borrows = BorrowGuard::new(&self.manager.borrows, query.read_ids(), query.write_ids())
+            .map_err(ECSError::from)?;
+        // SAFETY: shared phase lock held; iteration scope active.
+        let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
+        data.for_each_entity_abstraction_unchecked(query, f)
+            .map_err(ECSError::from)?;
+        Ok(())
+    }
+
+    /// Entity-aware parallel chunk iteration whose closure may return an error.
+    ///
+    /// Same semantics as [`Self::for_each_entity_abstraction`] for borrow
+    /// checking, phase discipline, and chunk-disjoint parallel execution.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `query`'s read and write component order matches
+    /// the raw byte-slice contract expected by `f`.
+    pub unsafe fn for_each_entity_abstraction_fallible(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(&[Entity], &[&[u8]], &mut [&mut [u8]]) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()> {
+        let _phase = self.manager.phase_read()?;
+        let _iter_scope = IterationScope::new(&self.manager.active_iters);
+        let _borrows = BorrowGuard::new(&self.manager.borrows, query.read_ids(), query.write_ids())
+            .map_err(ECSError::from)?;
+        // SAFETY: shared phase lock held; iteration scope active.
+        let data = unsafe { self.manager.data_ref_unchecked(&_phase) };
+        data.for_each_entity_abstraction_fallible_unchecked(query, f)
+    }
+
     /// Generic parallel read-only reduction over ECS data.
     ///
     /// # Safety
@@ -254,17 +314,60 @@ impl<'a> ECSReference<'a> {
 
 // Generic tuple for_each
 impl ECSReference<'_> {
-    /// Generic tuple-based parallel iteration. `P` is `Read<T>`/`Write<T>` or a tuple thereof.
-    pub fn for_each<P>(&self, query: BuiltQuery, f: &P::Closure) -> ECSResult<()>
+    /// Generic tuple-based parallel iteration. `P` is `Read<T>`/`Write<T>` or
+    /// a tuple thereof (up to four reads and four writes).
+    ///
+    /// The closure receives [`QueryParam::Item`] per row and is statically
+    /// dispatched - the compiler inlines it into the per-row loop. Because
+    /// the closure type is inferred, name only `P` and let `_` stand for the
+    /// closure:
+    ///
+    /// ```text
+    /// world.for_each::<(Read<Productivity>, Write<Wealth>), _>(query, |(p, w)| {
+    ///     w.value += p.rate;
+    /// })?;
+    /// ```
+    pub fn for_each<P, F>(&self, query: BuiltQuery, f: F) -> ECSResult<()>
     where
         P: QueryParam,
-        P::Closure: Send + Sync,
+        F: for<'i> Fn(P::Item<'i>) + Send + Sync,
     {
         P::validate(&query)?;
         // SAFETY: the typed query was validated against its stored TypeIds.
         unsafe {
             self.for_each_abstraction(query, move |reads, writes| {
-                P::for_each_chunk(reads, writes, f)
+                P::for_each_chunk(reads, writes, &f)
+            })
+        }
+    }
+
+    /// Generic tuple-based parallel iteration that also passes the owning
+    /// [`Entity`] for each component row.
+    pub fn for_each_entity<P, F>(&self, query: BuiltQuery, f: F) -> ECSResult<()>
+    where
+        P: EntityQueryParam,
+        F: for<'i> Fn(P::EntityItem<'i>) + Send + Sync,
+    {
+        P::validate(&query)?;
+        // SAFETY: the typed query was validated against its stored TypeIds.
+        unsafe {
+            self.for_each_entity_abstraction(query, move |entities, reads, writes| {
+                P::for_each_entity_chunk(entities, reads, writes, &f)
+            })
+        }
+    }
+
+    /// Generic tuple-based entity-aware iteration whose closure may fail.
+    pub fn for_each_entity_fallible<P, F>(&self, query: BuiltQuery, f: F) -> ECSResult<()>
+    where
+        P: EntityQueryParam,
+        F: for<'i> Fn(P::EntityItem<'i>) -> ECSResult<()> + Send + Sync,
+    {
+        P::validate(&query)?;
+        // SAFETY: the typed query was validated against its stored TypeIds.
+        unsafe {
+            self.for_each_entity_abstraction_fallible(query, move |entities, reads, writes| {
+                P::for_each_entity_chunk_fallible(entities, reads, writes, &f)
             })
         }
     }
@@ -367,6 +470,27 @@ impl ECSReference<'_> {
         }
     }
 
+    /// Single read with owning entity.
+    pub fn for_each_entity_r1<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(Entity, &A) + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+    {
+        <(Read<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_entity_abstraction(query, move |entities, reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                debug_assert_eq!(entities.len(), a.len());
+                for i in 0..a.len() {
+                    f(entities[i], &a[i]);
+                }
+            })
+        }
+    }
+
     /// Single write.
     pub fn for_each_w1<A>(
         &self,
@@ -382,6 +506,27 @@ impl ECSReference<'_> {
                 let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
                 for item in slice {
                     f(item);
+                }
+            })
+        }
+    }
+
+    /// Single write with owning entity.
+    pub fn for_each_entity_w1<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(Entity, &mut A) + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+    {
+        <(Write<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_entity_abstraction(query, move |entities, _, writes| {
+                let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(entities.len(), slice.len());
+                for i in 0..slice.len() {
+                    f(entities[i], &mut slice[i]);
                 }
             })
         }
@@ -454,6 +599,30 @@ impl ECSReference<'_> {
                 debug_assert_eq!(a.len(), b.len());
                 for i in 0..a.len() {
                     f(&a[i], &mut b[i]);
+                }
+            })
+        }
+    }
+
+    /// One read, one write, with owning entity.
+    pub fn for_each_entity_r1w1<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(Entity, &A, &mut B) + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+    {
+        <(Read<A>, Write<B>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_entity_abstraction(query, move |entities, reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(entities.len(), a.len());
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    f(entities[i], &a[i], &mut b[i]);
                 }
             })
         }
@@ -538,6 +707,28 @@ impl ECSReference<'_> {
         }
     }
 
+    /// Single read with owning entity and fallible closure.
+    pub fn for_each_entity_r1_fallible<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(Entity, &A) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+    {
+        <(Read<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_entity_abstraction_fallible(query, move |entities, reads, _| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                debug_assert_eq!(entities.len(), a.len());
+                for i in 0..a.len() {
+                    f(entities[i], &a[i])?;
+                }
+                Ok(())
+            })
+        }
+    }
+
     /// Single write, fallible closure.
     pub fn for_each_w1_fallible<A>(
         &self,
@@ -553,6 +744,28 @@ impl ECSReference<'_> {
                 let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
                 for item in slice {
                     f(item)?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Single write with owning entity and fallible closure.
+    pub fn for_each_entity_w1_fallible<A>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(Entity, &mut A) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+    {
+        <(Write<A>,) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_entity_abstraction_fallible(query, move |entities, _, writes| {
+                let slice = cast_slice_mut::<A>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(entities.len(), slice.len());
+                for i in 0..slice.len() {
+                    f(entities[i], &mut slice[i])?;
                 }
                 Ok(())
             })
@@ -601,6 +814,31 @@ impl ECSReference<'_> {
                 debug_assert_eq!(a.len(), b.len());
                 for i in 0..a.len() {
                     f(&a[i], &mut b[i])?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// One read, one write, with owning entity and fallible closure.
+    pub fn for_each_entity_r1w1_fallible<A, B>(
+        &self,
+        query: BuiltQuery,
+        f: impl Fn(Entity, &A, &mut B) -> ECSResult<()> + Send + Sync,
+    ) -> ECSResult<()>
+    where
+        A: 'static + Send + Sync,
+        B: 'static + Send + Sync,
+    {
+        <(Read<A>, Write<B>) as QueryParam>::validate(&query)?;
+        unsafe {
+            self.for_each_entity_abstraction_fallible(query, move |entities, reads, writes| {
+                let a = cast_slice::<A>(reads[0].as_ptr(), reads[0].len());
+                let b = cast_slice_mut::<B>(writes[0].as_mut_ptr(), writes[0].len());
+                debug_assert_eq!(entities.len(), a.len());
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    f(entities[i], &a[i], &mut b[i])?;
                 }
                 Ok(())
             })
@@ -657,13 +895,33 @@ impl ECSReference<'_> {
     }
 }
 
+/// Shared-reference-like pointer to the resource behind a boundary guard.
+///
+/// Semantically this is a `&R` whose lifetime is enforced by the guard field
+/// that always accompanies it, so its thread-safety impls mirror `&R`
+/// (`Send`/`Sync` iff `R: Sync`). The struct's overall auto-traits therefore
+/// remain exactly those of the guard, as before the pointer was cached.
+struct TypedResourcePtr<R>(std::ptr::NonNull<R>);
+
+// SAFETY: `TypedResourcePtr` is only ever dereferenced immutably, like `&R`,
+// and `&R: Send + Sync` requires exactly `R: Sync`.
+unsafe impl<R: Sync> Send for TypedResourcePtr<R> {}
+// SAFETY: as above - shared access only exposes `&R`.
+unsafe impl<R: Sync> Sync for TypedResourcePtr<R> {}
+
 /// Short-lived typed reference to a boundary resource.
 ///
 /// Acquired via [`ECSReference::boundary`]. Owns a per-resource read guard
 /// (no other reader is blocked, write locks block until all handles are
 /// dropped) and dereferences to `R`. Drop promptly.
 pub struct BoundaryHandle<R: BoundaryResource + 'static> {
+    /// Held for its RAII effect: keeps the per-resource read lock (and the
+    /// resource behind `typed`) alive until the handle drops.
+    #[allow(dead_code)]
     guard: ArcRwLockReadGuard<RawRwLock, dyn BoundaryResource>,
+    /// Typed view of the resource behind `guard`, resolved once at
+    /// construction so `Deref` avoids a downcast per call.
+    typed: TypedResourcePtr<R>,
     _phantom: std::marker::PhantomData<R>,
 }
 
@@ -671,12 +929,9 @@ impl<R: BoundaryResource + 'static> std::ops::Deref for BoundaryHandle<R> {
     type Target = R;
 
     fn deref(&self) -> &R {
-        // SAFETY: `ECSReference::boundary` verified that the inner resource
-        // is of type `R` before constructing this handle. The Arc keeps the
-        // resource pinned in memory for the duration of the guard.
-        self.guard
-            .as_any()
-            .downcast_ref::<R>()
-            .expect("BoundaryHandle downcast failed.")
+        // SAFETY: `typed` was resolved from the resource behind `guard` at
+        // construction. The Arc'd read guard keeps the resource alive at a
+        // stable address and excludes writers for the handle's lifetime.
+        unsafe { self.typed.0.as_ref() }
     }
 }

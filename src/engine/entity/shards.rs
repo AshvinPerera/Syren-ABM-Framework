@@ -306,6 +306,150 @@ impl EntityShards {
         Ok(())
     }
 
+    /// Allocates `count` entities in bulk, striping contiguous runs across
+    /// shards in ascending shard order.
+    ///
+    /// `location_for(k)` supplies the location of the `k`-th entity of the
+    /// batch; the returned vector's `k`-th element is that entity's handle,
+    /// so batch row order and handle order correspond exactly. Each shard's
+    /// mutex is taken once per run instead of once per entity.
+    ///
+    /// ## Failure semantics
+    /// If a shard cannot hold its run, every entity already allocated by the
+    /// batch is despawned before the error is returned, so a failed batch
+    /// allocates nothing.
+    pub(crate) fn spawn_batch(
+        &self,
+        count: usize,
+        mut location_for: impl FnMut(usize) -> EntityLocation,
+    ) -> Result<Vec<Entity>, SpawnError> {
+        let mut out = Vec::with_capacity(count);
+        if count == 0 {
+            return Ok(out);
+        }
+
+        let shard_count = self.shard_count();
+        let per_shard = count.div_ceil(shard_count);
+
+        let mut offset = 0usize;
+        let mut shard_id: ShardID = 0;
+        while offset < count {
+            let run = per_shard.min(count - offset);
+            let result = {
+                let mut entities = self.lock_entities(shard_id)?;
+                let base = offset;
+                entities.spawn_many(shard_id, run, |k| location_for(base + k), &mut out)
+            };
+
+            match result {
+                Ok(()) => {
+                    let shard = &self.shards[shard_id as usize];
+                    shard
+                        .live_entity_count
+                        .fetch_add(run as u32, Ordering::Relaxed);
+                    let free_now = self
+                        .lock_entities(shard_id)
+                        .map(|entities| entities.free_store.len())
+                        .unwrap_or(0);
+                    shard
+                        .approximate_free_store_length
+                        .store(free_now as u32, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    // Roll back everything the batch allocated so far.
+                    for entity in out.drain(..) {
+                        let _ = self.despawn(entity);
+                    }
+                    return Err(SpawnError::Capacity(error));
+                }
+            }
+
+            offset += run;
+            shard_id += 1;
+        }
+
+        Ok(out)
+    }
+
+    /// Despawns a batch of entities, locking each shard once.
+    ///
+    /// Returns an error if any entity was stale; earlier entities in the
+    /// batch may already have been despawned in that case (callers preflight
+    /// liveness, so a stale handle here indicates an internal inconsistency).
+    pub(crate) fn despawn_grouped(&self, entities: &[Entity]) -> Result<(), SpawnError> {
+        let shard_count = self.shard_count();
+        let mut buckets: Vec<Vec<Entity>> = vec![Vec::new(); shard_count];
+        for &entity in entities {
+            let shard_id = entity.shard() as usize;
+            if shard_id >= shard_count {
+                return Err(SpawnError::StaleEntity(
+                    crate::engine::error::StaleEntityError,
+                ));
+            }
+            buckets[shard_id].push(entity);
+        }
+
+        for (shard_id, bucket) in buckets.into_iter().enumerate() {
+            if bucket.is_empty() {
+                continue;
+            }
+            let shard = &self.shards[shard_id];
+            let mut pool = shard
+                .entities
+                .lock()
+                .map_err(|_| SpawnError::ShardLockPoisoned)?;
+            for entity in bucket {
+                if !pool.despawn(entity) {
+                    return Err(SpawnError::StaleEntity(
+                        crate::engine::error::StaleEntityError,
+                    ));
+                }
+                shard
+                    .approximate_free_store_length
+                    .fetch_add(1, Ordering::Relaxed);
+                shard.live_entity_count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies location updates in order, locking each shard once.
+    ///
+    /// Entries for one entity may appear multiple times; per-shard order is
+    /// preserved, so the last write wins - matching the semantics of calling
+    /// [`set_location`](Self::set_location) sequentially.
+    pub(crate) fn set_locations_grouped(
+        &self,
+        moves: &[(Entity, EntityLocation)],
+    ) -> Result<(), SpawnError> {
+        let shard_count = self.shard_count();
+        let mut buckets: Vec<Vec<(Entity, EntityLocation)>> = vec![Vec::new(); shard_count];
+        for &(entity, location) in moves {
+            let shard_id = entity.shard() as usize;
+            if shard_id >= shard_count {
+                return Err(SpawnError::ShardBounds(ShardBoundsError {
+                    index: entity.shard(),
+                    max_index: shard_count.saturating_sub(1) as u32,
+                }));
+            }
+            buckets[shard_id].push((entity, location));
+        }
+
+        for (shard_id, bucket) in buckets.into_iter().enumerate() {
+            if bucket.is_empty() {
+                continue;
+            }
+            let mut pool = self.shards[shard_id]
+                .entities
+                .lock()
+                .map_err(|_| SpawnError::ShardLockPoisoned)?;
+            for (entity, location) in bucket {
+                pool.set_location(entity, location);
+            }
+        }
+        Ok(())
+    }
+
     /// Despawns an entity.
     ///
     /// ## Returns

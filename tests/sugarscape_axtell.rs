@@ -61,7 +61,7 @@ fn axtell_replaces_dead_agents_with_newborns() -> ECSResult<()> {
 
     let world = model.ecs().world_ref();
     let q = world.query()?.write::<SugarAgent>()?.build()?;
-    world.for_each::<(abm_framework::Write<SugarAgent>,)>(q, &|agent| {
+    world.for_each::<(abm_framework::Write<SugarAgent>,), _>(q, |agent| {
         if agent.0.id == 0 {
             agent.0.wealth = 0;
             agent.0.max_age = 0;

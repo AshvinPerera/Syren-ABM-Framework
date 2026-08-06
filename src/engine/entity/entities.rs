@@ -142,6 +142,59 @@ impl Entities {
         Ok(make_entity(shard_id, index, version))
     }
 
+    /// Allocates `count` entity slots under a single borrow.
+    ///
+    /// The bulk companion to [`spawn`](Self::spawn): capacity is ensured
+    /// once, then slots are claimed from the free list in a tight loop.
+    /// `location_for(k)` supplies the archetype location of the `k`-th
+    /// allocated entity; handles are appended to `out` in `k` order.
+    ///
+    /// ## Errors
+    /// Returns `CapacityError` if the shard cannot hold `count` more live
+    /// entities. No slots are allocated in that case.
+    pub(crate) fn spawn_many(
+        &mut self,
+        shard_id: ShardID,
+        count: usize,
+        mut location_for: impl FnMut(usize) -> EntityLocation,
+        out: &mut Vec<Entity>,
+    ) -> Result<(), CapacityError> {
+        let free = self.free_store.len();
+        if free < count {
+            let deficit = count - free;
+            let capacity = INDEX_CAP as usize + 1;
+            let available = capacity.saturating_sub(self.versions.len());
+            if available < deficit {
+                return Err(CapacityError {
+                    entities_needed: (self.versions.len() as EntityID)
+                        + (deficit as EntityID),
+                    capacity: capacity as EntityID,
+                });
+            }
+            // Grow by at least the deficit, preferring the usual doubling
+            // policy, clamped to what the shard can still address.
+            let growth = deficit.max(self.versions.len()).max(1024).min(available);
+            self.ensure_capacity(growth as EntityCount)?;
+        }
+
+        debug_assert!(self.free_store.len() >= count);
+        out.reserve(count);
+        for k in 0..count {
+            // The capacity check above guarantees enough free slots.
+            let Some(index) = self.free_store.pop() else {
+                return Err(CapacityError {
+                    entities_needed: (self.versions.len() as EntityID) + 1,
+                    capacity: INDEX_CAP as EntityID + 1,
+                });
+            };
+            let version = self.versions[index as usize];
+            self.alive[index as usize] = true;
+            self.locations[index as usize] = location_for(k);
+            out.push(make_entity(shard_id, index, version));
+        }
+        Ok(())
+    }
+
     /// Destroys an entity and invalidates its handle.
     ///
     /// ## Behaviour
@@ -162,6 +215,11 @@ impl Entities {
         match self.versions.get_mut(index) {
             Some(live) if *live == v && self.alive.get(index).copied().unwrap_or(false) => {
                 *live = live.wrapping_add(1);
+                // Skip VersionID::MAX so `Entity::PLACEHOLDER` (the all-ones
+                // raw bit pattern) can never collide with a live handle.
+                if *live == VersionID::MAX {
+                    *live = 0;
+                }
                 self.alive[index] = false;
                 self.locations[index] = EntityLocation::default();
                 self.free_store.push(i);
@@ -190,6 +248,16 @@ impl Entities {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn doctor_version_for_test(&mut self, index: usize, version: VersionID) {
+        self.versions[index] = version;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn version_for_test(&self, index: usize) -> VersionID {
+        self.versions[index]
+    }
+
     /// Updates the stored location for an entity.
     ///
     /// ## Safety
@@ -206,5 +274,29 @@ impl Entities {
         if index < self.locations.len() {
             self.locations[index] = location;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn despawn_version_increment_skips_max() {
+        let mut pool = Entities::default();
+        let first = pool.spawn(0, EntityLocation::default()).unwrap();
+        let index = first.index() as usize;
+
+        // Doctor the slot to the last pre-sentinel version and rebuild the
+        // matching live handle.
+        pool.doctor_version_for_test(index, VersionID::MAX - 1);
+        let handle = make_entity(0, first.index(), VersionID::MAX - 1);
+
+        assert!(pool.despawn(handle));
+        assert_eq!(
+            pool.version_for_test(index),
+            0,
+            "version increment must skip VersionID::MAX"
+        );
     }
 }

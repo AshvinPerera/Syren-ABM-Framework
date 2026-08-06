@@ -153,6 +153,86 @@ fn structural_mutation_benchmarks(c: &mut Criterion) {
         );
     });
 
+    // Columnar batch migration: one command, bitwise row moves, no boxing.
+    group.bench_function("add_batch_4096", |b| {
+        let registry = Arc::clone(&registry);
+        b.iter_batched(
+            || world_with_core(Arc::clone(&registry), core_id).unwrap(),
+            |(ecs, entities)| {
+                let world = ecs.world_ref();
+                let n = entities.len();
+                let values: Vec<AddedValue> =
+                    (0..n).map(|i| AddedValue { _value: i as u32 }).collect();
+                world
+                    .defer(Command::AddComponentBatch {
+                        entities,
+                        component_id: added_id,
+                        values: Box::new(values),
+                        len: n,
+                    })
+                    .unwrap();
+                ecs.apply_deferred_commands().unwrap();
+                black_box(ecs);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("remove_batch_4096", |b| {
+        let registry = Arc::clone(&registry);
+        b.iter_batched(
+            || {
+                let (ecs, entities) = world_with_core(Arc::clone(&registry), core_id).unwrap();
+                let world = ecs.world_ref();
+                let n = entities.len();
+                let values: Vec<AddedValue> =
+                    (0..n).map(|i| AddedValue { _value: i as u32 }).collect();
+                world
+                    .defer(Command::AddComponentBatch {
+                        entities: entities.clone(),
+                        component_id: added_id,
+                        values: Box::new(values),
+                        len: n,
+                    })
+                    .unwrap();
+                ecs.apply_deferred_commands().unwrap();
+                (ecs, entities)
+            },
+            |(ecs, entities)| {
+                let world = ecs.world_ref();
+                world
+                    .defer(Command::RemoveComponentBatch {
+                        entities,
+                        component_id: added_id,
+                    })
+                    .unwrap();
+                ecs.apply_deferred_commands().unwrap();
+                black_box(ecs);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // Batched despawn: one command, column locks taken once per archetype.
+    group.bench_function("despawn_batch_4096", |b| {
+        let registry = Arc::clone(&registry);
+        b.iter_batched(
+            || world_with_core(Arc::clone(&registry), core_id).unwrap(),
+            |(ecs, entities)| {
+                let world = ecs.world_ref();
+                world
+                    .defer(Command::DespawnBatchTagged {
+                        entities,
+                        template_id: abm_framework::AgentTemplateId(0),
+                    })
+                    .unwrap();
+                ecs.apply_deferred_commands().unwrap();
+                black_box(ecs);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
     group.finish();
 }
 

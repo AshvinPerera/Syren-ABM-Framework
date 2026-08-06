@@ -11,7 +11,9 @@ use std::fmt;
 
 use rayon::prelude::*;
 
-use crate::engine::activation::{with_activation_context, ActivationContext, ActivationOrder};
+use crate::engine::activation::{
+    with_activation_context, with_run_context, ActivationContext, ActivationOrder, RunContext,
+};
 use crate::engine::boundary::BoundaryChannelProfile;
 use crate::engine::commands::CommandEvents;
 use crate::engine::component::or_signature_in_place;
@@ -765,10 +767,32 @@ impl Scheduler {
         self.run_with_lifecycle_events(ecs, |_| Ok(()))
     }
 
+    /// Runs the schedule once with deterministic execution context.
+    pub fn run_with_context(
+        &mut self,
+        ecs: ECSReference<'_>,
+        simulation_seed: u64,
+        tick: u64,
+    ) -> ECSResult<()> {
+        self.run_with_context_and_lifecycle_events(ecs, simulation_seed, tick, |_| Ok(()))
+    }
+
     /// Runs the schedule once and reports lifecycle events after each command drain.
     pub fn run_with_lifecycle_events(
         &mut self,
         ecs: ECSReference<'_>,
+        on_lifecycle_events: impl FnMut(&CommandEvents) -> ECSResult<()>,
+    ) -> ECSResult<()> {
+        self.run_with_context_and_lifecycle_events(ecs, self.seed, 0, on_lifecycle_events)
+    }
+
+    /// Runs the schedule once with deterministic execution context and reports
+    /// lifecycle events after each command drain.
+    pub fn run_with_context_and_lifecycle_events(
+        &mut self,
+        ecs: ECSReference<'_>,
+        simulation_seed: u64,
+        tick: u64,
         mut on_lifecycle_events: impl FnMut(&CommandEvents) -> ECSResult<()>,
     ) -> ECSResult<()> {
         let _g = profiler::span("Scheduler::run");
@@ -834,7 +858,14 @@ impl Scheduler {
                             seed: self.seed,
                             system_id: sys.id(),
                         };
-                        let result = with_activation_context(activation, || sys.run(ecs));
+                        let run_context = RunContext {
+                            simulation_seed,
+                            tick,
+                            system_id: sys.id(),
+                        };
+                        let result = with_run_context(run_context, || {
+                            with_activation_context(activation, || sys.run(ecs))
+                        });
                         profiler::flush_thread();
                         result
                     })?;
@@ -871,7 +902,19 @@ impl Scheduler {
 
                             {
                                 let _g_exec = profiler::span("GPU::execute_gpu_system");
-                                gpu::execute_gpu_system(ecs, system.as_ref(), gpu_cap)?;
+                                let run_context = RunContext {
+                                    simulation_seed,
+                                    tick,
+                                    system_id: system.id(),
+                                };
+                                with_run_context(run_context, || {
+                                    gpu::execute_gpu_system(
+                                        ecs,
+                                        system.as_ref(),
+                                        gpu_cap,
+                                        run_context,
+                                    )
+                                })?;
                             }
 
                             ecs.clear_borrows();
@@ -882,6 +925,12 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+
+    /// Returns the global seed used by this scheduler.
+    #[inline]
+    pub fn global_seed(&self) -> u64 {
+        self.seed
     }
 
     /// Formats the compiled execution plan as a human-readable text table.

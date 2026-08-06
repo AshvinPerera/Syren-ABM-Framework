@@ -183,7 +183,7 @@ fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
                 let rows = Arc::new(Mutex::new(Vec::<Household>::new()));
                 let rows_for_query = Arc::clone(&rows);
                 let q = ecs.query()?.read::<Household>()?.build()?;
-                ecs.for_each::<(Read<Household>,)>(q, &move |household| {
+                ecs.for_each::<(Read<Household>,), _>(q, move |household| {
                     rows_for_query.lock().unwrap().push(*household.0);
                 })?;
 
@@ -224,7 +224,7 @@ fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
                 let firm_state = Arc::new(Mutex::new(None::<Firm>));
                 let firm_for_query = Arc::clone(&firm_state);
                 let read_q = ecs.query()?.read::<Firm>()?.build()?;
-                ecs.for_each::<(Read<Firm>,)>(read_q, &move |firm| {
+                ecs.for_each::<(Read<Firm>,), _>(read_q, move |firm| {
                     *firm_for_query.lock().unwrap() = Some(*firm.0);
                 })?;
 
@@ -271,7 +271,7 @@ fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
                 }
 
                 let write_q = ecs.query()?.write::<Firm>()?.build()?;
-                ecs.for_each::<(Write<Firm>,)>(write_q, &move |slot| {
+                ecs.for_each::<(Write<Firm>,), _>(write_q, move |slot| {
                     *slot.0 = firm;
                 })?;
 
@@ -304,7 +304,7 @@ fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
                     .map(|receipt| receipt.quantity)
                     .sum();
                 let q = ecs.query()?.write::<Household>()?.build()?;
-                ecs.for_each::<(Write<Household>,)>(q, &move |state| {
+                ecs.for_each::<(Write<Household>,), _>(q, move |state| {
                     state.0.cash += wage_income[state.0.id as usize];
                     for receipt in &receipt_rows[state.0.id as usize] {
                         assert!(state.0.cash >= receipt.payment);
@@ -322,7 +322,7 @@ fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
             consume_access,
             move |ecs| {
                 let q = ecs.query()?.write::<Household>()?.build()?;
-                ecs.for_each::<(Write<Household>,)>(q, &|state| {
+                ecs.for_each::<(Write<Household>,), _>(q, |state| {
                     let consumed = state.0.goods.min(state.0.consume_need);
                     state.0.goods -= consumed;
                     state.0.consumed += consumed;
@@ -400,7 +400,7 @@ fn snapshot(model: &abm_framework::model::Model) -> ECSResult<EconomySnapshot> {
     let households = Arc::new(Mutex::new(Vec::<Household>::new()));
     let households_for_query = Arc::clone(&households);
     let q_households = world.query()?.read::<Household>()?.build()?;
-    world.for_each::<(Read<Household>,)>(q_households.clone(), &move |state| {
+    world.for_each::<(Read<Household>,), _>(q_households.clone(), move |state| {
         households_for_query.lock().unwrap().push(*state.0);
     })?;
     let household_count = world
@@ -415,7 +415,7 @@ fn snapshot(model: &abm_framework::model::Model) -> ECSResult<EconomySnapshot> {
     let firms = Arc::new(Mutex::new(Vec::<Firm>::new()));
     let firms_for_query = Arc::clone(&firms);
     let q_firms = world.query()?.read::<Firm>()?.build()?;
-    world.for_each::<(Read<Firm>,)>(q_firms.clone(), &move |state| {
+    world.for_each::<(Read<Firm>,), _>(q_firms.clone(), move |state| {
         firms_for_query.lock().unwrap().push(*state.0);
     })?;
     let firm_count = world

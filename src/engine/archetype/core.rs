@@ -50,7 +50,10 @@ use crate::engine::entity::Entity;
 
 pub(super) struct ArchetypeMeta {
     pub(super) length: usize,
-    pub(super) entity_positions: Vec<Vec<Option<Entity>>>,
+    /// Row -> owning entity back-map. Free slots hold
+    /// `Entity::PLACEHOLDER` (8 bytes/slot; `Option<Entity>` would double
+    /// this to 16 for one niche bit).
+    pub(super) entity_positions: Vec<Vec<Entity>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +213,7 @@ impl Archetype {
     /// - Does not allocate component data; only entity metadata.
     pub(super) fn ensure_capacity(meta: &mut ArchetypeMeta, chunk_count: usize) {
         while meta.entity_positions.len() < chunk_count {
-            meta.entity_positions.push(vec![None; CHUNK_CAP]);
+            meta.entity_positions.push(vec![Entity::PLACEHOLDER; CHUNK_CAP]);
         }
     }
 
@@ -337,5 +340,32 @@ impl Archetype {
             let used = len % CHUNK_CAP;
             Ok(if used == 0 { CHUNK_CAP } else { used })
         }
+    }
+
+    pub(crate) fn entity_chunks(&self, chunk_lens: &[usize]) -> ECSResult<Vec<Vec<Entity>>> {
+        let meta = self
+            .meta
+            .read()
+            .map_err(|_| ECSError::from(InternalViolation::ArchetypeMetaLockPoisoned))?;
+        let mut out = Vec::with_capacity(chunk_lens.len());
+        for (chunk, &len) in chunk_lens.iter().enumerate() {
+            let Some(positions) = meta.entity_positions.get(chunk) else {
+                return Err(ECSError::from(
+                    InternalViolation::ArchetypeEntityPositionMissing,
+                ));
+            };
+            let mut entities = Vec::with_capacity(len);
+            for row in 0..len {
+                let Some(entity) = positions.get(row).copied()
+                    .filter(|entity| *entity != Entity::PLACEHOLDER) else {
+                    return Err(ECSError::from(
+                        InternalViolation::ArchetypeEntityPositionMissing,
+                    ));
+                };
+                entities.push(entity);
+            }
+            out.push(entities);
+        }
+        Ok(out)
     }
 }

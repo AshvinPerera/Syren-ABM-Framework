@@ -51,10 +51,40 @@ The `model` feature ties these together behind `ModelBuilder`, which wires up
 component registration, agent populations, environments, messaging, and
 scheduling in a single fluent API.
 
-For performance-critical paths the engine includes a thread-local xorshift64*
-RNG. Each thread owns an independent, lock-free state seeded with a fixed
-constant, giving deterministic output per thread with zero synchronisation
-overhead.
+Randomness is deliberately *keyed*, not thread-local: activation-order
+shuffles derive from a `splitmix64` stream seeded by (global seed, system,
+archetype, chunk), and the public `DetRng` type gives model systems the same
+property for per-agent draws. Because Rayon's work stealing assigns chunks to
+worker threads nondeterministically, a thread-local RNG would break run-to-run
+reproducibility; deriving randomness from simulation coordinates keeps results
+identical for a fixed seed at any thread count.
+
+## Performance Guide
+
+The fast paths, in the order they usually matter:
+
+- **Iterate with typed queries.** Both the generic
+  `for_each::<P, _>(query, |item| …)` form and the named `for_each_rNwM`
+  helpers are statically dispatched and vectorise; a trivial 1M-agent pass
+  costs a fraction of a millisecond. Work is split into row ranges targeting
+  `2 × threads` tasks, so populations from ~10k agents up use the whole
+  machine.
+- **Spawn in bulk.** `with_agent_population`, `AgentBatch::set_column`, or a
+  raw `Command::SpawnBatchTagged` carry one `Vec<T>` per component and are
+  ~20× faster than per-entity spawning (34.7 ms for 1M three-component agents
+  on the reference machine). Use `Command::DespawnBatchTagged` for grouped
+  removal.
+- **Emit through a `MessageEmitter`.** In per-agent loops, obtain
+  `msgs.emitter(handle)?` once per system/thread and call `emit` on it
+  (~12× the per-call `emit` path at 1M messages/tick).
+- **Draw randomness from `DetRng`.** Thread-local RNGs are not reproducible
+  under work stealing; `DetRng::from_context(ctx, salt)` keys the stream on
+  simulation coordinates instead.
+- **Read environment values once per system**, into locals, before entering a
+  `for_each` — not inside the per-agent closure.
+- **Tag components need one byte.** Zero-sized components are rejected
+  (columns are byte views); use `struct Tag(pub u8)` and
+  `QueryBuilder::without::<T>()` for exclusion filters.
 
 ## Feature Flags
 
@@ -97,8 +127,8 @@ deferred commands, and run systems through a scheduler:
 ```rust
 use std::sync::{Arc, RwLock};
 use abm_framework::{
-    advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry,
-    ECSManager, ECSResult, FnSystem, Read, Scheduler,
+    advanced::EntityShards, Bundle, Command, ComponentRegistry, ECSManager,
+    ECSResult, FnSystem, QueryBuilder, Read, Scheduler,
 };
 
 #[derive(Clone, Copy)]
@@ -111,7 +141,7 @@ fn main() -> ECSResult<()> {
     let wealth_id = registry.write().unwrap().register::<Wealth>().unwrap();
     registry.write().unwrap().freeze();
 
-    let ecs = ECSManager::with_registry(EntityShards::new(1)?, registry);
+    let ecs = ECSManager::with_registry(EntityShards::new(1)?, registry.clone());
     let world = ecs.world_ref();
 
     let mut bundle = Bundle::new();
@@ -119,15 +149,23 @@ fn main() -> ECSResult<()> {
     world.defer(Command::Spawn { bundle })?;
     ecs.apply_deferred_commands()?;
 
-    let mut access = AccessSets::default();
-    access.read.set(wealth_id);
+    // The system's access set is derived from the queries it runs - no
+    // hand-written AccessSets to drift out of sync.
+    let query = QueryBuilder::with_registry(registry)
+        .read::<Wealth>()?
+        .build()?;
     let mut scheduler = Scheduler::new();
-    scheduler.add_system(FnSystem::new(0, "observe_wealth", access, move |ecs| {
-        let q = ecs.query()?.read::<Wealth>()?.build()?;
-        ecs.for_each::<(Read<Wealth>,)>(q, &|wealth| {
-            let _ = wealth.0.value;
-        })
-    }));
+    let q = query.clone();
+    scheduler.add_system(FnSystem::from_queries(
+        0,
+        "observe_wealth",
+        &[&query],
+        move |ecs| {
+            ecs.for_each::<(Read<Wealth>,), _>(q.clone(), |wealth| {
+                let _ = wealth.0.value;
+            })
+        },
+    ));
 
     ecs.run(&mut scheduler)
 }
@@ -274,7 +312,7 @@ src/
   lib.rs                — public API re-exports and prelude
   engine/               — core ECS: archetypes, entities, components, scheduler,
                           queries, commands, boundaries, borrow tracking, workers
-    random.rs           — thread-local xorshift64* RNG
+    random.rs           — deterministic seed-keyed RNG (DetRng, splitmix64)
   agents/               — agent templates, spawners, batch spawning, handles, registry
   environment/          — typed key-value parameter store with dirty-channel tracking
   messaging/            — per-tick typed message buffers (brute-force, bucket,

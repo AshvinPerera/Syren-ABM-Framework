@@ -70,6 +70,30 @@ impl QueryComponent {
         }
     }
 
+    /// Construct from a [`ComponentDesc`](crate::ComponentDesc) — used for dynamic (runtime) queries
+    /// where the concrete Rust type is not known at compile time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::NotRegistered`](crate::RegistryError::NotRegistered) if the descriptor carries no
+    /// assigned [`ComponentID`] (i.e. it was created before registration).
+    /// Previously such descriptors silently aliased component `0`, producing
+    /// wrong-column reads.
+    #[inline]
+    pub fn from_desc(desc: &super::component::ComponentDesc) -> ECSResult<Self> {
+        let Some(component_id) = desc.component_id else {
+            return Err(ECSError::from(RegistryError::NotRegistered {
+                type_id: desc.type_id,
+            }));
+        };
+        Ok(Self {
+            component_id,
+            type_id: desc.type_id,
+            type_name: desc.name,
+            size: desc.size,
+        })
+    }
+
     /// Runtime component identifier.
     #[inline]
     pub fn component_id(&self) -> ComponentID {
@@ -150,6 +174,26 @@ impl BuiltQuery {
     #[inline]
     pub fn writes(&self) -> &[QueryComponent] {
         &self.writes
+    }
+
+    /// Returns the component access this query implies, for scheduler
+    /// declarations.
+    ///
+    /// Channels are empty — attach them with
+    /// [`FnSystem::produces`](crate::FnSystem::produces) /
+    /// [`FnSystem::consumes`](crate::FnSystem::consumes). Prefer deriving a
+    /// system's access from its queries via
+    /// [`FnSystem::from_queries`](crate::FnSystem::from_queries) over writing
+    /// `AccessSets` by hand; hand-written sets can silently drift from what
+    /// the system actually touches.
+    #[inline]
+    pub fn access_sets(&self) -> AccessSets {
+        AccessSets {
+            read: self.signature.read,
+            write: self.signature.write,
+            produces: Default::default(),
+            consumes: Default::default(),
+        }
     }
 
     #[inline]
@@ -334,6 +378,38 @@ impl QueryBuilder {
     pub fn without<T: 'static + Send + Sync>(mut self) -> ECSResult<Self> {
         let id = self.registry_source.resolve::<T>()?;
         self.signature.without.set(id);
+        Ok(self)
+    }
+
+    // ── Dynamic query methods (runtime ComponentID) ────────────────────────
+
+    /// Declares read-only access to a component by its runtime [`ComponentID`].
+    ///
+    /// The caller must supply a [`ComponentDesc`](crate::ComponentDesc) obtained from the
+    /// [`ComponentRegistry`] so that the query knows the component's size,
+    /// TypeId and name without a generic type parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::NotRegistered`](crate::RegistryError::NotRegistered) if the descriptor carries no
+    /// assigned [`ComponentID`].
+    pub fn read_id(mut self, desc: &super::component::ComponentDesc) -> ECSResult<Self> {
+        let component = QueryComponent::from_desc(desc)?;
+        self.signature.read.set(component.component_id());
+        self.reads.push(component);
+        Ok(self)
+    }
+
+    /// Declares mutable access to a component by its runtime [`ComponentID`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::NotRegistered`](crate::RegistryError::NotRegistered) if the descriptor carries no
+    /// assigned [`ComponentID`].
+    pub fn write_id(mut self, desc: &super::component::ComponentDesc) -> ECSResult<Self> {
+        let component = QueryComponent::from_desc(desc)?;
+        self.signature.write.set(component.component_id());
+        self.writes.push(component);
         Ok(self)
     }
 
