@@ -11,6 +11,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let config = parse_args(env::args().skip(1))?;
+    // Chrome Trace output, viewable in chrome://tracing or Perfetto. The spans
+    // compile to nothing unless the `profiling` feature is on, so an ordinary
+    // run pays nothing for them.
+    if let Some(path) = &config.profile_path {
+        abm_framework::init(path);
+    }
     let mut example = match config.mode {
         RunMode::TinyFixture => build_macroeconomy_model(config.clone(), FixtureDataProvider)?,
         RunMode::RealData => {
@@ -147,47 +153,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("wrote trace_aggregates.csv and trace_firms.csv");
     }
     let state = macro_state(&example.model)?;
-    eprintln!("completed {} quarters", state.quarter);
-    {
-        use std::sync::atomic::Ordering::Relaxed;
-        let c = macroeconomy::systems::PROF_COLLECT_NS.load(Relaxed) as f64 / 1e9;
-        let w = macroeconomy::systems::PROF_WRITE_NS.load(Relaxed) as f64 / 1e9;
-        let n = macroeconomy::systems::PROF_COLLECT_ROWS.load(Relaxed);
-        eprintln!("PROF collect={c:.2}s write={w:.2}s rows_collected={n}");
-        let names = ["", "aggregate", "expectations", "targets", "labour", "planning",
-                     "housing_pre", "credit", "housing_done", "goods", "accounting"];
-        {
-            let by_type = macroeconomy::systems::PROF_COLLECT_BY_TYPE.lock().unwrap();
-            let mut rows: Vec<_> = by_type.iter().collect();
-            rows.sort_by_key(|(_, (ns, _))| std::cmp::Reverse(*ns));
-            for (name, (ns, count)) in rows.iter().take(8) {
-                let short = name.rsplit("::").next().unwrap_or(name);
-                eprintln!("  COL {short:<22} {:>7.2}s {count:>10} rows", *ns as f64 / 1e9);
-            }
-        }
-        let pl = ["pl_individuals", "pl_firms", "pl_government", "pl_row",
-                  "pl_wages", "pl_households", "pl_accounts", "pl_spare"];
-        for (i, name) in pl.iter().enumerate() {
-            let v = macroeconomy::systems::PROF_PL_NS[i].load(Relaxed) as f64 / 1e9;
-            if v > 0.005 { eprintln!("  PL  {name:<16} {v:>8.2}s"); }
-        }
-        let gm = ["gm_avail_filter", "gm_weights", "gm_choice", "gm_settlement", "gm_buyer_loop"];
-        for (i, name) in gm.iter().enumerate() {
-            let v = macroeconomy::systems::PROF_GM_NS[i].load(Relaxed) as f64 / 1e9;
-            if v > 0.005 { eprintln!("  GM  {name:<16} {v:>8.2}s"); }
-        }
-        let acc = ["settle_loans", "firm_loop", "hh_preagg", "hh_loop", "bank_loop",
-                   "government", "aggregates", "spare"];
-        for (i, name) in acc.iter().enumerate() {
-            let v = macroeconomy::systems::PROF_ACC_NS[i].load(Relaxed) as f64 / 1e9;
-            if v > 0.005 { eprintln!("  ACC {name:<14} {v:>8.2}s"); }
-        }
-        for (i, name) in names.iter().enumerate() {
-            if name.is_empty() { continue; }
-            let v = macroeconomy::systems::PROF_SYS_NS[i].load(Relaxed) as f64 / 1e9;
-            if v > 0.005 { eprintln!("  SYS {name:<14} {v:>8.2}s"); }
-        }
+    if config.profile_path.is_some() {
+        abm_framework::shutdown();
     }
+    eprintln!("completed {} quarters", state.quarter);
     eprintln!(
         "housing (cumulative): listings={} sales={} blocked_mortgages={} transfer_value={:.1}",
         state.audit.housing_listings,
@@ -262,6 +231,11 @@ fn parse_args(
             "--firms-per-sector" => {
                 config.firms_per_sector =
                     args.next().ok_or("--firms-per-sector requires a value")?.parse()?;
+            }
+            "--profile" => {
+                config.profile_path = Some(PathBuf::from(
+                    args.next().ok_or("--profile requires a path")?,
+                ));
             }
             "--trace" => {
                 config.policy.trace = true;

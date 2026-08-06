@@ -209,7 +209,6 @@ fn aggregate_previous_state_system(
     access.read.set(ids.rest_of_world);
     access.produces.insert(phases.aggregate_done.channel_id());
     FnSystem::new(10, "macro::aggregate_previous_state", access, move |ecs| {
-        let _sys_guard = SysTimer(10 / 10, std::time::Instant::now());
         // Eqs. A.1-A.15: previous-quarter aggregates and GDP identity inputs.
         let firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let households = collect_rows_by(ecs, |row: &Household| row.id)?;
@@ -246,7 +245,6 @@ fn refit_expectations_system(
         .produces
         .insert(phases.expectations_done.channel_id());
     FnSystem::new(20, "macro::refit_expectations", access, move |ecs| {
-        let _sys_guard = SysTimer(20 / 10, std::time::Instant::now());
         // Eqs. A.16-A.21 / thesis Ch. 6 pp. 156-157: deterministic AR(1) on log levels through t-1.
         let mut state = macro_state(ecs, env_boundary)?;
         let y_fit = fit_ar1_log_level_forecast(
@@ -320,7 +318,6 @@ fn target_setting_system(
         .insert(phases.expectations_done.channel_id());
     access.produces.insert(phases.targets_done.channel_id());
     FnSystem::new(30, "macro::firm_individual_targets", access, move |ecs| {
-        let _sys_guard = SysTimer(30 / 10, std::time::Instant::now());
         // Eqs. A.59-A.68 and A.129-A.132: firm targets and individual supply/income targets.
         let mut state = macro_state(ecs, env_boundary)?;
 
@@ -552,7 +549,6 @@ fn labour_market_system(
     access.produces.insert(messages.wage_payment.channel_id());
     access.produces.insert(phases.labour_done.channel_id());
     FnSystem::new(40, "macro::labour_market", access, move |ecs| {
-        let _sys_guard = SysTimer(40 / 10, std::time::Instant::now());
         // Eqs. A.141-A.142: all firing before all hiring.
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let mut state = macro_state(ecs, env_boundary)?;
@@ -730,7 +726,6 @@ fn planning_and_production_system(
         .insert(messages.credit_application.channel_id());
     access.produces.insert(phases.planning_done.channel_id());
     FnSystem::new(50, "macro::planning_and_production", access, move |ecs| {
-        let _sys_guard = SysTimer(50 / 10, std::time::Instant::now());
         // Eqs. A.45, A.72-A.82, A.95-A.106, A.134-A.139.
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let wages: Vec<WagePayment> = buffers.brute_force(messages.wage_payment)?.collect();
@@ -793,8 +788,6 @@ fn planning_and_production_system(
             .first()
             .map(|central_bank| central_bank.policy_rate)
             .unwrap_or_default();
-
-        let _pl0 = PlTimer(0, std::time::Instant::now());
         for (individual, wage_history) in individuals
             .iter_mut()
             .zip(individual_wage_histories.iter_mut())
@@ -824,8 +817,6 @@ fn planning_and_production_system(
         state.audit.max_labour_over_materials = 0.0;
         state.audit.individual_headcount = individuals.len() as u64;
         state.audit.employed_headcount = firms.iter().map(|firm| u64::from(firm.employees)).sum();
-
-        let _pl1 = PlTimer(1, std::time::Instant::now());
         // A.62-A.84 are a per-firm computation: each firm reads its own row and
         // the shared parameter block, and writes only its own row. Iterating the
         // ECS columns in place avoids copying every firm out to a `Vec` and back
@@ -1056,7 +1047,6 @@ fn planning_and_production_system(
         // recompute below was assigning each entity the *whole* sectoral
         // amount, multiplying government demand by the entity count.
         let mut entities_in_sector = [0u32; SECTORS];
-        let _pl2 = PlTimer(2, std::time::Instant::now());
         for government in governments.iter() {
             entities_in_sector[government.sector as usize] += 1;
         }
@@ -1091,8 +1081,6 @@ fn planning_and_production_system(
                 },
             )?;
         }
-
-        let _pl3 = PlTimer(3, std::time::Instant::now());
         for row in &mut rows {
             let production_index = ratio(
                 state.aggregates.production,
@@ -1144,7 +1132,6 @@ fn planning_and_production_system(
         }
 
         let mut wage_income_by_household = vec![0.0; households.len()];
-        let _pl4 = PlTimer(4, std::time::Instant::now());
         for wage in wages {
             if let Some(slot) = wage_income_by_household.get_mut(wage.household_id as usize) {
                 *slot += wage.amount;
@@ -1200,8 +1187,6 @@ fn planning_and_production_system(
                 *value += property.rent;
             }
         }
-
-        let _pl5 = PlTimer(5, std::time::Instant::now());
         for ((household, demand), history) in households
             .iter_mut()
             .zip(household_demands.iter_mut())
@@ -1289,8 +1274,6 @@ fn planning_and_production_system(
                 )?;
             }
         }
-
-        let _pl6 = PlTimer(6, std::time::Instant::now());
         for account in &mut accounts {
             // Eq. 6.97 as printed is `wU(t) = wU(t-1) / (1 + growth)`, which
             // *shrinks* the benefit when the economy grows -- while the very
@@ -1363,7 +1346,6 @@ fn housing_preclear_system(
         .produces
         .insert(phases.housing_preclear_done.channel_id());
     FnSystem::new(60, "macro::housing_preclear", access, move |ecs| {
-        let _sys_guard = SysTimer(60 / 10, std::time::Instant::now());
         // Eqs. A.107-A.116 plus Appendix A.13 purchase-before-rental clearing.
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let mut state = macro_state(ecs, env_boundary)?;
@@ -1661,7 +1643,6 @@ fn credit_market_system(
     access.produces.insert(messages.credit_failure.channel_id());
     access.produces.insert(phases.credit_done.channel_id());
     FnSystem::new(70, "macro::credit_market", access, move |ecs| {
-        let _sys_guard = SysTimer(70 / 10, std::time::Instant::now());
         // Eqs. A.25-A.39 and A.117-A.118: credit caps, supply, and post-credit demand.
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let mut state = macro_state(ecs, env_boundary)?;
@@ -2057,7 +2038,6 @@ fn housing_completion_system(
         .produces
         .insert(phases.housing_completion_done.channel_id());
     FnSystem::new(80, "macro::housing_completion", access, move |ecs| {
-        let _sys_guard = SysTimer(80 / 10, std::time::Instant::now());
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let purchases: Vec<TentativePurchase> =
             buffers.brute_force(messages.tentative_purchase)?.collect();
@@ -2168,7 +2148,6 @@ fn goods_market_system(
     access.produces.insert(messages.excess_demand.channel_id());
     access.produces.insert(phases.goods_done.channel_id());
     FnSystem::new(90, "macro::goods_market", access, move |ecs| {
-        let _sys_guard = SysTimer(90 / 10, std::time::Instant::now());
         // Eq. A.140 / thesis Ch. 6 pp. 210-211, with the Poledna et al.
         // Online Appendix A.1.1 source algorithm for the inherited ABM
         // lineage: random seller search weighted by price and firm size.
@@ -2469,7 +2448,6 @@ fn realised_accounting_system(
         .insert(messages.property_transfer.channel_id());
     access.produces.insert(phases.accounting_done.channel_id());
     FnSystem::new(100, "macro::realised_accounting", access, move |ecs| {
-        let _sys_guard = SysTimer(100 / 10, std::time::Instant::now());
         // Eqs. A.40-A.44, A.85-A.100, and A.119-A.127: realised stock-flow accounting.
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let receipts: Vec<GoodsReceipt> = buffers.brute_force(messages.goods_receipt)?.collect();
@@ -2545,7 +2523,6 @@ fn realised_accounting_system(
         state.audit.bank_corporate_tax = 0.0;
         state.audit.bank_writeoff_seized = 0.0;
         state.audit.bank_writeoff_lost = 0.0;
-        let _acc0 = AccTimer(0, std::time::Instant::now());
         let loan_settlement = settle_loan_book(
             state.quarter,
             &mut state,
@@ -2557,8 +2534,6 @@ fn realised_accounting_system(
         // P_s'(t-1) for the A.77 unit-cost terms.
         let previous_prices = previous_sector_prices(&firms);
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-
-        let _acc1 = AccTimer(1, std::time::Instant::now());
         // A.85-A.94 close each firm's quarter from its own row. The audit
         // totals become per-worker partials summed back in worker order, so the
         // float addition order is fixed for a given thread count; write-offs go
@@ -2769,7 +2744,6 @@ fn realised_accounting_system(
             .map(|household| household.id as usize + 1)
             .max()
             .unwrap_or(0);
-        let _acc2 = AccTimer(2, std::time::Instant::now());
         let mut consumed_by_household = vec![0.0; household_slots];
         let mut capital_by_household = vec![0.0; household_slots];
         for receipt in &receipts {
@@ -2804,8 +2778,6 @@ fn realised_accounting_system(
                 *value += transfer.price;
             }
         }
-
-        let _acc3 = AccTimer(3, std::time::Instant::now());
         for (household, history) in households.iter_mut().zip(household_histories.iter_mut()) {
             let slot = household.id as usize;
             let consumed = consumed_by_household.get(slot).copied().unwrap_or(0.0);
@@ -2938,7 +2910,6 @@ fn realised_accounting_system(
             .first()
             .map(|central_bank| central_bank.predicted_policy_rate)
             .unwrap_or(policy_rate);
-        let _acc4 = AccTimer(4, std::time::Instant::now());
         for bank in &mut banks {
             let previous_reserves = bank.reserves;
             let firm_deposits = firms
@@ -3167,8 +3138,6 @@ fn realised_accounting_system(
                 });
             }
         }
-
-        let _acc5 = AccTimer(5, std::time::Instant::now());
         update_government_accounts(
             &mut accounts,
             &individuals,
@@ -3189,8 +3158,6 @@ fn realised_accounting_system(
             state.audit.government_deficit = updated.deficit;
             state.audit.government_debt = updated.debt;
         }
-
-        let _acc6 = AccTimer(6, std::time::Instant::now());
         let aggregates = compute_aggregates(
             &state,
             &firms,
@@ -3606,83 +3573,14 @@ impl RowIndex {
 /// neither the per-worker split nor the concatenation is stable on its own.
 ///
 /// This is the pattern `abm_framework::space` uses after its counting sort,
-/// for the same reason.
-/// Records elapsed time into `PROF_SYS_NS` on drop, so early returns are timed.
-struct SysTimer(usize, std::time::Instant);
-impl Drop for SysTimer {
-    fn drop(&mut self) {
-        PROF_SYS_NS[self.0].fetch_add(
-            self.1.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
-}
-
-pub static PROF_PL_NS: [std::sync::atomic::AtomicU64; 8] = [
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-];
-
-/// Times a planning block into `PROF_PL_NS` on drop.
-struct PlTimer(usize, std::time::Instant);
-impl Drop for PlTimer {
-    fn drop(&mut self) {
-        PROF_PL_NS[self.0].fetch_add(
-            self.1.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
-}
-
-pub static PROF_GM_NS: [std::sync::atomic::AtomicU64; 5] = [
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
-
-pub static PROF_ACC_NS: [std::sync::atomic::AtomicU64; 8] = [
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-];
-
-/// Times an accounting block into `PROF_ACC_NS` on drop.
-struct AccTimer(usize, std::time::Instant);
-impl Drop for AccTimer {
-    fn drop(&mut self) {
-        PROF_ACC_NS[self.0].fetch_add(
-            self.1.elapsed().as_nanos() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
-}
-
-pub static PROF_SYS_NS: [std::sync::atomic::AtomicU64; 11] = [
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
-
-pub static PROF_COLLECT_BY_TYPE: std::sync::LazyLock<
-    Mutex<std::collections::BTreeMap<&'static str, (u64, u64)>>,
-> = std::sync::LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
-
-pub static PROF_COLLECT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static PROF_WRITE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static PROF_COLLECT_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn collect_rows_by<T, F>(ecs: ECSReference<'_>, id: F) -> ECSResult<Vec<T>>
 where
     T: Copy + Send + Sync + 'static,
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
-    let _t0 = std::time::Instant::now();
+    let _span = abm_framework::span("collect_rows_by")
+        .arg("component", abm_framework::Arg::Str(std::any::type_name::<T>().to_owned()));
     let stage: WorkerStage<T> = WorkerStage::new();
     let q = ecs.query()?.read::<T>()?.build()?;
     // `push` takes `&self` and writes only the calling worker's slot, so a
@@ -3694,17 +3592,6 @@ where
     let mut out = Vec::new();
     stage.drain_into(&mut out);
     out.sort_unstable_by_key(id);
-    PROF_COLLECT_BY_TYPE
-        .lock()
-        .unwrap()
-        .entry(std::any::type_name::<T>())
-        .and_modify(|(ns, rows)| {
-            *ns += _t0.elapsed().as_nanos() as u64;
-            *rows += out.len() as u64;
-        })
-        .or_insert((_t0.elapsed().as_nanos() as u64, out.len() as u64));
-    PROF_COLLECT_NS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-    PROF_COLLECT_ROWS.fetch_add(out.len() as u64, std::sync::atomic::Ordering::Relaxed);
     Ok(out)
 }
 
@@ -3724,7 +3611,8 @@ where
     T: Copy + Send + Sync + 'static,
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
-    let _t0 = std::time::Instant::now();
+    let _span = abm_framework::span("write_rows")
+        .arg("component", abm_framework::Arg::Str(std::any::type_name::<T>().to_owned()));
     let capacity = rows.iter().map(|row| id(row) as usize + 1).max().unwrap_or(0);
     let mut index: Vec<u32> = vec![u32::MAX; capacity];
     for (position, row) in rows.iter().enumerate() {
@@ -3739,7 +3627,6 @@ where
             }
         }
     });
-    PROF_WRITE_NS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     result
 }
 

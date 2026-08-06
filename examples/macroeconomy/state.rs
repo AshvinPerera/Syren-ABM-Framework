@@ -36,6 +36,8 @@ pub struct MacroeconomyConfig {
     /// Named block under `scenarios:` in the config file, applied after
     /// `defaults:`.
     pub scenario: Option<String>,
+    /// Where to write a Chrome Trace profile, if `--profile` was given.
+    pub profile_path: Option<PathBuf>,
     pub policy: ModelPolicy,
     /// Firms per sector. The paper runs Austria at 1:1000, giving ~600 firms
     /// over 18 sectors -- about 33 each. The default of 1 is a test fixture.
@@ -53,6 +55,7 @@ impl Default for MacroeconomyConfig {
             data_dir: None,
             config_path: None,
             scenario: None,
+            profile_path: None,
             policy: ModelPolicy::default(),
             firms_per_sector: 1,
         }
