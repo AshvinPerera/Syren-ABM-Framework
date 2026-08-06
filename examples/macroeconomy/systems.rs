@@ -13,7 +13,7 @@ use super::equations::{
     constrained_goods_target_a83_a84, firm_predicted_profit_a61, firm_target_demand_a60,
     firm_target_production_a62, idiosyncratic_growth_a59, log_growth,
     min_input_constraint_a63_a64, ppi_a3, price_a73, price_or_rent_reduction_a113_a115,
-    purchase_cost_a109_literal_pdf, ratio, rent_cost_a108, sector_price_a5, target_capital_a79,
+    purchase_cost_a109, ratio, rent_cost_a108, sector_price_a5, target_capital_a79,
     target_intermediate_a78, unit_cost_a77, work_effort_a66_a67,
 };
 use super::forecasting::{
@@ -402,9 +402,9 @@ fn target_setting_system(
             // baseline h_f(0) is the sector's labour productivity h_s = output
             // per employee (Table A.11, A.5.1).
             let labour_supply = firm.employees as f64;
-            // A.66-A.67, evaluated *before* it is used. This previously ran
-            // after `labour_constraint`, so production was constrained by the
-            // previous quarter's work effort.
+            // A.66-A.67, evaluated *before* `labour_constraint` reads it, so
+            // production is constrained by this quarter's work effort rather
+            // than last quarter's.
             firm.work_effort = work_effort_a66_a67(
                 params.work_effort_max,
                 firm.initial_work_effort,
@@ -730,7 +730,6 @@ fn planning_and_production_system(
         let buffers = ecs.boundary::<MessageBufferSet>(message_boundary)?;
         let wages: Vec<WagePayment> = buffers.brute_force(messages.wage_payment)?.collect();
         let mut state = macro_state(ecs, env_boundary)?;
-        let mut rng = state.rng(ecs.run_context(), rng_salt::PLANNING);
         // Read-only: A.77's previous sectoral prices and the employment count
         // are both taken before production is recomputed. The firm rows
         // themselves are written in place below, so they are never collected.
@@ -1216,9 +1215,9 @@ fn planning_and_production_system(
                     * household.other_financial_assets
                 + household.dividend_income;
             // A.104 income is the sum of member *individual* incomes, which are
-            // already CPI-scaled and net of tax (A.133). Adding the raw
-            // `WagePayment` amounts on top counted every wage twice -- once
-            // taxed, once gross.
+            // already CPI-scaled and net of tax (A.133). The raw `WagePayment`
+            // amounts are deliberately not added on top: that would count every
+            // wage twice, once taxed and once gross.
             let history_consumption = history.consumption_history.iter().sum::<f64>()
                 / history.consumption_history.len() as f64;
             let target_total = ((1.0 - household.saving_rate)
@@ -1254,6 +1253,7 @@ fn planning_and_production_system(
             let financial_wealth =
                 positive_part(household.deposits) + positive_part(household.other_financial_assets);
             let financial_assets_used = consumption_gap.min(financial_wealth);
+            household.consumption_gap = consumption_gap;
             household.consumption_gap_after_financial_assets =
                 positive_part(consumption_gap - financial_assets_used);
             household.desired_consumption_loan = household.consumption_gap_after_financial_assets;
@@ -1278,10 +1278,6 @@ fn planning_and_production_system(
             // Eq. 6.97 as printed is `wU(t) = wU(t-1) / (1 + growth)`, which
             // *shrinks* the benefit when the economy grows -- while the very
             // next line indexes other benefits *up* by the same growth rate.
-            // A `.max(1.0)` clamp used to sit here, which silently inverted the
-            // rule whenever growth was positive (the common case), pinning the
-            // benefit instead of moving it.
-            //
             // Both transfers are indexed to nominal growth. This departs from
             // the printed form of 6.97 and is a deliberate modelling choice:
             // a deflating unemployment benefit alongside an inflating
@@ -1358,8 +1354,8 @@ fn housing_preclear_system(
         // A.108/A.109 need `V*`, the value of housing a household can afford,
         // "estimated by regressing the value of previously sold properties on
         // corresponding prices", and `r_V*`, the predicted rent of a property of
-        // that value, regressed the same way. Neither existed: the code used the
-        // candidate property's own price and value.
+        // that value, regressed the same way. Both are properties of the housing
+        // stock, not of the candidate listing.
         //
         // With a synthetic stock these are regressions through the origin --
         // one ratio each -- fitted across the standing stock rather than a
@@ -1442,7 +1438,7 @@ fn housing_preclear_system(
             }
             property.predicted_annual_rent_price =
                 rent_cost_a108(state.params.housing_mu_ps, property.rent);
-            property.predicted_annual_buy_price = purchase_cost_a109_literal_pdf(
+            property.predicted_annual_buy_price = purchase_cost_a109(
                 property.price,
                 0.0,
                 banks
@@ -1517,8 +1513,7 @@ fn housing_preclear_system(
                 * household.income.max(1.0).powf(state.params.housing_beta_hr);
             let nearest_sale = for_sale.nearest(household.desired_house_price);
             let nearest_rent = for_rent.nearest(household.desired_rent);
-            let buy_probability = if let Some(property_idx) = nearest_sale {
-                let property = properties[property_idx];
+            let buy_probability = if nearest_sale.is_some() {
                 let bank_rate = banks
                     .iter()
                     .find(|bank| bank.id == household.bank_id)
@@ -1531,7 +1526,7 @@ fn housing_preclear_system(
                 let affordable_value = household.desired_house_price * value_per_price;
                 let predicted_rent = affordable_value * rent_per_value;
                 let rent_cost = rent_cost_a108(state.params.housing_mu_ps, predicted_rent);
-                let purchase_cost = purchase_cost_a109_literal_pdf(
+                let purchase_cost = purchase_cost_a109(
                     household.desired_house_price,
                     household.deposits + household.other_financial_assets,
                     bank_rate,
@@ -1558,7 +1553,13 @@ fn housing_preclear_system(
                 let property = &mut properties[property_idx];
                 let financial_wealth =
                     (household.deposits + household.other_financial_assets).max(0.0);
-                let mortgage_required = positive_part(property.price - financial_wealth);
+                // A.118: the down-payment is financial wealth less whatever
+                // consumption still has to be funded out of it, so a household
+                // covering a consumption shortfall borrows correspondingly more
+                // against the property.
+                let down_payment =
+                    positive_part(financial_wealth - household.consumption_gap);
+                let mortgage_required = positive_part(property.price - down_payment);
                 household.desired_property_id = property.id;
                 household.desired_mortgage = mortgage_required;
                 property.market_status = PROPERTY_TENTATIVE_SALE;
@@ -1649,10 +1650,10 @@ fn credit_market_system(
         let mut rng = state.rng(ecs.run_context(), rng_salt::CREDIT_MARKET);
         let mut banks = collect_rows_by(ecs, |row: &Bank| row.id)?;
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
+        let firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
         let mut firm_targets = collect_rows_by(ecs, |row: &FirmTargets| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
-        let mut household_demands = collect_rows_by(ecs, |row: &HouseholdDemand| row.id)?;
+        let household_demands = collect_rows_by(ecs, |row: &HouseholdDemand| row.id)?;
         let household_histories = collect_rows_by(ecs, |row: &HouseholdHistory| row.id)?;
         let central_banks = collect_rows_by(ecs, |row: &CentralBank| row.id)?;
         let policy_rate = central_banks
@@ -2159,9 +2160,8 @@ fn goods_market_system(
         // by buyer type and the firm block is matched to completion first;
         // within a block the order is randomised as before.
         //
-        // A single shuffled queue -- what this used to be -- lets household,
-        // government and rest-of-world consumption crowd out firms' intermediate
-        // purchases. A firm that loses the draw cannot restock, and A.63 then
+        // A single shuffled queue would let household, government and
+        // rest-of-world consumption crowd out firms' intermediate purchases. A firm that loses the draw cannot restock, and A.63 then
         // caps its next-quarter output at the fraction of the input buffer it
         // still holds, which cuts its sales and its demand in turn.
         let _gm_order = std::time::Instant::now();
@@ -2177,7 +2177,7 @@ fn goods_market_system(
         // A.60 feeds Q_f(t-1) forward multiplicatively, so a t=1 shortfall of
         // realised demand against production never washes out. Attribute the
         // demand side by buyer and purpose to locate any missing component.
-        let mut sum_of = |kind: u8, purpose: u8| -> f64 {
+        let sum_of = |kind: u8, purpose: u8| -> f64 {
             demands
                 .iter()
                 .filter(|d| d.buyer_kind == kind && d.purpose == purpose)
@@ -2209,8 +2209,8 @@ fn goods_market_system(
         // subset, which is both a deviation -- a firm's rank changed as its
         // competitors sold out -- and the reason this system was quadratic.
         //
-        // Computed once here, along with the per-sector firm lists so a buyer
-        // no longer scans every firm in the economy to find its own sector.
+        // Computed once here, along with the per-sector firm lists, so a buyer
+        // reaches its own sector without scanning every firm in the economy.
         let mut sector_members: Vec<Vec<usize>> = vec![Vec::new(); SECTORS];
         for (idx, firm) in firms.iter().enumerate() {
             if let Some(bucket) = sector_members.get_mut(firm.sector as usize) {
@@ -2355,7 +2355,6 @@ let members = sector_members
                     samplers[sector].set(position_in_sector[firm_idx], 0.0);
                 }
                 apply_buyer_goods(
-                    &mut firms,
                     &mut firm_realised,
                     &mut governments,
                     &mut rows,
@@ -2401,8 +2400,8 @@ let members = sector_members
         }
 
         // A.139: NX^ROW(t) = NX^ROW(t-1) + exports - imports. Cumulative by
-        // definition, so unlike `exports` this is deliberately never reset --
-        // but it has to net off imports, which it previously ignored.
+        // definition, so unlike `exports` this is deliberately never reset. It
+        // nets off imports.
         for row in &mut rows {
             row.net_exports += row.exports - row.imports;
         }
@@ -2486,7 +2485,7 @@ fn realised_accounting_system(
         let account = accounts.first().copied().unwrap_or_default();
         // A.41 bad debt, collected as borrowers fail and applied to their banks
         // once every borrower has been settled.
-        let mut write_offs: Vec<BadDebt> = Vec::new();
+        let write_offs: Vec<BadDebt> = Vec::new();
         let mut dividend_pool = 0.0f64;
         state.audit.profit_sales_revenue = 0.0;
         state.audit.profit_inventory_change = 0.0;
@@ -2549,8 +2548,6 @@ fn realised_accounting_system(
         let sum_dividend_pool = ParallelSumF64::new();
         let write_offs = Mutex::new(write_offs);
         let params = state.params.clone();
-        let forecast = state.forecast.clone();
-        let aggregates = state.aggregates.clone();
         let firm_query = ecs
             .query()?
             .write::<Firm>()?
@@ -2675,8 +2672,8 @@ fn realised_accounting_system(
             // free of charge.
             firm.overdraft = negative_abs(firm.deposits);
             // A.93: equity is valued at prices, and includes the intermediate
-            // stock. It previously counted inventory and capital as bare
-            // quantities and omitted M entirely.
+            // stock -- inventory and capital enter at price, not as bare
+            // quantities, and M is part of the total.
             let stock_value: f64 = (0..SECTORS)
                 .map(|s| previous_prices[s] * (stocks.intermediate_stock[s] + stocks.capital_stock[s]))
                 .sum();
@@ -2783,11 +2780,11 @@ fn realised_accounting_system(
             let consumed = consumed_by_household.get(slot).copied().unwrap_or(0.0);
             history.consumption_history.rotate_left(1);
             history.consumption_history[11] = consumed;
-            // A.123. Household deposits previously received *nothing*: there
-            // was no income credit anywhere in the model, so wages were paid by
-            // firms and vanished. Loan instalments and new credit are already
-            // applied by `settle_loan_book` / `apply_loan`; what is added here
-            // is the income-less-spending flow, deposit interest, and the
+            // A.123. This is the sole income credit to household deposits, so
+            // without it wages would be paid by firms and vanish. Loan
+            // instalments and new credit are already applied by
+            // `settle_loan_book` / `apply_loan`; what is added here is the
+            // income-less-spending flow, deposit interest, and the
             // capital-formation tax.
             //
             // A.119/A.120: a positive surplus is shared between deposits and
@@ -2796,7 +2793,16 @@ fn realised_accounting_system(
             // not give the fractions -- `DEPOSIT_SHARE_OF_SAVING` records that
             // silence rather than hiding it.
             let capital_formation = capital_by_household.get(slot).copied().unwrap_or(0.0);
-            let deposit_interest = policy_rate * positive_part(household.deposits);
+            // A.123 pays the policy rate on a positive balance and charges the
+            // bank's household overdraft rate on a negative one.
+            let overdraft_rate = banks
+                .iter()
+                .find(|bank| bank.id == household.bank_id)
+                .or_else(|| banks.first())
+                .map(|bank| bank.household_overdraft_rate)
+                .unwrap_or_default();
+            let deposit_interest = policy_rate * positive_part(household.deposits)
+                - overdraft_rate * negative_abs(household.deposits);
             let surplus = household.disposable_income_after_rent
                 - consumed
                 - capital_formation
@@ -2953,7 +2959,7 @@ fn realised_accounting_system(
             let policy_delta = policy_rate - previous_policy_rate;
             let ppi_delta = state.aggregates.ppi - state.previous_aggregates.ppi;
             let params = &state.params;
-            let mut ardl_step = |rate: f64, npl: f64| -> f64 {
+            let ardl_step = |rate: f64, npl: f64| -> f64 {
                 let input = ArdlErrorCorrectionInput {
                     previous_loan_rate: rate,
                     current_policy_rate: policy_rate,
@@ -3178,10 +3184,9 @@ fn realised_accounting_system(
         };
         // A.15, in nominal terms on all three legs.
         //
-        // `output` was previously *real* production while `expenditure` summed
-        // nominal payments, so the identity could not close even in principle;
-        // and the expenditure leg omitted the whole "changes in stocks and
-        // inventories" block that A.15 carries.
+        // Both legs must be nominal for the identity to close even in
+        // principle, and the expenditure leg carries A.15's "changes in stocks
+        // and inventories" block.
         let production_value: f64 = firms.iter().map(|firm| firm.price * firm.production).sum();
         let intermediate_use: f64 = firms
             .iter()
@@ -4237,8 +4242,8 @@ fn offered_rate(bank: &Bank, loan_class: u8) -> f64 {
 ///
 /// A.33-A.36 then *allocate* this envelope across firm, consumption and
 /// mortgage lending by lagged non-performing-loan ratios; A.36 does not replace
-/// A.32, it distributes it. The `credit_supply_max` clamp that used to sit here
-/// is not in the paper and is now left at infinity by the generator.
+/// A.32, it distributes it. No further clamp applies: `credit_supply_max` is
+/// not in the paper and the generator leaves it at infinity.
 fn bank_credit_supply(bank: &Bank, state: &MacroEnvironment) -> f64 {
     positive_part(
         bank.equity / state.params.car.max(1e-9)
@@ -4253,8 +4258,8 @@ fn bank_credit_supply(bank: &Bank, state: &MacroEnvironment) -> f64 {
 ///
 /// `V_hat ~ V(0) * exp(-phi^CS * nu(t-1))` for each class, so a class whose
 /// loans are going bad is allocated a smaller share of the same total. `phi^CS`
-/// is 2.0 (A.3.2) and was previously read by nothing at all -- the NPL ratios
-/// were computed every quarter and discarded.
+/// is 2.0 (A.3.2). This is the only reader of the NPL ratios the accounting
+/// system recomputes each quarter.
 fn bank_class_credit_supply(
     bank: &Bank,
     state: &MacroEnvironment,
@@ -4328,9 +4333,9 @@ fn borrower_credit_cap(
                 // A.25, debt-to-equity:
                 //   V_l <= rho^DtE * sum_s P_s K_fs - L_f(t-1) + [D_f(t-1)]^-
                 //          + r^F-O [D_f(t-1)]^- - sum_l r_l V_l
-                // The `+ firm.equity` term the old code added is not in A.25 --
-                // it double-counted the capital stock, since A.93 equity
-                // already contains it.
+                // No `+ firm.equity` term: A.25 does not carry one, and adding
+                // it would double-count the capital stock that A.93 equity
+                // already contains.
                 let dte_cap = positive_part(
                     state.params.debt_to_equity * capital_value - debt + overdraft
                         + rate * overdraft
@@ -4490,7 +4495,6 @@ fn apply_loan(
 }
 
 fn apply_buyer_goods(
-    firms: &mut [Firm],
     firm_realised: &mut [FirmRealised],
     governments: &mut [GovernmentEntity],
     rows: &mut [RestOfWorld],

@@ -33,11 +33,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut firm_rows: Vec<String> = Vec::new();
     if tracing {
         agg_rows.push(
-            "tick,production,ppi,cpi,hpi,rpi,employed,individuals,goods_demand,goods_supply,             excess_demand,sales_rev,inv_chg,costs,c_wage,c_interm,c_cap,c_tax,c_int,             firm_deposits,firm_debt,firm_equity,firms_bankrupt,hh_deposits,hh_ofa,hh_income,             hh_consumption,hh_net_wealth,hh_bankrupt,bank_equity,bank_reserves,bank_deposits,             gov_revenue,gov_deficit,gov_debt,unemp_benefit,avg_wage,total_loans,credit_req,             credit_granted,roa_apps,roa_fails,roa_max,bail_ins,gdp_out,gdp_exp,b_loanint,b_resinc,b_rescost,b_depint,b_tax,b_seized,b_lost,policy_rate,cpi_infl,growth,blk_roa,blk_cap,blk_supply,envelope,cap_total,cap_dte,cap_roe,dte_zero,roe_zero,d_interm,d_fcap,d_cons,d_hcap,d_gov,d_exp"
+            "tick,production,ppi,cpi,hpi,rpi,employed,individuals,goods_demand,goods_supply,excess_demand,sales_rev,inv_chg,costs,c_wage,c_interm,c_cap,c_tax,c_int,firm_deposits,firm_debt,firm_equity,firms_bankrupt,hh_deposits,hh_ofa,hh_income,hh_consumption,hh_net_wealth,hh_bankrupt,bank_equity,bank_reserves,bank_deposits,gov_revenue,gov_deficit,gov_debt,unemp_benefit,avg_wage,total_loans,credit_req,credit_granted,roa_apps,roa_fails,roa_max,bail_ins,gdp_out,gdp_exp,b_loanint,b_resinc,b_rescost,b_depint,b_tax,b_seized,b_lost,policy_rate,cpi_infl,growth,blk_roa,blk_cap,blk_supply,envelope,cap_total,cap_dte,cap_roe,dte_zero,roe_zero,d_interm,d_fcap,d_cons,d_hcap,d_gov,d_exp"
                 .to_owned(),
         );
         firm_rows.push(
-            "tick,firm,employees,work_effort,h_f0,H,M,K,target,production,price,unit_cost,             demand,excess_demand,wage,deposits,debt,equity,profits,sales,inventory,             target_short_loan,granted_short_loan"
+            "tick,firm,employees,work_effort,h_f0,H,M,K,target,production,price,unit_cost,demand,excess_demand,wage,deposits,debt,equity,profits,sales,inventory,target_short_loan,granted_short_loan"
                 .to_owned(),
         );
     }
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if tracing {
             let a = &state.audit;
             agg_rows.push(format!(
-                "{},{:.4},{:.6},{:.6},{:.6},{:.6},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},                 {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},                 {:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.4},{:.4},{:.4},{:.4},                 {},{},{:.5},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                "{},{:.4},{:.6},{:.6},{:.6},{:.6},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.4},{:.4},{:.4},{:.4},{},{},{:.5},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
                 state.quarter,
                 state.aggregates.production, state.aggregates.ppi, state.aggregates.cpi,
                 state.aggregates.hpi, state.aggregates.rpi,
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             for f in &a.firm_trace {
                 firm_rows.push(format!(
-                    "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},                     {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+                    "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
                     state.quarter, f.id, f.employees, f.work_effort, f.initial_work_effort,
                     f.labour, f.intermediate_constraint, f.capital_constraint,
                     f.target_production, f.production, f.price, f.unit_cost, f.demand,

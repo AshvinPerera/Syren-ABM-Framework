@@ -87,12 +87,17 @@ results.
 It is also the likely reason a persistent excess-demand gap never clears: the
 two price channels that would close it are switched off. Not confirmed.
 
-### Housing prices do not move
+### House prices barely move
 
-HPI is 1.0000 for all 40 quarters despite 874 completed sales. Wiese's housing
-block has exactly two price rules, both implemented: an ask marked up by
-*predicted* HPI inflation (A.112) and a random reduction while unsold (A.113).
-There is no competitive bid-up anywhere in A.107–A.116.
+HPI runs 1.000002 to 1.000538 over 40 quarters against 874 completed sales —
+five basis points in ten years. Wiese's housing block has exactly two sale-price
+rules, both implemented: an ask marked up by *predicted* HPI inflation (A.112)
+and a random reduction while unsold (A.113). There is no competitive bid-up
+anywhere in A.107–A.116.
+
+Rents are not stuck the same way: the A.116 CPI indexation of tenanted
+properties is an external driver the sale side has no counterpart to, and RPI
+runs 0.9992 to 1.0430.
 
 The loop is closed: ask = (1 + π̄^HPI) × value → sale = ask → value = sale →
 π̄^HPI is an AR(1) on realised HPI. Once HPI settles at 1.0 the markup goes to
@@ -116,9 +121,9 @@ accumulate. Arithmetic downstream, not an independent defect.
 
 | Tick | 1 | 5 | 10 | 20 | 30 | 40 |
 |---|---|---|---|---|---|---|
-| Revenue / GDP | 44.0% | 43.3% | 42.8% | 45.3% | 46.6% | 47.5% |
-| Deficit / GDP | −1.5% | −6.3% | −5.7% | 11.6% | 12.5% | 12.5% |
-| Debt / GDP | 0.78× | 0.47× | 0.07× | 0.77× | 1.95× | 3.14× |
+| Revenue / GDP | 44.0% | 43.3% | 42.8% | 45.2% | 46.6% | 47.5% |
+| Deficit / GDP | −1.5% | −6.4% | −6.1% | 11.5% | 12.4% | 12.5% |
+| Debt / GDP | 0.78× | 0.47× | 0.06× | 0.73× | 1.91× | 3.10× |
 
 Revenue lands close to Austria's actual ~49% of GDP, which is an independent
 check nothing was fitted to. The balance is Austria-plausible through t10 —
@@ -146,7 +151,8 @@ The example does not exercise everything the framework offers:
 
 - Linear sum assignment matchings (bank–firm, bank–household, firm–employee,
   household–property) are simple assignments here.
-- `SIM_SCALE_FACTOR` is declared and unused.
+- `SIM_SCALE_FACTOR` is carried on the environment and settable from
+  `config.yaml`, but no equation reads it.
 - Household consumption weights are not differentiated by income quintile
   (Wiese A.7.5.1).
 - 18 sectors rather than 64 NACE-2 industries.
@@ -157,9 +163,9 @@ The example does not exercise everything the framework offers:
 state, full employment of the active population from t4, PPI 1.000 → 1.111
 (~1.06%/yr), profits positive throughout, and GDP by output and by expenditure
 agreeing within ~1% — the main stock-flow-consistency check. Housing clears 874
-sales against 23 blocked mortgages. Robust across seeds 1, 7, 42, 99, 2024.
+sales against 24 blocked mortgages. Robust across seeds 1, 7, 42, 99, 2024.
 
 | Tick | 1 | 5 | 10 | 20 | 30 | 40 |
 |---|---|---|---|---|---|---|
-| Production | 18,810 | 21,173 | 25,878 | 29,975 | 30,087 | 30,087 |
+| Production | 18,810 | 21,173 | 25,879 | 29,978 | 30,087 | 30,087 |
 | PPI | 1.000 | 1.013 | 1.029 | 1.058 | 1.086 | 1.111 |

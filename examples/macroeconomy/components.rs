@@ -319,6 +319,10 @@ pub struct Household {
     pub granted_consumption_loan: f64,
     pub desired_mortgage: f64,
     pub granted_mortgage: f64,
+    /// `[C_hat_h(t) - Y^-r_h(t)]^+` before any wealth is applied. A.117 nets
+    /// financial wealth off this; A.118 subtracts the same quantity from the
+    /// mortgage down-payment.
+    pub consumption_gap: f64,
     pub consumption_gap_after_financial_assets: f64,
     pub disposable_income_after_rent: f64,
     pub desired_house_price: f64,
@@ -354,6 +358,7 @@ impl Default for Household {
             granted_consumption_loan: 0.0,
             desired_mortgage: 0.0,
             granted_mortgage: 0.0,
+            consumption_gap: 0.0,
             consumption_gap_after_financial_assets: 0.0,
             disposable_income_after_rent: 0.0,
             desired_house_price: 0.0,

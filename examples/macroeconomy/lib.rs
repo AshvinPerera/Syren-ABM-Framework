@@ -1,4 +1,8 @@
-#![allow(unused_imports)]
+// This module is compiled into two targets: the `macroeconomy` example binary
+// and the `macroeconomy` integration test. Items the binary never reaches --
+// the equation helpers and initialisation recipe the tests assert against --
+// are dead code from the binary's point of view alone.
+#![allow(unused_imports, dead_code)]
 
 pub mod accounting;
 pub mod calibration;
@@ -198,8 +202,8 @@ const SHARD_HEADROOM: usize = 2;
 
 /// Derive the shard count from the initial population.
 ///
-/// Replaces a hard-coded `EntityShards::new(2)`, which silently capped the
-/// world at 8.39M entities.
+/// A fixed shard count caps the world silently, so it is sized from the
+/// population that is actually being built.
 pub fn shards_for_population(data: &InitialData) -> usize {
     let total = data.firms.len()
         + data.individuals.len()

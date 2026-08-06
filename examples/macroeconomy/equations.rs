@@ -263,12 +263,19 @@ pub fn constrained_goods_target_a83_a84(
 }
 
 // A.108
-pub fn rent_cost_a108(mu_ps: f64, annual_rent: f64) -> f64 {
-    4.0 * (1.0 + mu_ps) * annual_rent
+pub fn rent_cost_a108(mu_ps: f64, quarterly_rent: f64) -> f64 {
+    4.0 * (1.0 + mu_ps) * quarterly_rent
 }
 
-// A.109, transcribed literally from the visually checked PDF/OCR snippet.
-pub fn purchase_cost_a109_literal_pdf(
+/// A.109: the annual cost of buying a property, against which A.108's annual
+/// cost of renting is compared.
+///
+/// The annuity denominator is `1 - (1 + r*)^{-m_l}`. The paper prints a
+/// positive exponent, which with `r* > 0` over 100 quarters makes the
+/// denominator large and negative and the interest term come out negative --
+/// buying would look cheaper the higher mortgage rates went. See
+/// `docs/deviations.md`.
+pub fn purchase_cost_a109(
     property_price: f64,
     financial_assets: f64,
     mortgage_rate: f64,
@@ -282,10 +289,6 @@ pub fn purchase_cost_a109_literal_pdf(
     let interest = if mortgage_rate.abs() <= 1e-12 {
         0.0
     } else {
-        // A.109's annuity denominator is `1 - (1 + r*)^{-m_l}`. The PDF prints a
-        // positive exponent, which with r > 0 over 100 quarters makes the
-        // denominator hugely negative and the interest term come out negative
-        // -- so buying looked *cheaper* the higher mortgage rates went.
         4.0 * mortgage_rate * principal / (1.0 - (1.0 + mortgage_rate).powf(-maturity))
     };
     let expected_revaluation = ((1.0 + predicted_hpi_inflation).powi(4) - 1.0) * property_value;

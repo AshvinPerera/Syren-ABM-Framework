@@ -23,16 +23,16 @@ profits are realised.
 
 | Priority | System | Does | Equations |
 |---|---|---|---|
-| 10 | `aggregate_previous_state` | Snapshot last quarter, roll history buffers | A.133–A.135 |
-| 20 | `refit_expectations` | AR(1) refits: growth, PPI/CPI/HPI/RPI, government consumption | A.2, A.16–A.21 |
-| 30 | `firm_individual_targets` | Predicted growth, demand, profits; target production and wages | A.59–A.62, A.69–A.71 |
-| 40 | `labour_market` | Fire to target, post vacancies, unemployed search | A.128–A.131 |
-| 50 | `planning_and_production` | Work effort, Leontief production, prices, input demand | A.63–A.68, A.72–A.79 |
-| 60 | `housing_preclear` | List properties, form bids, size mortgage demand | A.107–A.118 |
-| 70 | `credit_market` | Firm and household applications against the lending screens | A.24–A.39 |
+| 10 | `aggregate_previous_state` | Snapshot last quarter, roll history buffers | A.1–A.15 |
+| 20 | `refit_expectations` | AR(1) refits: growth, PPI/CPI/HPI/RPI, government consumption | A.16–A.21 |
+| 30 | `firm_individual_targets` | Predicted growth, demand, profits; target production, wages, reservation wages | A.59–A.68, A.129–A.132 |
+| 40 | `labour_market` | Fire to target, post vacancies, unemployed search | A.141–A.142 |
+| 50 | `planning_and_production` | Policy rate, work effort, Leontief production, prices, input and final demand | A.45, A.72–A.82, A.95–A.106, A.134–A.139 |
+| 60 | `housing_preclear` | List properties, form bids, size mortgage demand | A.107–A.116 |
+| 70 | `credit_market` | Firm and household applications against the lending screens | A.25–A.39, A.117–A.118 |
 | 80 | `housing_completion` | Settle purchases and rentals conditional on mortgage grants | A.112–A.116 |
-| 90 | `goods_market` | Search-and-matching clearing, firms served first | A.1, A.88 |
-| 100 | `realised_accounting` | Profits, deposits, equity, taxes, bankruptcy, aggregates | A.89–A.100, A.119–A.127 |
+| 90 | `goods_market` | Search–and–matching clearing, firms served first | A.88, A.140 |
+| 100 | `realised_accounting` | Profits, deposits, equity, taxes, bankruptcy, aggregates | A.40–A.44, A.85–A.100, A.119–A.127 |
 
 ## Firms
 
@@ -125,18 +125,25 @@ unemployment benefit, a fraction `1 − φ^SR` of predicted income, and a smooth
 average of the last `T^CO` quarters. **Investment** (A.106) is a fixed rate
 `φ^IR` on predicted income.
 
-**Housing** (A.107–A.118) depends on tenure. A household forms a maximum
+**Housing** (A.107–A.116) depends on tenure. A household forms a maximum
 affordable price from predicted income (A.107), compares the annual cost of
 renting (A.108) with that of buying (A.109), and buys with a logistic
-probability in the difference (A.110). Owners list at
-`(1 + π̄^HPI) V_p` (A.112) and cut the price randomly while unsold (A.113).
-Mortgage demand is price less full financial wealth (A.118).
+probability in the difference (A.110); renters move with probability `1 − p^RS`
+and owners with `1 − p^OS`. Owners list at `(1 + π̄^HPI) V_p` (A.112) and cut the
+price randomly while unsold (A.113); let properties are marked up on predicted
+RPI (A.114), cut while unlet (A.115), and indexed to lagged CPI once tenanted
+(A.116). Consumption-loan demand is A.117; mortgage demand is the price less a
+down-payment of financial wealth net of the consumption shortfall (A.118).
 
 **Wealth** identities close in A.119–A.127: real and financial assets, deposits,
 other financial assets, total and net wealth, and insolvency.
 
-**Individuals** are employed, unemployed, or not economically active. Only the
-unemployed search (A.128–A.131). The inactive earn no individual income and are
+**Individuals** are employed, unemployed, or not economically active. Labour
+input decays while unemployed and grows while employed (A.129–A.130, both inert
+at the Austrian `h^U = h^E = 0`); the reservation wage is the greater of the
+unemployment benefit and the mean of the last `T^RW = 8` wages (A.131);
+individual income is the CPI-scaled wage net of social contributions and income
+tax (A.132–A.133). Firing and hiring clear at A.141–A.142. The inactive earn no individual income and are
 supported through their household's `sb^O`.
 
 ## Government and central bank
@@ -162,7 +169,7 @@ input-output table. Net exports accumulate once per quarter.
 
 ## Accounting identities
 
-GDP is computed three ways and cross-checked each tick (A.140–A.142): output,
-income, and expenditure. In the current build output and expenditure agree to
+GDP is computed three ways and cross-checked each tick (A.15): output, income,
+and expenditure. In the current build output and expenditure agree to
 within ~1% over 40 quarters, which is the model's main stock-flow-consistency
 check.

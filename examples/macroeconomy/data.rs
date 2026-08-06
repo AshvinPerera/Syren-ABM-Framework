@@ -272,11 +272,10 @@ pub struct FixtureDataProvider;
 impl DataProvider for FixtureDataProvider {
     fn load(&self, config: &MacroeconomyConfig) -> Result<InitialData, DataError> {
         // Config is applied to the environment *before* the population is
-        // generated. `build_macroeconomy_model` used to apply it afterwards,
-        // while the fixture read its own local `CountryParameters::default()`,
-        // so a config that overrode `io_matrix` changed the simulation's
-        // coefficients but not the firms' initial stocks -- silently breaking
-        // the A.55/A.56 consistency the initial state is built for.
+        // generated, so the generator reads the final coefficients. Applying it
+        // afterwards would leave a config that overrides `io_matrix` changing
+        // the simulation's coefficients but not the firms' initial stocks,
+        // breaking the A.55/A.56 consistency the initial state is built for.
         let mut environment = MacroEnvironment::new(config.seed);
         if let Some(path) = &config.config_path {
             super::config::apply_config_file(path, config.scenario.as_deref(), &mut environment)
@@ -499,12 +498,11 @@ pub fn synthetic_population(
     //   A.26:  K - L + D     >= Pi / rho^RoE        (capital large vs profit)
     //   A.25:  L <= rho^DtE * K                     (rho^DtE = 1, so L <= K)
     //
-    // Solving only A.27 -- which is all the generator used to do -- left firms
-    // sitting on A.26's boundary: measured at tick 1, A.25 allowed 1166 while
-    // A.26 allowed 199, six times tighter. Hoarded deposits kept `D_f` climbing
-    // so it never bit, but the moment `D_f` stopped growing every firm's cap
-    // went to exactly zero and the credit market shut with its supply envelope
-    // untouched.
+    // Solving A.27 alone leaves firms sitting on A.26's boundary: at tick 1
+    // A.25 allows six times what A.26 does. Hoarded deposits keep `D_f`
+    // climbing so it does not bite immediately, but the moment `D_f` stops
+    // growing every firm's cap goes to exactly zero and the credit market shuts
+    // with its supply envelope untouched. Both are solved here.
     //
     // With `L = lambda * K`, A.26 rearranges to
     //     lambda <= 1 - (headroom * Pi / rho^RoE - D) / K
@@ -579,15 +577,14 @@ pub fn synthetic_population(
         let capital_row: f64 = environment.params.capital_compensation_matrix[sector]
             .iter()
             .sum();
-        // A.77 at P = 1. This is the accounting quantity A.58 needs, not the
-        // hardcoded 0.7 the old fixture carried.
+        // A.77 at P = 1, which is the accounting quantity A.58 needs.
         let unit_cost = LABOUR_SHARE + io_row + capital_row + production_tax;
         // A.140 needs at least one sector with genuine price dispersion.
         let price = if i == firm_count as usize - 1 { 1.15 } else { 1.0 };
         let inventory = CALIBRATION_PHI_ST_Y * output;
         let work_effort = productivity[sector];
 
-        let mut firm = Firm {
+        let firm = Firm {
             id: i as u32,
             sector: sector as u8,
             country: 0,

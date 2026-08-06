@@ -155,9 +155,9 @@ impl MacroRng {
 
 /// Behavioural switches that change how markets clear.
 ///
-/// This is not a replication policy: the example no longer claims to reproduce
-/// the authors' trajectories. Each variant is a modelling choice with different
-/// cost/fidelity trade-offs at scale.
+/// This is not a replication policy -- the example reproduces the model's
+/// mechanics, not the authors' trajectories. Each variant is a modelling choice
+/// with different cost/fidelity trade-offs at scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelPolicy {
     pub goods_clearing_policy: GoodsClearingPolicy,
@@ -363,12 +363,11 @@ impl Default for CountryParameters {
         // depreciation of roughly 6% of the stock per year gives `d` a row sum
         // near 0.06.
         //
-        // Both were previously `banded_sector_matrix(0.02, 0.01)` -- identical.
-        // That left every firm holding barely one quarter of its own
-        // depreciation, so once A.87 was corrected to consume capital in
-        // proportion to production the stock drained inside a quarter and A.64
-        // took output to zero. The call sites had already been fixed to use the
-        // right matrix; the values had not.
+        // The two matrices are distinct for that reason. Giving them the same
+        // small row sum would leave every firm holding barely one quarter of
+        // its own depreciation, and since A.87 consumes capital in proportion
+        // to production the stock would drain inside a quarter and A.64 would
+        // take output to zero.
         let net_fixed_assets_matrix = banded_sector_matrix(2.4, 1.6);
         let capital_compensation_matrix = banded_sector_matrix(0.036, 0.024);
         Self {

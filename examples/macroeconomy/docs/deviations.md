@@ -1,4 +1,7 @@
-# Deliberate deviations from the Wiese. et al. paper
+# Deliberate deviations from the Wiese et al. paper
+
+Four departures from the appendix as printed. Each is stated with the case for
+it; the first three are reversible from `config.yaml`.
 
 ## 1. Wage rule — `wage_effort_on_base` (default `true`)
 
@@ -28,9 +31,8 @@ Wiese A.80 omits Poledna's dividend term
 `− θ^DIV (1 − τ^FIRM) max(0, Π)`. Without it, firm profits accumulate in
 deposits and never return to households as income.
 
-Restored at Poledna Table 1's Austrian value, **0.7953**. Both legs were already
-implemented: firms pay out (A.33), households receive it as investor income
-(A.53).
+Set to Poledna Table 1's Austrian value, **0.7953**. Both legs are present:
+firms pay out (A.33) and households receive it as investor income (A.53).
 
 Revert with `theta_dividend: 0.0`.
 
@@ -42,6 +44,27 @@ of two *quarterly* incomes.
 Baptista et al. (2016) Eq. (13) — the source Wiese cites for the housing block —
 reads `q ≤ Φ_i y` with `y` the household's gross **annual** income, and
 `ρ^LTI-M = 4.5` is the ESRB annual multiple.
+
+## 4. A.109 annuity exponent
+
+A.109's annual mortgage repayment carries the annuity term
+
+```
+4 · r*(P_h − W^FA_h) / (1 − (1 + r*)^{m_l})
+```
+
+with a **positive** exponent on `m_l`. For any `r* > 0` and a 100-quarter
+maturity, `(1 + r*)^{m_l} ≫ 1`, so the denominator is large and negative and the
+interest leg of the cost of buying is negative — the higher mortgage rates go,
+the cheaper buying looks, and A.110 tips households into the housing market
+exactly when credit is dearest.
+
+Implemented with the standard annuity denominator `1 − (1 + r*)^{−m_l}`, which
+is what the surrounding text describes ("the second term corresponds to
+interest"). `equations.rs::purchase_cost_a109`.
+
+Not switchable: there is no reading of the printed form that is a coherent
+alternative model.
 
 ## Scenarios
 

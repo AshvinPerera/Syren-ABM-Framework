@@ -58,21 +58,21 @@ three hold jointly at initialisation.
    chosen. Carries a trend and a small wobble: a flat history makes every AR(1)
    forecast zero change forever.
 
-## AR(1) series need an initial condition
+## Every AR(1) series needs an initial condition
 
-Six series are seeded (production, sectoral production, PPI, CPI, HPI, RPI) and
-so is government consumption. That last one was originally omitted on the
-reasoning that "the model produces this series itself, so the AR(1) needs no
-external input".
+Seven series are seeded: production, sectoral production, PPI, CPI, HPI, RPI,
+and government consumption. Both the history and the current aggregate are set,
+because A.95's fit reads both.
 
-That reasoning is wrong, and the failure mode is worth recording. An AR(1)
-fitted on an empty history with a zero current level forecasts zero. The
-forecast sets the target, the target determines the realised flow, the realised
-flow feeds the history. It is a self-sustaining zero — **government demand,
-about 18% of final demand, was absent from every tick**.
+Government consumption is the one where this is easy to overlook, since the
+model produces the series itself. It still needs a seed. An AR(1) fitted on an
+empty history with a zero current level forecasts zero; the forecast sets the
+target, the target determines the realised flow, and the realised flow feeds the
+history. Left unseeded it is a self-sustaining zero, and government demand is
+about 18% of final demand.
 
-Endogenous propagation still needs an initial condition, exactly as A.2's
-production AR(1) does.
+Endogenous propagation does not remove the need for an initial condition — A.2's
+production AR(1) is seeded for exactly the same reason.
 
 ## What remains synthetic
 

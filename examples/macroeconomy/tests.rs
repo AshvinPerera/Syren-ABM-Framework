@@ -242,7 +242,7 @@ fn thesis_defaults_and_initialisation_recipe_are_exposed() {
 }
 
 #[test]
-fn shard_count_is_derived_from_population_not_hard_coded() {
+fn shard_count_is_derived_from_population() {
     // Shard count is fixed at construction and each shard addresses 2^22 - 1
     // entities, so under-provisioning is an unrecoverable mid-run failure.
     let tiny = FixtureDataProvider
@@ -328,7 +328,7 @@ fn same_seed_reproduces_and_distinct_seeds_diverge() {
 }
 
 #[test]
-fn housing_reduction_is_a_percentage_haircut_not_a_sign_flip() {
+fn housing_reduction_is_a_percentage_haircut() {
     // mu/sigma are log-normal parameters of a percentage reduction: the sale
     // median is exp(1.4531) = 4.28%, the rent median exp(1.6559) = 5.24%.
     let sale = price_or_rent_reduction_a113_a115(200.0, 1.4531);
@@ -336,22 +336,21 @@ fn housing_reduction_is_a_percentage_haircut_not_a_sign_flip() {
     let rent = price_or_rent_reduction_a113_a115(100.0, 1.6559);
     assert!((rent - 100.0 * (1.0 - 0.0524)).abs() < 0.1, "got {rent}");
 
-    // A reduction must reduce, never invert. Reading exp(eps) as a fraction
-    // gave `1 - 4.28 = -3.28`, i.e. a negative price.
+    // A reduction must reduce, never invert. `exp(eps)` is a percentage, so
+    // reading it as a fraction would give `1 - 4.28 = -3.28` -- a negative
+    // price -- for the median draw.
     for eps in [-3.0, 0.0, 1.4531, 3.0, 6.0, 12.0] {
         let out = price_or_rent_reduction_a113_a115(100.0, eps);
         assert!(out > 0.0 && out <= 100.0, "eps={eps} gave {out}");
     }
 }
 
-/// Executable specification for the defect that currently makes the model dead.
+/// Aggregate output and the price level stay alive over a short run.
 ///
-/// Firm output holds for two quarters and then collapses to zero, after which
-/// `unit_cost = costs / production` diverges and every price index follows it
-/// to inf. Until this holds, the cost-push pricing channel (`phi_cp`) cannot be
-/// switched on, and no stylized fact can be measured.
+/// The two are coupled: A.73's cost-push term divides costs by production, so
+/// output reaching zero sends `unit_cost` and every price index to infinity in
+/// the same quarter. Checking both each tick pins the pair.
 #[test]
-#[ignore = "known defect: firm production collapses to zero by quarter three"]
 fn production_does_not_collapse_over_a_short_run() {
     let mut example = fixture();
     for quarter in 1..=8 {
