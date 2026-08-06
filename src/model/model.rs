@@ -193,23 +193,29 @@ impl Model {
         T: Any + Send + 'static,
     {
         let len = values.len();
-        self.spawn_agent_batch_erased(template_name, component_id, Box::new(values), len)
+        self.spawn_agent_batch_erased(template_name, vec![(component_id, Box::new(values))], len)
     }
 
+    /// Spawns one batch of agents, setting every supplied component column on
+    /// the same entities.
+    ///
+    /// Taking the columns together is what allows an agent to be modelled as
+    /// several small components rather than one wide struct: a query then names
+    /// only the columns it reads, instead of dragging every field of a combined
+    /// struct through cache. Spawning one batch per column would create one set
+    /// of entities per column instead.
     pub(crate) fn spawn_agent_batch_erased(
         &mut self,
         template_name: &str,
-        component_id: crate::ComponentID,
-        values: Box<dyn Any + Send>,
+        columns: Vec<(crate::ComponentID, Box<dyn Any + Send>)>,
         len: usize,
     ) -> Result<Vec<Entity>, super::error::ModelError> {
         let template_id = self.agents.id(template_name)?;
-        let batch = self
-            .agents
-            .get(template_name)?
-            .batch(len)?
-            .set_erased_column(component_id, values, len)?
-            .into_spawn_batch();
+        let mut builder = self.agents.get(template_name)?.batch(len)?;
+        for (component_id, values) in columns {
+            builder = builder.set_erased_column(component_id, values, len)?;
+        }
+        let batch = builder.into_spawn_batch();
         self.ecs
             .world_ref()
             .defer(Command::SpawnBatchTagged { batch, template_id })?;

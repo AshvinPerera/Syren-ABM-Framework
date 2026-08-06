@@ -559,13 +559,34 @@ impl ModelBuilder {
             tick_count: 0,
         };
 
+        // Group by template so an agent declared with several components is
+        // spawned once with all of its columns, not once per column.
+        let mut grouped: Vec<(String, usize, Vec<(crate::ComponentID, Box<dyn Any + Send>)>)> =
+            Vec::new();
         for population in self.pending_agent_populations {
-            model.spawn_agent_batch_erased(
-                &population.template_name,
-                population.component_id,
-                population.values,
-                population.len,
-            )?;
+            match grouped
+                .iter_mut()
+                .find(|(name, _, _)| *name == population.template_name)
+            {
+                Some((_, len, columns)) => {
+                    if *len != population.len {
+                        return Err(ModelError::AgentPopulationLengthMismatch {
+                            template: population.template_name,
+                            expected: *len,
+                            found: population.len,
+                        });
+                    }
+                    columns.push((population.component_id, population.values));
+                }
+                None => grouped.push((
+                    population.template_name,
+                    population.len,
+                    vec![(population.component_id, population.values)],
+                )),
+            }
+        }
+        for (template_name, len, columns) in grouped {
+            model.spawn_agent_batch_erased(&template_name, columns, len)?;
         }
 
         Ok(model)

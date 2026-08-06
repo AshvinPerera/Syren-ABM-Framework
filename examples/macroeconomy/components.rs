@@ -43,15 +43,6 @@ pub struct Firm {
     pub previous_inventory: f64,
     pub inventory_two_periods_ago: f64,
     pub initial_inventory: f64,
-    pub intermediate_stock: [f64; SECTORS],
-    pub initial_intermediate_stock: [f64; SECTORS],
-    pub capital_stock: [f64; SECTORS],
-    pub initial_capital_stock: [f64; SECTORS],
-    pub target_intermediate: [f64; SECTORS],
-    pub target_capital: [f64; SECTORS],
-    pub realised_intermediate: [f64; SECTORS],
-    pub realised_capital: [f64; SECTORS],
-    pub capital_to_install: [f64; SECTORS],
     pub target_short_loan: f64,
     pub target_long_loan: f64,
     pub granted_short_loan: f64,
@@ -72,6 +63,54 @@ pub struct Firm {
     pub sales_revenue: f64,
     pub excess_demand: f64,
     pub bankrupt: bool,
+}
+
+/// A firm's per-sector input and capital vectors, held apart from [`Firm`].
+///
+/// The framework stores one contiguous column per registered component type, so
+/// a query that names [`Firm`] pulls every byte of it. These nine
+/// `[f64; SECTORS]` arrays are 1,296 of the 1,664 bytes a combined struct would
+/// occupy -- 78% of it -- and several systems never read them: the goods market
+/// touches only prices, production, inventory and sales.
+///
+/// Splitting them out lets a system declare just the columns it needs. Systems
+/// that do need both collect both and index them together; ids are dense and
+/// both are collected in id order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FirmSectoral {
+    /// Mirrors [`Firm::id`] so the two can be joined.
+    pub id: u32,
+    /// `M_{fs'}`: stock of intermediate inputs, by supplying sector.
+    pub intermediate_stock: [f64; SECTORS],
+    pub initial_intermediate_stock: [f64; SECTORS],
+    /// `K_{fs'}`: stock of capital inputs, by supplying sector.
+    pub capital_stock: [f64; SECTORS],
+    pub initial_capital_stock: [f64; SECTORS],
+    /// `M_hat_{fs'}` and `K_hat_{fs'}` from A.78 and A.79.
+    pub target_intermediate: [f64; SECTORS],
+    pub target_capital: [f64; SECTORS],
+    /// What the goods market actually delivered this quarter.
+    pub realised_intermediate: [f64; SECTORS],
+    pub realised_capital: [f64; SECTORS],
+    /// A.87's `T^KD` delay queue: capital bought but not yet usable.
+    pub capital_to_install: [f64; SECTORS],
+}
+
+impl Default for FirmSectoral {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            intermediate_stock: [0.0; SECTORS],
+            initial_intermediate_stock: [0.0; SECTORS],
+            capital_stock: [0.0; SECTORS],
+            initial_capital_stock: [0.0; SECTORS],
+            target_intermediate: [0.0; SECTORS],
+            target_capital: [0.0; SECTORS],
+            realised_intermediate: [0.0; SECTORS],
+            realised_capital: [0.0; SECTORS],
+            capital_to_install: [0.0; SECTORS],
+        }
+    }
 }
 
 impl Default for Firm {
@@ -100,15 +139,6 @@ impl Default for Firm {
             previous_inventory: 0.0,
             inventory_two_periods_ago: 0.0,
             initial_inventory: 0.0,
-            intermediate_stock: [0.0; SECTORS],
-            initial_intermediate_stock: [0.0; SECTORS],
-            capital_stock: [0.0; SECTORS],
-            initial_capital_stock: [0.0; SECTORS],
-            target_intermediate: [0.0; SECTORS],
-            target_capital: [0.0; SECTORS],
-            realised_intermediate: [0.0; SECTORS],
-            realised_capital: [0.0; SECTORS],
-            capital_to_install: [0.0; SECTORS],
             target_short_loan: 0.0,
             target_long_loan: 0.0,
             granted_short_loan: 0.0,

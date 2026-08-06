@@ -80,6 +80,7 @@ where
         .with_agent_template(
             AgentTemplate::builder("firm")
                 .with_component::<Firm>(ids.firm)?
+                .with_component::<FirmSectoral>(ids.firm_sectoral)?
                 .with_capacity(data.firms.len())
                 .build(),
         )?
@@ -134,6 +135,7 @@ where
 
     builder = builder
         .with_agent_population("firm", ids.firm, data.firms)?
+        .with_agent_population("firm", ids.firm_sectoral, data.firm_sectorals)?
         .with_agent_population("individual", ids.individual, data.individuals)?
         .with_agent_population("household", ids.household, data.households)?
         .with_agent_population("bank", ids.bank, data.banks)?
@@ -211,6 +213,7 @@ fn register_components(
             .map_err(|_| "component registry lock poisoned")?;
         MacroComponentIds {
             firm: reg.register::<Firm>()?,
+            firm_sectoral: reg.register::<FirmSectoral>()?,
             individual: reg.register::<Individual>()?,
             household: reg.register::<Household>()?,
             bank: reg.register::<Bank>()?,
