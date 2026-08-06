@@ -2108,7 +2108,21 @@ fn goods_market_system(
             }
         }
         let firm_row_index = RowIndex::build(&firms, |firm| firm.id);
-        let mut exhausted_flag = vec![false; firms.len()];
+        // One sampler per sector, seeded with the fixed A.140 weights and
+        // zeroed for firms that already hold no sellable stock.
+        let mut position_in_sector = vec![0usize; firms.len()];
+        let mut samplers: Vec<SectorSampler> = Vec::with_capacity(SECTORS);
+        for members in &sector_members {
+            let mut weights = Vec::with_capacity(members.len());
+            for (position, idx) in members.iter().enumerate() {
+                position_in_sector[*idx] = position;
+                let sellable = positive_part(
+                    firms[*idx].production + firms[*idx].inventory - firms[*idx].sales_quantity,
+                );
+                weights.push(if sellable > 1e-9 { a140_weight[*idx] } else { 0.0 });
+            }
+            samplers.push(SectorSampler::new(&weights));
+        }
         let mut touched: Vec<usize> = Vec::new();
 
         for demand in demands {
@@ -2125,44 +2139,32 @@ fn goods_market_system(
             // `quantity <= 1e-9` arm below re-entered the loop having changed
             // nothing and spun forever, which is reachable as soon as a firm's
             // price exceeds the buyer's remaining budget by a factor of 1e9.
+            // Per-buyer give-ups are restored; a firm that genuinely sold out
+            // stays at zero because its sellable stock is now nil.
             for idx in touched.drain(..) {
-                exhausted_flag[idx] = false;
+                let sellable = positive_part(
+                    firms[idx].production + firms[idx].inventory - firms[idx].sales_quantity,
+                );
+                let sector_of = firms[idx].sector as usize;
+                let weight = if sellable > 1e-9 { a140_weight[idx] } else { 0.0 };
+                samplers[sector_of].set(position_in_sector[idx], weight);
             }
             while remaining > 1e-9 && remaining_budget > 1e-9 {
                 let _gm_t = std::time::Instant::now();
                 // Candidates come straight from the sector membership. The
                 // outer `sellers` filter applied the same availability test one
                 // extra time per buyer, for 5.0 s of an 11.9 s system.
-                let available_sellers: Vec<usize> = sector_members
+let members = sector_members
                     .get(sector)
                     .map(|m| m.as_slice())
-                    .unwrap_or(&[])
-                    .iter()
-                    .copied()
-                    .filter(|idx| {
-                        !exhausted_flag[*idx]
-                            && positive_part(
-                                firms[*idx].production + firms[*idx].inventory
-                                    - firms[*idx].sales_quantity,
-                            ) > 1e-9
-                    })
-                    .collect();
+                    .unwrap_or(&[]);
                 PROF_GM_NS[0].fetch_add(_gm_t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-                if available_sellers.is_empty() {
-                    break;
-                }
-                let _gm_w = std::time::Instant::now();
-                // Fixed A.140 weights, restricted to the candidates still
-                // holding stock. The weights themselves never change during
-                // clearing -- only the candidate set does, which is what
-                // "resorts to the remaining firms" means.
-                let weights: Vec<f64> = available_sellers
-                    .iter()
-                    .map(|idx| a140_weight[*idx])
-                    .collect();
-                PROF_GM_NS[1].fetch_add(_gm_w.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let _gm_c = std::time::Instant::now();
-                let firm_idx = available_sellers[weighted_choice(&mut rng, &weights)];
+                let draw = rng.unit_f64();
+                let Some(position) = samplers[sector].sample(draw) else {
+                    break;
+                };
+                let firm_idx = members[position];
                 PROF_GM_NS[2].fetch_add(_gm_c.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let available = positive_part(
                     firms[firm_idx].production + firms[firm_idx].inventory
@@ -2174,10 +2176,8 @@ fn goods_market_system(
                     // Unusable seller for this buyer: retire it and try the
                     // rest. Each pass either moves goods or shrinks the
                     // candidate set, so the loop terminates.
-                    if !exhausted_flag[firm_idx] {
-                        exhausted_flag[firm_idx] = true;
-                        touched.push(firm_idx);
-                    }
+                    samplers[sector].set(position_in_sector[firm_idx], 0.0);
+                    touched.push(firm_idx);
                     continue;
                 }
                 let payment = quantity * firms[firm_idx].price;
@@ -2186,6 +2186,13 @@ fn goods_market_system(
                 // every sale hit deposits twice.
                 firms[firm_idx].sales_quantity += quantity;
                 firms[firm_idx].sales_revenue += payment;
+                let sellable_left = positive_part(
+                    firms[firm_idx].production + firms[firm_idx].inventory
+                        - firms[firm_idx].sales_quantity,
+                );
+                if sellable_left <= 1e-9 {
+                    samplers[sector].set(position_in_sector[firm_idx], 0.0);
+                }
                 apply_buyer_goods(
                     &mut firms,
                     &mut households,
@@ -3073,6 +3080,93 @@ fn realised_accounting_system(
         state.push_phase("realised_accounting");
         set_phase_and_state(ecs, env_boundary, phases.accounting_done, state)
     })
+}
+
+/// Fenwick tree over one sector's firms, holding each firm's fixed A.140
+/// weight, or zero when it cannot currently sell.
+///
+/// The goods market draws a seller per buyer visit. Done by scanning the
+/// sector's members it is O(firms in sector) per visit and quadratic overall --
+/// 5.0 s of a 7.1 s system at 4,753 firms. This gives the same draw in
+/// O(log n), with O(log n) updates when a firm sells out or a buyer gives up
+/// on it.
+///
+/// `sample` reproduces `weighted_choice` exactly: both pick the first position
+/// whose cumulative weight reaches `u * total`, walking members in the same
+/// order, so the trajectory is unchanged.
+struct SectorSampler {
+    /// 1-based Fenwick array over positions within the sector.
+    tree: Vec<f64>,
+    /// Current weight at each position, for restore-after-exhaustion.
+    live: Vec<f64>,
+    len: usize,
+}
+
+impl SectorSampler {
+    fn new(weights: &[f64]) -> Self {
+        let len = weights.len();
+        let mut sampler = Self {
+            tree: vec![0.0; len + 1],
+            live: weights.to_vec(),
+            len,
+        };
+        // O(n) build: seed the array then push each node into its parent.
+        for (position, weight) in weights.iter().enumerate() {
+            sampler.tree[position + 1] += *weight;
+            let parent = position + 1 + ((position + 1) & (position + 1).wrapping_neg());
+            if parent <= len {
+                let carry = sampler.tree[position + 1];
+                sampler.tree[parent] += carry;
+            }
+        }
+        sampler
+    }
+
+    fn add(&mut self, position: usize, delta: f64) {
+        let mut i = position + 1;
+        while i <= self.len {
+            self.tree[i] += delta;
+            i += i & i.wrapping_neg();
+        }
+    }
+
+    fn set(&mut self, position: usize, weight: f64) {
+        let delta = weight - self.live[position];
+        if delta != 0.0 {
+            self.live[position] = weight;
+            self.add(position, delta);
+        }
+    }
+
+    fn total(&self) -> f64 {
+        let mut sum = 0.0;
+        let mut i = self.len;
+        while i > 0 {
+            sum += self.tree[i];
+            i -= i & i.wrapping_neg();
+        }
+        sum
+    }
+
+    /// Position whose cumulative weight first reaches `u * total`.
+    fn sample(&self, u: f64) -> Option<usize> {
+        let total = self.total();
+        if self.len == 0 || total <= 1e-12 || !total.is_finite() {
+            return None;
+        }
+        let mut remaining = u * total;
+        let mut position = 0usize;
+        let mut step = self.len.next_power_of_two();
+        while step > 0 {
+            let probe = position + step;
+            if probe <= self.len && self.tree[probe] < remaining {
+                position = probe;
+                remaining -= self.tree[probe];
+            }
+            step >>= 1;
+        }
+        Some(position.min(self.len - 1))
+    }
 }
 
 /// Dense id-to-position index over a collected row set.
