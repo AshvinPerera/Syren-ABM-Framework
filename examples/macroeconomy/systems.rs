@@ -2158,7 +2158,6 @@ fn goods_market_system(
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
     access.write.set(ids.firm_realised);
-    access.write.set(ids.household);
     access.write.set(ids.government_entity);
     access.write.set(ids.rest_of_world);
     access
@@ -2191,7 +2190,6 @@ fn goods_market_system(
         PROF_GM_NS[4].fetch_add(_gm_order.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let mut firm_realised = collect_rows_by(ecs, |row: &FirmRealised| row.id)?;
-        let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut governments = collect_rows_by(ecs, |row: &GovernmentEntity| row.id)?;
         let mut rows = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
 
@@ -2385,7 +2383,6 @@ let members = sector_members
                 apply_buyer_goods(
                     &mut firms,
                     &mut firm_realised,
-                    &mut households,
                     &mut governments,
                     &mut rows,
                     demand,
@@ -2440,7 +2437,6 @@ let members = sector_members
 
         write_rows(ecs, firms, |firm: &Firm| firm.id)?;
         write_rows(ecs, firm_realised, |row: &FirmRealised| row.id)?;
-        write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, governments, |government: &GovernmentEntity| {
             government.id
         })?;
@@ -4603,7 +4599,6 @@ fn apply_loan(
 fn apply_buyer_goods(
     firms: &mut [Firm],
     firm_realised: &mut [FirmRealised],
-    households: &mut [Household],
     governments: &mut [GovernmentEntity],
     rows: &mut [RestOfWorld],
     demand: GoodsDemand,
@@ -4628,9 +4623,10 @@ fn apply_buyer_goods(
                 }
             }
         }
-        BUYER_HOUSEHOLD => {
-            let _ = &mut *households;
-        }
+        // A.105's purchases move real goods to the household but no cash:
+        // A.123 settles deposits once per quarter against the whole flow, so
+        // there is nothing to record per transaction.
+        BUYER_HOUSEHOLD => {}
         BUYER_GOVERNMENT => {
             if let Some(government) = governments
                 .iter_mut()
