@@ -204,7 +204,7 @@ impl ContinuousSpace2D {
         ring: i64,
         mut visit: impl FnMut(u32, u32),
     ) {
-        let mut visit_cell = |col: i64, row: i64, visit: &mut dyn FnMut(u32, u32)| {
+        let visit_cell = |col: i64, row: i64, visit: &mut dyn FnMut(u32, u32)| {
             if let Some((c, r)) = self.geometry.wrap_cell(col, row) {
                 visit(c, r);
             }
@@ -302,6 +302,10 @@ impl BoundaryResource for ContinuousSpace2D {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }
