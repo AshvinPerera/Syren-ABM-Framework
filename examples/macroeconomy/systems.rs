@@ -323,17 +323,26 @@ fn target_setting_system(
         let _sys_guard = SysTimer(30 / 10, std::time::Instant::now());
         // Eqs. A.59-A.68 and A.129-A.132: firm targets and individual supply/income targets.
         let mut state = macro_state(ecs, env_boundary)?;
-        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
-        let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
-        let mut individual_wage_histories =
-            collect_rows_by(ecs, |row: &IndividualWageHistory| row.id)?;
+
+        // Read-only: A.77's previous sectoral prices, taken before this tick's
+        // targets are set. The firm rows themselves are written in place.
+        let firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let accounts = collect_rows_by(ecs, |row: &GovernmentAccount| row.id)?;
         let account = accounts.first().copied().unwrap_or_default();
         // `P_s(t-1)` for A.59's relative-price test.
         let sector_prices_previous = previous_sector_prices(&firms);
 
-        for (firm, stocks) in firms.iter_mut().zip(firm_stocks.iter_mut()) {
+        // A.59-A.71 are per-firm: own row in, own row out. Iterated in place so
+        // the rows are never copied to a `Vec` and back.
+        let params = state.params.clone();
+        let calibration = state.calibration.clone();
+        let forecast = state.forecast.clone();
+        let firm_query = ecs
+            .query()?
+            .write::<Firm>()?
+            .write::<FirmStocks>()?
+            .build()?;
+        ecs.for_each::<(Write<Firm>, Write<FirmStocks>), _>(firm_query, |(firm, stocks)| {
             let sector = firm.sector as usize;
             // A.59's case condition, which A.74 shares: apply the idiosyncratic
             // growth term only when the firm faced excess demand *and* priced
@@ -372,23 +381,23 @@ fn target_setting_system(
                 firm.predicted_profits = 0.0;
             }
             firm.target_demand = firm_target_demand_a60(
-                state.forecast.predicted_sector_growth[sector],
-                state.calibration.phi_f_q,
+                forecast.predicted_sector_growth[sector],
+                calibration.phi_f_q,
                 gamma_f,
                 firm.previous_demand.max(1.0),
             );
             firm.predicted_profits = firm_predicted_profit_a61(
-                state.forecast.predicted_ppi_inflation,
+                forecast.predicted_ppi_inflation,
                 gamma_f,
                 firm.profits,
             );
             let intermediate_constraint = min_input_constraint_a63_a64(
                 &stocks.intermediate_stock,
-                &state.params.io_matrix[sector],
+                &params.io_matrix[sector],
             );
             let capital_constraint = min_input_constraint_a63_a64(
                 &stocks.capital_stock,
-                &state.params.net_fixed_assets_matrix[sector],
+                &params.net_fixed_assets_matrix[sector],
             );
             // A.128 fixes individual labour inputs at H_i = 1, and A.8.1 sets
             // h^U = h^E = 0, so they never move: sum_i H_i is simply the
@@ -400,7 +409,7 @@ fn target_setting_system(
             // after `labour_constraint`, so production was constrained by the
             // previous quarter's work effort.
             firm.work_effort = work_effort_a66_a67(
-                state.params.work_effort_max,
+                params.work_effort_max,
                 firm.initial_work_effort,
                 labour_supply,
                 firm.target_demand,
@@ -414,14 +423,14 @@ fn target_setting_system(
             let labour_constraint = firm.labour;
             firm.target_production = firm_target_production_a62(
                 firm.target_demand,
-                state.calibration.phi_st_y,
+                calibration.phi_st_y,
                 firm.previous_production,
                 firm.previous_inventory,
-                state.calibration.chi_h,
+                calibration.chi_h,
                 labour_constraint,
-                state.calibration.chi_m,
+                calibration.chi_m,
                 intermediate_constraint,
-                state.calibration.chi_k,
+                calibration.chi_k,
                 capital_constraint,
             );
             firm.target_labour = firm.target_production.max(0.0);
@@ -461,20 +470,20 @@ fn target_setting_system(
             } else {
                 1.0
             };
-            let tightness_markup = state.params.wage_tightness_sensitivity * 0.0;
-            if state.params.wage_effort_on_base {
+            let tightness_markup = params.wage_tightness_sensitivity * 0.0;
+            if params.wage_effort_on_base {
                 // Poledna A.26: the work-effort factor scales a *base* wage,
                 // so overtime raises the wage by a level and never compounds.
                 // Indexation still accumulates on the base, exactly as A.69
                 // applies it to the previous wage.
-                firm.base_wage *= ((1.0 + state.forecast.predicted_ppi_inflation)
+                firm.base_wage *= ((1.0 + forecast.predicted_ppi_inflation)
                     * (1.0 + tightness_markup))
                     .max(0.0);
                 firm.wage = firm.base_wage * work_effort_factor.max(0.0);
             } else {
                 // Wiese A.69 verbatim. Left bit-identical to the form this
                 // branch had before the Poledna alternative was added.
-                firm.wage *= ((1.0 + state.forecast.predicted_ppi_inflation)
+                firm.wage *= ((1.0 + forecast.predicted_ppi_inflation)
                     * (1.0 + tightness_markup)
                     * work_effort_factor)
                     .max(0.0);
@@ -483,42 +492,45 @@ fn target_setting_system(
             firm.sales_quantity = 0.0;
             firm.sales_revenue = 0.0;
             firm.excess_demand = 0.0;
-        }
+        })?;
 
-        for (individual, wage_history) in individuals
-            .iter_mut()
-            .zip(individual_wage_histories.iter_mut())
-        {
+        // A.128-A.131 are per-individual on the same terms.
+        let individual_query = ecs
+            .query()?
+            .write::<Individual>()?
+            .write::<IndividualWageHistory>()?
+            .build()?;
+        ecs.for_each::<(Write<Individual>, Write<IndividualWageHistory>), _>(
+            individual_query,
+            |(individual, wage_history)| {
             match individual.labour_status {
                 LABOUR_UNEMPLOYED => {
-                    individual.labour_input /= 1.0 + state.params.unemployment_growth_h;
+                    individual.labour_input /= 1.0 + params.unemployment_growth_h;
                 }
                 LABOUR_EMPLOYED => {
-                    individual.labour_input *= 1.0 + state.params.employed_growth_h;
+                    individual.labour_input *= 1.0 + params.employed_growth_h;
                 }
                 _ => individual.labour_input = 0.0,
             }
             let average_wage =
                 wage_history.wage_history.iter().sum::<f64>() / wage_history.wage_history.len() as f64;
             individual.reservation_wage =
-                (state.forecast.predicted_cpi * account.unemployment_benefit).max(average_wage);
+                (forecast.predicted_cpi * account.unemployment_benefit).max(average_wage);
             individual.predicted_income = if individual.labour_status == LABOUR_EMPLOYED {
-                state.forecast.predicted_cpi
+                forecast.predicted_cpi
                     * individual.wage
                     * (1.0
                         - account.social_insurance_worker_rate
                         - account.income_tax_rate * (1.0 - account.social_insurance_worker_rate))
             } else if individual.labour_status == LABOUR_UNEMPLOYED {
-                state.forecast.predicted_cpi * account.unemployment_benefit
+                forecast.predicted_cpi * account.unemployment_benefit
             } else {
                 0.0
             };
-        }
+            },
+        )?;
 
-        write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
-        write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
-        write_rows(ecs, individual_wage_histories, |row: &IndividualWageHistory| row.id)?;
+
         state.push_phase("target_setting");
         set_phase_and_state(ecs, env_boundary, phases.targets_done, state)
     })
@@ -2472,10 +2484,10 @@ fn realised_accounting_system(
         // materialising the whole buffer here allocated once per tick for a
         // value that was immediately dropped.
         let mut state = macro_state(ecs, env_boundary)?;
+        // A.92's instalments are settled against the collected rows, so this
+        // one is mutable and written back before the in-place pass below reads
+        // the columns again.
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
-        let mut firm_stock_baseline = collect_rows_by(ecs, |row: &FirmStockBaseline| row.id)?;
-        let mut firm_realised = collect_rows_by(ecs, |row: &FirmRealised| row.id)?;
         let individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
         let mut households = collect_rows_by(ecs, |row: &Household| row.id)?;
         let mut household_histories = collect_rows_by(ecs, |row: &HouseholdHistory| row.id)?;
@@ -2541,14 +2553,36 @@ fn realised_accounting_system(
 
         // P_s'(t-1) for the A.77 unit-cost terms.
         let previous_prices = previous_sector_prices(&firms);
+        write_rows(ecs, firms, |firm: &Firm| firm.id)?;
 
         let _acc1 = AccTimer(1, std::time::Instant::now());
-        for (((firm, stocks), baseline), realised) in firms
-            .iter_mut()
-            .zip(firm_stocks.iter_mut())
-            .zip(firm_stock_baseline.iter_mut())
-            .zip(firm_realised.iter_mut())
-        {
+        // A.85-A.94 close each firm's quarter from its own row. The audit
+        // totals become per-worker partials summed back in worker order, so the
+        // float addition order is fixed for a given thread count; write-offs go
+        // behind a mutex because bankruptcy is rare and order-independent.
+        let sum_profit_sales_revenue = ParallelSumF64::new();
+        let sum_profit_inventory_change = ParallelSumF64::new();
+        let sum_profit_costs = ParallelSumF64::new();
+        let sum_cost_wages = ParallelSumF64::new();
+        let sum_cost_intermediate = ParallelSumF64::new();
+        let sum_cost_capital = ParallelSumF64::new();
+        let sum_cost_production_tax = ParallelSumF64::new();
+        let sum_cost_interest = ParallelSumF64::new();
+        let sum_dividend_pool = ParallelSumF64::new();
+        let write_offs = Mutex::new(write_offs);
+        let params = state.params.clone();
+        let forecast = state.forecast.clone();
+        let aggregates = state.aggregates.clone();
+        let firm_query = ecs
+            .query()?
+            .write::<Firm>()?
+            .write::<FirmStocks>()?
+            .write::<FirmStockBaseline>()?
+            .write::<FirmRealised>()?
+            .build()?;
+        ecs.for_each::<(Write<Firm>, Write<FirmStocks>, Write<FirmStockBaseline>, Write<FirmRealised>), _>(
+            firm_query,
+            |(firm, stocks, baseline, realised)| {
             let sector = firm.sector as usize;
             let previous_inventory = firm.inventory;
             let previous_production = firm.production;
@@ -2560,7 +2594,7 @@ fn realised_accounting_system(
                 // stocks drift arbitrarily against production.
                 stocks.intermediate_stock[s] = positive_part(
                     stocks.intermediate_stock[s]
-                        - state.params.io_matrix[sector][s] * firm.production
+                        - params.io_matrix[sector][s] * firm.production
                         + realised.realised_intermediate[s],
                 );
                 let installed_capital = baseline.capital_to_install[s];
@@ -2573,7 +2607,7 @@ fn realised_accounting_system(
                 // firm's capital untouched by how hard it produces.
                 stocks.capital_stock[s] = positive_part(
                     stocks.capital_stock[s]
-                        - state.params.capital_compensation_matrix[sector][s] * firm.production
+                        - params.capital_compensation_matrix[sector][s] * firm.production
                         + installed_capital,
                 );
                 baseline.capital_to_install[s] = realised.realised_capital[s];
@@ -2608,12 +2642,12 @@ fn realised_accounting_system(
                 + capital_purchases
                 + loan_interest_cost;
             // A.90/A.89 term breakdown -- diagnostic only, see MarketAudit.
-            state.audit.cost_wages += firm_wage_bill(firm);
-            state.audit.cost_intermediate += intermediate_purchases;
-            state.audit.cost_capital += capital_purchases;
-            state.audit.cost_production_tax += production_tax;
-            state.audit.cost_interest += loan_interest_cost;
-            state.audit.profit_costs += firm.costs;
+            sum_cost_wages.add( firm_wage_bill(firm));
+            sum_cost_intermediate.add( intermediate_purchases);
+            sum_cost_capital.add( capital_purchases);
+            sum_cost_production_tax.add( production_tax);
+            sum_cost_interest.add( loan_interest_cost);
+            sum_profit_costs.add( firm.costs);
             // A.77 -- per-unit, from technology coefficients and prices. Not
             // `firm.costs / production`: that numerator includes restocking
             // purchases and loan interest, and divides by a denominator that
@@ -2621,8 +2655,8 @@ fn realised_accounting_system(
             firm.unit_cost = unit_cost_a77(
                 firm_wage_bill(firm),
                 firm.production,
-                &state.params.io_matrix[sector],
-                &state.params.capital_compensation_matrix[sector],
+                &params.io_matrix[sector],
+                &params.capital_compensation_matrix[sector],
                 &previous_prices,
                 account_production_tax(&accounts, sector),
                 firm.previous_price,
@@ -2631,8 +2665,8 @@ fn realised_accounting_system(
             // A.90.
             firm.profits =
                 firm.price * firm.sales_quantity + firm.price * delta_inventory - firm.costs;
-            state.audit.profit_sales_revenue += firm.price * firm.sales_quantity;
-            state.audit.profit_inventory_change += firm.price * delta_inventory;
+            sum_profit_sales_revenue.add( firm.price * firm.sales_quantity);
+            sum_profit_inventory_change.add( firm.price * delta_inventory);
             // A.91: D_f(t) = D_f(t-1) + P_f*Q~_f - C_f - tau^CORP[Pi_f]^+ , with
             // loan instalments and new credit already applied by
             // `settle_loan_book` / `apply_loan`.
@@ -2650,10 +2684,10 @@ fn realised_accounting_system(
             // Poledna's Austrian value. Without it firm profits pile up in
             // deposits and never reach households as income. See
             // `CountryParameters::theta_dividend`.
-            let dividend = state.params.theta_dividend
+            let dividend = params.theta_dividend
                 * (1.0 - account.corporate_tax_rate)
                 * positive_part(firm.profits);
-            dividend_pool += dividend;
+            sum_dividend_pool.add(dividend);
             firm.deposits +=
                 firm.price * firm.sales_quantity - firm.costs - corporate_tax - dividend;
             // A negative deposit balance *is* an overdraft. This field was read
@@ -2679,7 +2713,7 @@ fn realised_accounting_system(
                 // debt was simply zeroed and the loss landed nowhere -- and the
                 // loan-book entry survived, so a bankrupt firm went on being
                 // debited and went on crediting its bank with interest forever.
-                write_offs.push(BadDebt {
+                write_offs.lock().unwrap().push(BadDebt {
                     bank_id: firm.bank_id,
                     borrower_kind: BUYER_FIRM,
                     borrower_id: firm.id,
@@ -2697,7 +2731,22 @@ fn realised_accounting_system(
             firm.previous_demand = firm.demand;
             firm.previous_production = previous_production;
             firm.previous_price = firm.price;
-        }
+            },
+        )?;
+        let mut write_offs = write_offs.into_inner().unwrap();
+        // Re-read after the in-place pass: the aggregates below need this
+        // quarter's closed rows, not the opening ones.
+        let firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
+        let firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
+        dividend_pool += sum_dividend_pool.total();
+        state.audit.profit_sales_revenue = sum_profit_sales_revenue.total();
+        state.audit.profit_inventory_change = sum_profit_inventory_change.total();
+        state.audit.profit_costs = sum_profit_costs.total();
+        state.audit.cost_wages = sum_cost_wages.total();
+        state.audit.cost_intermediate = sum_cost_intermediate.total();
+        state.audit.cost_capital = sum_cost_capital.total();
+        state.audit.cost_production_tax = sum_cost_production_tax.total();
+        state.audit.cost_interest = sum_cost_interest.total();
 
         let household_income_total: f64 =
             households.iter().map(|h| positive_part(h.income)).sum();
@@ -3254,10 +3303,7 @@ fn realised_accounting_system(
             .push(state.aggregates.sector_production);
         state.quarter += 1;
 
-        write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
-        write_rows(ecs, firm_stock_baseline, |row: &FirmStockBaseline| row.id)?;
-        write_rows(ecs, firm_realised, |row: &FirmRealised| row.id)?;
+
         write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, household_histories, |row: &HouseholdHistory| row.id)?;
         write_rows(ecs, banks, |bank: &Bank| bank.id)?;
@@ -3351,6 +3397,38 @@ impl SectorSampler {
             step >>= 1;
         }
         Some(position.min(self.len - 1))
+    }
+}
+
+/// An `f64` running total that a parallel `for_each` body can update.
+///
+/// Chunk-parallel accumulation makes the summation order non-deterministic, and
+/// float addition is not associative, so the totals would drift with thread
+/// count. Each worker therefore keeps its own partial sum, and the partials are
+/// added back in worker order at the end -- a fixed order for a fixed thread
+/// count, and identical to the sequential order when there is one worker.
+struct ParallelSumF64 {
+    partials: Vec<Mutex<f64>>,
+}
+
+impl ParallelSumF64 {
+    fn new() -> Self {
+        let workers = abm_framework::advanced::max_workers() as usize + 1;
+        Self {
+            partials: (0..workers).map(|_| Mutex::new(0.0)).collect(),
+        }
+    }
+
+    fn add(&self, value: f64) {
+        let slot = (abm_framework::advanced::worker_id() as usize).min(self.partials.len() - 1);
+        *self.partials[slot].lock().unwrap() += value;
+    }
+
+    fn total(&self) -> f64 {
+        self.partials
+            .iter()
+            .map(|partial| *partial.lock().unwrap())
+            .sum()
     }
 }
 
