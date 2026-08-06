@@ -2038,18 +2038,72 @@ fn goods_market_system(
             .map(|firm| positive_part(firm.production + firm.inventory))
             .sum();
 
+        // A.140 is a *sector* quantity: both denominators run over `F_s(t)`, the
+        // set of firms operating in sector s, and are fixed for the tick. They
+        // were being recomputed per buyer per visit over the shrinking unsold
+        // subset, which is both a deviation -- a firm's rank changed as its
+        // competitors sold out -- and the reason this system was quadratic.
+        //
+        // Computed once here, along with the per-sector firm lists so a buyer
+        // no longer scans every firm in the economy to find its own sector.
+        let mut sector_members: Vec<Vec<usize>> = vec![Vec::new(); SECTORS];
+        for (idx, firm) in firms.iter().enumerate() {
+            if let Some(bucket) = sector_members.get_mut(firm.sector as usize) {
+                bucket.push(idx);
+            }
+        }
+        let phi_gm = state.params.goods_market_phi;
+        let mut a140_weight = vec![0.0f64; firms.len()];
+        for members in &sector_members {
+            let price_sum = members
+                .iter()
+                .map(|idx| (-phi_gm * firms[*idx].price).exp())
+                .sum::<f64>()
+                .max(1e-9);
+            let production_sum = members
+                .iter()
+                .map(|idx| firms[*idx].production.max(0.0))
+                .sum::<f64>()
+                .max(1e-9);
+            let degenerate = members
+                .iter()
+                .all(|idx| firms[*idx].production.max(0.0) <= 1e-12);
+            for idx in members {
+                let relative_price = (-phi_gm * firms[*idx].price).exp() / price_sum;
+                // A firm with zero output would be unreachable even holding
+                // sellable inventory, since the product term vanishes; fall
+                // back to the price term alone when the whole sector is
+                // degenerate, as `seller_priority_weights` did.
+                a140_weight[*idx] = if degenerate {
+                    relative_price.max(0.0)
+                } else {
+                    let relative_production = firms[*idx].production.max(0.0) / production_sum;
+                    (relative_price * relative_production).max(0.0)
+                };
+            }
+        }
+        // Reused across buyers instead of a per-buyer `Vec` with `contains`,
+        // which was a linear scan nested inside a linear filter.
+        let mut exhausted_flag = vec![false; firms.len()];
+        let mut touched: Vec<usize> = Vec::new();
+
         for demand in demands {
             let sector = demand.sector as usize;
-            let sellers: Vec<usize> = firms
-                .iter()
-                .enumerate()
-                .filter(|(_, firm)| firm.sector as usize == sector)
-                .filter(|(idx, firm)| {
-                    positive_part(firm.production + firm.inventory - firms[*idx].sales_quantity)
-                        > 0.0
+            let sellers: Vec<usize> = sector_members
+                .get(sector)
+                .map(|members| {
+                    members
+                        .iter()
+                        .copied()
+                        .filter(|idx| {
+                            positive_part(
+                                firms[*idx].production + firms[*idx].inventory
+                                    - firms[*idx].sales_quantity,
+                            ) > 0.0
+                        })
+                        .collect()
                 })
-                .map(|(idx, _)| idx)
-                .collect();
+                .unwrap_or_default();
             if sellers.len() >= 2 {
                 let min_price_idx = sellers
                     .iter()
@@ -2077,14 +2131,16 @@ fn goods_market_system(
             // `quantity <= 1e-9` arm below re-entered the loop having changed
             // nothing and spun forever, which is reachable as soon as a firm's
             // price exceeds the buyer's remaining budget by a factor of 1e9.
-            let mut exhausted: Vec<usize> = Vec::new();
+            for idx in touched.drain(..) {
+                exhausted_flag[idx] = false;
+            }
             while remaining > 1e-9 && remaining_budget > 1e-9 {
                 let _gm_t = std::time::Instant::now();
                 let available_sellers: Vec<usize> = sellers
                     .iter()
                     .copied()
                     .filter(|idx| {
-                        !exhausted.contains(idx)
+                        !exhausted_flag[*idx]
                             && positive_part(
                                 firms[*idx].production + firms[*idx].inventory
                                     - firms[*idx].sales_quantity,
@@ -2096,11 +2152,14 @@ fn goods_market_system(
                     break;
                 }
                 let _gm_w = std::time::Instant::now();
-                let weights = seller_priority_weights(
-                    &firms,
-                    &available_sellers,
-                    state.params.goods_market_phi,
-                );
+                // Fixed A.140 weights, restricted to the candidates still
+                // holding stock. The weights themselves never change during
+                // clearing -- only the candidate set does, which is what
+                // "resorts to the remaining firms" means.
+                let weights: Vec<f64> = available_sellers
+                    .iter()
+                    .map(|idx| a140_weight[*idx])
+                    .collect();
                 PROF_GM_NS[1].fetch_add(_gm_w.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let _gm_c = std::time::Instant::now();
                 let firm_idx = available_sellers[weighted_choice(&mut rng, &weights)];
@@ -2115,7 +2174,10 @@ fn goods_market_system(
                     // Unusable seller for this buyer: retire it and try the
                     // rest. Each pass either moves goods or shrinks the
                     // candidate set, so the loop terminates.
-                    exhausted.push(firm_idx);
+                    if !exhausted_flag[firm_idx] {
+                        exhausted_flag[firm_idx] = true;
+                        touched.push(firm_idx);
+                    }
                     continue;
                 }
                 let payment = quantity * firms[firm_idx].price;
