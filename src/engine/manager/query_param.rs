@@ -464,3 +464,38 @@ impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3], writes=[E:0], method="for_ea
 impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3], writes=[E:0, F:1], method="for_each<(Read x4, Write x2)>");
 impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3], writes=[E:0, F:1, G:2], method="for_each<(Read x4, Write x3)>");
 impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3], writes=[E:0, F:1, G:2, H:3], method="for_each<(Read x4, Write x4)>");
+
+// Extended arities, total reads + writes up to 9.
+//
+// The 4x4 grid above covers most systems; these cover the rest. Unused
+// combinations cost only a trait impl -- monomorphisation happens per concrete
+// type combination actually instantiated, so the binary does not grow for
+// shapes nobody calls.
+impl_query_param_tuple!(reads=[], writes=[A:0, B:1, C:2, D:3, E:4], method="for_each<(Read x0, Write x5)>");
+impl_query_param_tuple!(reads=[], writes=[A:0, B:1, C:2, D:3, E:4, F:5], method="for_each<(Read x0, Write x6)>");
+impl_query_param_tuple!(reads=[], writes=[A:0, B:1, C:2, D:3, E:4, F:5, G:6], method="for_each<(Read x0, Write x7)>");
+impl_query_param_tuple!(reads=[], writes=[A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7], method="for_each<(Read x0, Write x8)>");
+impl_query_param_tuple!(reads=[A:0], writes=[B:0, C:1, D:2, E:3, F:4], method="for_each<(Read x1, Write x5)>");
+impl_query_param_tuple!(reads=[A:0], writes=[B:0, C:1, D:2, E:3, F:4, G:5], method="for_each<(Read x1, Write x6)>");
+impl_query_param_tuple!(reads=[A:0], writes=[B:0, C:1, D:2, E:3, F:4, G:5, H:6], method="for_each<(Read x1, Write x7)>");
+impl_query_param_tuple!(reads=[A:0], writes=[B:0, C:1, D:2, E:3, F:4, G:5, H:6, I:7], method="for_each<(Read x1, Write x8)>");
+impl_query_param_tuple!(reads=[A:0, B:1], writes=[C:0, D:1, E:2, F:3, G:4], method="for_each<(Read x2, Write x5)>");
+impl_query_param_tuple!(reads=[A:0, B:1], writes=[C:0, D:1, E:2, F:3, G:4, H:5], method="for_each<(Read x2, Write x6)>");
+impl_query_param_tuple!(reads=[A:0, B:1], writes=[C:0, D:1, E:2, F:3, G:4, H:5, I:6], method="for_each<(Read x2, Write x7)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2], writes=[D:0, E:1, F:2, G:3, H:4], method="for_each<(Read x3, Write x5)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2], writes=[D:0, E:1, F:2, G:3, H:4, I:5], method="for_each<(Read x3, Write x6)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3], writes=[E:0, F:1, G:2, H:3, I:4], method="for_each<(Read x4, Write x5)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4], writes=[], method="for_each<(Read x5, Write x0)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4], writes=[F:0], method="for_each<(Read x5, Write x1)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4], writes=[F:0, G:1], method="for_each<(Read x5, Write x2)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4], writes=[F:0, G:1, H:2], method="for_each<(Read x5, Write x3)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4], writes=[F:0, G:1, H:2, I:3], method="for_each<(Read x5, Write x4)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5], writes=[], method="for_each<(Read x6, Write x0)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5], writes=[G:0], method="for_each<(Read x6, Write x1)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5], writes=[G:0, H:1], method="for_each<(Read x6, Write x2)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5], writes=[G:0, H:1, I:2], method="for_each<(Read x6, Write x3)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5, G:6], writes=[], method="for_each<(Read x7, Write x0)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5, G:6], writes=[H:0], method="for_each<(Read x7, Write x1)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5, G:6], writes=[H:0, I:1], method="for_each<(Read x7, Write x2)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7], writes=[], method="for_each<(Read x8, Write x0)>");
+impl_query_param_tuple!(reads=[A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7], writes=[I:0], method="for_each<(Read x8, Write x1)>");
