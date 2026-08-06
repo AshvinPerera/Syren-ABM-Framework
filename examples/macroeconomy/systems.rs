@@ -212,7 +212,6 @@ fn aggregate_previous_state_system(
         let properties = collect_rows_by(ecs, |row: &Property| row.id)?;
         let row = collect_rows_by(ecs, |row: &RestOfWorld| row.id)?;
         let mut state = macro_state(ecs, env_boundary)?;
-        let _acc6 = AccTimer(6, std::time::Instant::now());
         let aggregates = compute_aggregates(
             &state,
             &firms,
@@ -322,7 +321,6 @@ fn target_setting_system(
         // `P_s(t-1)` for A.59's relative-price test.
         let sector_prices_previous = previous_sector_prices(&firms);
 
-        let _acc1 = AccTimer(1, std::time::Instant::now());
         for firm in &mut firms {
             let sector = firm.sector as usize;
             // A.59's case condition, which A.74 shares: apply the idiosyncratic
@@ -1543,7 +1541,6 @@ fn credit_market_system(
             .first()
             .map(|central_bank| central_bank.policy_rate)
             .unwrap_or_default();
-        let _acc4 = AccTimer(4, std::time::Instant::now());
         for bank in &mut banks {
             bank.deposit_rate = policy_rate;
             bank.household_overdraft_rate = bank.household_rate;
@@ -2412,6 +2409,7 @@ fn realised_accounting_system(
         // P_s'(t-1) for the A.77 unit-cost terms.
         let previous_prices = previous_sector_prices(&firms);
 
+        let _acc1 = AccTimer(1, std::time::Instant::now());
         for firm in &mut firms {
             let sector = firm.sector as usize;
             let previous_inventory = firm.inventory;
@@ -2750,6 +2748,7 @@ fn realised_accounting_system(
             .first()
             .map(|central_bank| central_bank.predicted_policy_rate)
             .unwrap_or(policy_rate);
+        let _acc4 = AccTimer(4, std::time::Instant::now());
         for bank in &mut banks {
             let previous_reserves = bank.reserves;
             let firm_deposits = firms
@@ -3001,6 +3000,7 @@ fn realised_accounting_system(
             state.audit.government_debt = updated.debt;
         }
 
+        let _acc6 = AccTimer(6, std::time::Instant::now());
         let aggregates = compute_aggregates(
             &state,
             &firms,
@@ -3893,6 +3893,12 @@ fn settle_loan_book(
     households: &mut [Household],
 ) -> LoanSettlementSummary {
     let mut settlement = LoanSettlementSummary::default();
+    // Every outstanding loan resolves its borrower. Scanning the firm or
+    // household population per loan is O(loans x agents) and was 72% of the
+    // accounting system at 9,505 firms.
+    let firm_positions = RowIndex::build(firms, |firm| firm.id);
+    let household_positions = RowIndex::build(households, |household| household.id);
+    let bank_positions = RowIndex::build(banks, |bank| bank.id);
     for loan in &mut state.loan_book.loans {
         if loan.origin_quarter >= quarter || loan.outstanding <= 1e-9 {
             continue;
@@ -3902,7 +3908,9 @@ fn settle_loan_book(
         let interest_due = loan.outstanding * loan.rate;
         match loan.borrower_kind {
             BUYER_FIRM => {
-                if let Some(firm) = firms.iter_mut().find(|firm| firm.id == loan.borrower_id) {
+                if let Some(firm) =
+                    firm_positions.get(loan.borrower_id).map(|p| &mut firms[p])
+                {
                     firm.deposits -= principal_due + interest_due;
                     match loan.loan_class {
                         LOAN_FIRM_SHORT => {
@@ -3917,9 +3925,9 @@ fn settle_loan_book(
                 }
             }
             BUYER_HOUSEHOLD => {
-                if let Some(household) = households
-                    .iter_mut()
-                    .find(|household| household.id == loan.borrower_id)
+                if let Some(household) = household_positions
+                    .get(loan.borrower_id)
+                    .map(|p| &mut households[p])
                 {
                     household.deposits -= principal_due + interest_due;
                     match loan.loan_class {
@@ -3938,7 +3946,7 @@ fn settle_loan_book(
             }
             _ => {}
         }
-        if let Some(bank) = banks.iter_mut().find(|bank| bank.id == loan.bank_id) {
+        if let Some(bank) = bank_positions.get(loan.bank_id).map(|p| &mut banks[p]) {
             match loan.loan_class {
                 LOAN_FIRM_SHORT | LOAN_FIRM_LONG => {
                     bank.firm_loan_volume_by_sector[loan.sector as usize] = positive_part(
