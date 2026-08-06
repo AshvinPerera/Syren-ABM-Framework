@@ -1408,11 +1408,19 @@ fn housing_preclear_system(
             if household.owns_residence && household.residence_property_id != NOT_LINKED {
                 if let Some(position) = property_positions.get(household.residence_property_id) {
                     let property = &mut properties[position];
+                    // A property already on the market is re-listed at a new
+                    // ask, so the stale entry has to go before the new one
+                    // lands or the index holds both.
+                    let was_listed = property.market_status == PROPERTY_FOR_SALE;
+                    let previous_price = property.price;
                     property.price =
                         (1.0 + state.forecast.predicted_hpi_inflation) * property.value;
                     property.market_status = PROPERTY_FOR_SALE;
                     property.occupant_household_id = NOT_LINKED;
                     state.audit.housing_listings += 1;
+                    if was_listed {
+                        for_sale.remove(previous_price, position);
+                    }
                     for_sale.insert(property.price, position);
                 }
             }
@@ -1426,10 +1434,8 @@ fn housing_preclear_system(
                 * epsilon.exp();
             household.desired_rent = state.params.housing_phi_hr
                 * household.income.max(1.0).powf(state.params.housing_beta_hr);
-            let nearest_sale =
-                for_sale.nearest(household.desired_house_price, |p| properties[p].price);
-            let nearest_rent =
-                for_rent.nearest(household.desired_rent, |p| properties[p].rent);
+            let nearest_sale = for_sale.nearest(household.desired_house_price);
+            let nearest_rent = for_rent.nearest(household.desired_rent);
             let buy_probability = if let Some(property_idx) = nearest_sale {
                 let property = properties[property_idx];
                 let bank_rate = banks
@@ -1466,7 +1472,7 @@ fn housing_preclear_system(
         for household_idx in buyers {
             let household = &mut households[household_idx];
             if let Some(property_idx) =
-                for_sale.nearest(household.desired_house_price, |p| properties[p].price)
+                for_sale.nearest(household.desired_house_price)
             {
                 let property = &mut properties[property_idx];
                 let financial_wealth =
@@ -1503,7 +1509,7 @@ fn housing_preclear_system(
         for household_idx in renters {
             let household = &mut households[household_idx];
             if let Some(property_idx) =
-                for_rent.nearest(household.desired_rent, |p| properties[p].rent)
+                for_rent.nearest(household.desired_rent)
             {
                 let property = &mut properties[property_idx];
                 household.desired_property_id = property.id;
@@ -3278,25 +3284,56 @@ impl PriceIndex {
         self.entries.remove(&(Self::key(value), position));
     }
 
-    /// Closest entry to `desired`. Ties go to the lower position, which is what
-    /// `min_by` over a position-ordered slice returned.
-    fn nearest(&self, desired: f64, price_of: impl Fn(usize) -> f64) -> Option<usize> {
+    /// Lowest position among the entries closest in price to `desired`.
+    ///
+    /// Distance is compared as `(price - desired).abs()` in `f64`, matching the
+    /// linear scan this replaced. That matters: near a large `desired`, prices
+    /// a fraction of an ulp apart produce the *same* distance, so several
+    /// entries tie and the earliest position wins. Comparing exact prices
+    /// instead would silently pick a different property.
+    ///
+    /// So the two range probes locate the nearest price on each side, and the
+    /// walk outward collects every neighbouring price whose distance rounds to
+    /// the same value. Ties are rare and the walk is short.
+    fn nearest(&self, desired: f64) -> Option<usize> {
         let key = Self::key(desired);
-        let below = self.entries.range(..(key, usize::MAX)).next_back().copied();
-        let above = self.entries.range((key, 0)..).next().copied();
-        match (below, above) {
-            (None, None) => None,
-            (Some((_, position)), None) | (None, Some((_, position))) => Some(position),
-            (Some((_, low)), Some((_, high))) => {
-                let low_gap = (price_of(low) - desired).abs();
-                let high_gap = (price_of(high) - desired).abs();
-                if high_gap < low_gap || (high_gap == low_gap && high < low) {
-                    Some(high)
+        let gap = |price_key: u64| (f64::from_bits(price_key) - desired).abs();
+
+        let below = self.entries.range(..(key, 0)).next_back().map(|(k, _)| *k);
+        let above = self.entries.range((key, 0)..).next().map(|(k, _)| *k);
+        let best = match (below, above) {
+            (None, None) => return None,
+            (Some(k), None) | (None, Some(k)) => k,
+            (Some(low), Some(high)) => {
+                if gap(high) < gap(low) {
+                    high
                 } else {
-                    Some(low)
+                    low
                 }
             }
+        };
+        let target = gap(best);
+
+        let mut winner = None;
+        let mut consider = |position: usize| match winner {
+            Some(current) if current <= position => {}
+            _ => winner = Some(position),
+        };
+        // Every entry whose distance rounds to `target`, walking out from the
+        // probe points in both directions.
+        for (price_key, position) in self.entries.range(..(key, 0)).rev() {
+            if gap(*price_key) != target {
+                break;
+            }
+            consider(*position);
         }
+        for (price_key, position) in self.entries.range((key, 0)..) {
+            if gap(*price_key) != target {
+                break;
+            }
+            consider(*position);
+        }
+        winner
     }
 }
 
