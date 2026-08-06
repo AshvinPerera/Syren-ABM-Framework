@@ -532,15 +532,24 @@ fn labour_market_system(
         let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
 
-        for firm in &mut firms {
-            let mut employees: Vec<usize> = individuals
-                .iter()
-                .enumerate()
-                .filter(|(_, worker)| {
-                    worker.labour_status == LABOUR_EMPLOYED && worker.employer_firm_id == firm.id
-                })
-                .map(|(idx, _)| idx)
-                .collect();
+        // A.141 fires from each firm's own payroll. Filtering the whole
+        // individual population per firm is O(firms x individuals) -- 1.4e9
+        // comparisons at 9,505 firms. One pass buckets each worker under its
+        // employer instead; within a bucket the order is still individual
+        // order, so the shuffle below sees the same input it always did.
+        let firm_positions = RowIndex::build(&firms, |firm| firm.id);
+        let mut payroll: Vec<Vec<usize>> = vec![Vec::new(); firms.len()];
+        for (idx, worker) in individuals.iter().enumerate() {
+            if worker.labour_status != LABOUR_EMPLOYED {
+                continue;
+            }
+            if let Some(position) = firm_positions.get(worker.employer_firm_id) {
+                payroll[position].push(idx);
+            }
+        }
+
+        for (position, firm) in firms.iter_mut().enumerate() {
+            let mut employees = std::mem::take(&mut payroll[position]);
             rng.shuffle(&mut employees);
             // A.141: fire until any further firing would take H_f below the
             // target. `firm.labour` is H_f in output units (A.65), so losing an
@@ -1083,6 +1092,27 @@ fn planning_and_production_system(
                 *value += property.rent;
             }
         }
+        // A.108's rent is what a household pays as a tenant of someone else's
+        // property. Filtering every property per household is
+        // O(households x properties); one pass keyed on the occupant gives the
+        // same totals.
+        let household_slots_rent = households
+            .iter()
+            .map(|household| household.id as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut rent_paid_by_household = vec![0.0; household_slots_rent];
+        for property in &properties {
+            if property.occupant_household_id == property.owner_household_id {
+                continue;
+            }
+            if let Some(value) =
+                rent_paid_by_household.get_mut(property.occupant_household_id as usize)
+            {
+                *value += property.rent;
+            }
+        }
+
         for household in households.iter_mut() {
             let slot = household.id as usize;
             let labour_income = predicted_labour_by_household.get(slot).copied().unwrap_or(0.0);
@@ -1121,14 +1151,10 @@ fn planning_and_production_system(
                     * household.predicted_income;
             }
             let desired_consumption = household.consumption_target.iter().sum::<f64>();
-            let quarterly_rent = properties
-                .iter()
-                .filter(|property| {
-                    property.occupant_household_id == household.id
-                        && property.owner_household_id != household.id
-                })
-                .map(|property| property.rent)
-                .sum::<f64>();
+            let quarterly_rent = rent_paid_by_household
+                .get(household.id as usize)
+                .copied()
+                .unwrap_or(0.0);
             // `property.rent` is a quarterly rent -- A.108 annualises it as
             // `4(1+mu^PS) r`. The tenant was paying a quarter of it while the
             // landlord received all of it (A.103/A.104 sum `r_p` undivided), so
@@ -1525,11 +1551,13 @@ fn credit_market_system(
         }
         let mut applications: Vec<CreditApplication> =
             buffers.brute_force(messages.credit_application)?.collect();
+        // Indexed once: one mortgage need per house-hunting household, each
+        // otherwise scanning the whole household population.
+        let household_positions = RowIndex::build(&households, |household| household.id);
         for need in buffers.brute_force(messages.mortgage_need)? {
-            let household_income = households
-                .iter()
-                .find(|household| household.id == need.household_id)
-                .map(|household| household.predicted_income)
+            let household_income = household_positions
+                .get(need.household_id)
+                .map(|position| households[position].predicted_income)
                 .unwrap_or(0.0);
             applications.push(CreditApplication {
                 borrower_kind: BUYER_HOUSEHOLD,
@@ -1562,6 +1590,12 @@ fn credit_market_system(
         // randomised per loan class, so the loop cannot be restructured to walk
         // agents instead of applications; the lookup has to be indexed.
         let firm_index = RowIndex::build(&firms, |firm| firm.id);
+        // A.25/A.26 value the capital stock at the previous sectoral prices,
+        // which are a property of last quarter and fixed for this pass. This
+        // was recomputed inside the per-application, per-bank-visit loop, and
+        // it scans every firm in the economy.
+        let sector_prices_for_caps = previous_sector_prices(&firms);
+        let household_index_for_caps = RowIndex::build(&households, |household| household.id);
         let household_index = RowIndex::build(&households, |household| household.id);
         for loan_class in [
             LOAN_FIRM_SHORT,
@@ -1632,12 +1666,21 @@ fn credit_market_system(
                 let mut granted = None;
                 for bank_idx in bank_order {
                     let rate = offered_rate(&banks[bank_idx], app.loan_class);
-                    let allowed = borrower_credit_cap(&state, &firms, &households, app, rate);
+                    let allowed = borrower_credit_cap(
+                        &state,
+                        &firms,
+                        &households,
+                        &firm_index,
+                        &household_index_for_caps,
+                        &sector_prices_for_caps,
+                        app,
+                        rate,
+                    );
                     if app.borrower_kind == BUYER_FIRM {
                         // Recompute A.25 and A.26 separately so a zero joint cap
                         // can be attributed to one or the other.
                         if let Some(firm) = firm_index.get(app.borrower_id).map(|i| &firms[i]) {
-                            let sp = previous_sector_prices(&firms);
+                            let sp = sector_prices_for_caps;
                             let cv: f64 = (0..SECTORS)
                                 .map(|s| sp[s] * firm.capital_stock[s])
                                 .sum();
@@ -1667,9 +1710,9 @@ fn credit_market_system(
                             // A.27 zeroes the cap outright; A.25/A.26 merely
                             // bound it. Separating the two says whether the
                             // screen or the caps are binding.
-                            let roa_failed = firms
-                                .iter()
-                                .find(|firm| firm.id == app.borrower_id)
+                            let roa_failed = firm_index
+                                .get(app.borrower_id)
+                                .map(|position| &firms[position])
                                 .map(|firm| {
                                     ratio(
                                         firm.predicted_profits,
@@ -4003,23 +4046,30 @@ fn bank_class_credit_supply(
     envelope * share / total
 }
 
+/// A.25/A.26/A.27 for firms, A.28 for consumption loans, A.29-A.31 for
+/// mortgages. Runs once per application per bank visited, so the borrower
+/// lookup and the sectoral price vector are supplied by the caller rather than
+/// rebuilt here.
+#[allow(clippy::too_many_arguments)]
 fn borrower_credit_cap(
     state: &MacroEnvironment,
     firms: &[Firm],
     households: &[Household],
+    firm_index: &RowIndex,
+    household_index: &RowIndex,
+    sector_prices: &[f64; SECTORS],
     app: CreditApplication,
     rate: f64,
 ) -> f64 {
     match app.loan_class {
-        LOAN_FIRM_SHORT | LOAN_FIRM_LONG => firms
-            .iter()
-            .find(|firm| firm.id == app.borrower_id)
+        LOAN_FIRM_SHORT | LOAN_FIRM_LONG => firm_index
+            .get(app.borrower_id)
+            .map(|position| &firms[position])
             .map(|firm| {
                 // `sum_s P_s(t) K_fs(t)` -- the *value* of the capital stock.
                 // Summing the bare quantities understated it by the whole price
                 // level, and at the corrected `k_{s's}` magnitudes that is the
                 // difference between a firm being bankable and not.
-                let sector_prices = previous_sector_prices(firms);
                 let capital_value: f64 = (0..SECTORS)
                     .map(|s| sector_prices[s] * firm.capital_stock[s])
                     .sum();
@@ -4064,9 +4114,9 @@ fn borrower_credit_cap(
                 }
             })
             .unwrap_or(0.0),
-        LOAN_HOUSEHOLD_CONSUMPTION => households
-            .iter()
-            .find(|household| household.id == app.borrower_id)
+        LOAN_HOUSEHOLD_CONSUMPTION => household_index
+            .get(app.borrower_id)
+            .map(|position| &households[position])
             .map(|household| {
                 let six_month_income = household.income_history.iter().sum::<f64>()
                     / household.income_history.len() as f64;
@@ -4077,9 +4127,9 @@ fn borrower_credit_cap(
                 )
             })
             .unwrap_or(0.0),
-        LOAN_MORTGAGE => households
-            .iter()
-            .find(|household| household.id == app.borrower_id)
+        LOAN_MORTGAGE => household_index
+            .get(app.borrower_id)
+            .map(|position| &households[position])
             .map(|household| {
                 let six_month_income = household.income_history.iter().sum::<f64>()
                     / household.income_history.len() as f64;

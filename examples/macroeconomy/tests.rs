@@ -79,8 +79,8 @@ fn accounting_harness_produces_finite_aggregates() {
 
     // The GDP triple identity does not close yet: `expenditure` counts payments
     // for capital goods while `output` counts real production, and `income`
-    // omits taxes, bank profits, and rental income. Closing it is Phase 4 work,
-    // at which point this becomes `assert!(gdp.holds(relative_tolerance))`.
+    // omits taxes, bank profits, and rental income. Once those are reconciled
+    // this becomes `assert!(gdp.holds(relative_tolerance))`.
     // Until then, assert only that the residual is finite -- that catches NaN
     // propagation through the accounting pass, which is the failure mode a
     // tautological `failed == !holds` assertion could never catch.

@@ -876,7 +876,7 @@ impl MacroEnvironment {
     ///
     /// Prefer this inside loops over agents: the draw then depends on the
     /// agent, not on the position at which the agent happens to be visited,
-    /// which is what makes the loop safe to parallelise in Phase 2.
+    /// which is what makes the loop safe to parallelise.
     pub fn rng_for_agent(&self, context: RunContext, salt: u64, agent_id: u64) -> MacroRng {
         MacroRng::for_agent(context, self.seed, salt, agent_id)
     }
