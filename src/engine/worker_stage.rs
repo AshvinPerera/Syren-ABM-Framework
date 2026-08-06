@@ -11,7 +11,10 @@
 //!
 //! Threads whose worker id falls outside the Rayon pool range (foreign
 //! threads such as tests or `main`) fall back to a mutex-guarded overflow
-//! vector - correct, just not lock-free.
+//! vector - correct, just not lock-free. That mutex guards a plain `Vec`, so a
+//! panic while it is held cannot leave the contents logically inconsistent;
+//! every access therefore recovers the data through `PoisonError::into_inner`
+//! rather than dropping items on the floor.
 //!
 //! Determinism note: which worker stages which item depends on Rayon's
 //! work-stealing, so the concatenated drain order is *not* stable across
@@ -62,11 +65,19 @@ impl<T: Send> WorkerStage<T> {
             // during Phase A; see the impl-level safety comment.
             let items = unsafe { &mut *slot.get() };
             items.push(value);
-        } else if let Ok(mut overflow) = self.overflow.lock() {
-            overflow.push(value);
+        } else {
+            self.overflow_mut().push(value);
         }
-        // A poisoned overflow mutex would silently drop foreign-thread items;
-        // poisoning requires a panic mid-push, which itself aborts the tick.
+    }
+
+    /// Locks the overflow vector, recovering it if the mutex was poisoned.
+    ///
+    /// Dropping the guard on poison would silently lose every subsequent
+    /// foreign-thread item for the life of the process.
+    fn overflow_mut(&self) -> std::sync::MutexGuard<'_, Vec<T>> {
+        self.overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Moves every staged item into `out`, slot order then overflow (Phase B).
@@ -74,9 +85,7 @@ impl<T: Send> WorkerStage<T> {
         for slot in &mut self.slots {
             out.append(slot.get_mut());
         }
-        if let Ok(mut overflow) = self.overflow.lock() {
-            out.append(&mut overflow);
-        }
+        out.append(&mut self.overflow_mut());
     }
 
     /// Discards every staged item without deallocating slot capacity.
@@ -84,9 +93,7 @@ impl<T: Send> WorkerStage<T> {
         for slot in &mut self.slots {
             slot.get_mut().clear();
         }
-        if let Ok(mut overflow) = self.overflow.lock() {
-            overflow.clear();
-        }
+        self.overflow_mut().clear();
     }
 }
 
@@ -119,5 +126,28 @@ mod tests {
         let mut again = Vec::new();
         stage.drain_into(&mut again);
         assert!(again.is_empty());
+    }
+
+    /// A poisoned overflow mutex must not start silently discarding items.
+    #[test]
+    fn overflow_survives_a_poisoned_mutex() {
+        let stage = WorkerStage::<usize>::new();
+        // Poison the mutex by panicking while its guard is held.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = stage.overflow.lock().unwrap();
+            panic!("panic while holding the overflow lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(stage.overflow.is_poisoned());
+
+        // A foreign thread (worker id outside the pool range) takes the
+        // overflow path, which must still accept and return the item.
+        std::thread::scope(|scope| {
+            scope.spawn(|| stage.push(17));
+        });
+        let mut stage = stage;
+        let mut out = Vec::new();
+        stage.drain_into(&mut out);
+        assert_eq!(out, vec![17]);
     }
 }

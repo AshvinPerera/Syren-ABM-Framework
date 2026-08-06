@@ -396,15 +396,25 @@ impl Archetype {
                 {
                     appended.push(component_id);
                 }
-                Ok((appended_start, _)) => {
-                    // The column was longer or shorter than its siblings; put
-                    // everything (including this column) back to `start`.
+                Ok((appended_start, appended_count)) => {
+                    // The column landed at the wrong offset, or was longer or
+                    // shorter than its siblings; put everything (including this
+                    // column) back to `start`.
                     appended.push(component_id);
                     self.truncate_columns_to(&appended, start);
+                    // Report whichever of the two actually disagreed. The guard
+                    // above failed, so at least one has, and reporting the
+                    // offset unconditionally would emit `expected == actual`
+                    // for every pure count mismatch.
+                    let (expected, actual) = if appended_start != start {
+                        (start, appended_start)
+                    } else {
+                        (count, appended_count)
+                    };
                     return Err(SpawnError::BatchColumnMismatch {
                         component_id,
-                        expected: start,
-                        actual: appended_start,
+                        expected,
+                        actual,
                     }
                     .into());
                 }
