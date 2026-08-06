@@ -75,6 +75,10 @@ pub mod rng_salt {
     pub const HOUSING_PRECLEAR: u64 = 0x40_57_11;
     pub const CREDIT_MARKET: u64 = 0xC2_ED_17;
     pub const GOODS_MARKET: u64 = 0x60_0D_50;
+    /// Per-property draws in A.113/A.115, keyed on the property.
+    pub const PROPERTY_REPRICE: u64 = 0x9E_11_C3;
+    /// Per-household draws for A.104's financial-asset income noise.
+    pub const HOUSEHOLD_ASSET_INCOME: u64 = 0xFA_1C_09;
 }
 
 /// Model-facing wrapper over the framework's [`DetRng`].

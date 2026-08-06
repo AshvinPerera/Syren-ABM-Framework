@@ -1216,7 +1216,13 @@ fn planning_and_production_system(
                 + state.params.financial_asset_income_phi * household.other_financial_assets
                 + household.dividend_income;
             let financial_asset_epsilon =
-                rng.normal_f64(0.0, state.params.financial_asset_income_sigma);
+                state
+                    .rng_for_agent(
+                        ecs.run_context(),
+                        rng_salt::HOUSEHOLD_ASSET_INCOME,
+                        u64::from(household.id),
+                    )
+                    .normal_f64(0.0, state.params.financial_asset_income_sigma);
             household.income = labour_by_household.get(slot).copied().unwrap_or(0.0)
                 + state.aggregates.cpi * household.social_benefits_other
                 + rent_income
@@ -1406,10 +1412,18 @@ fn housing_preclear_system(
             // 1.000000); a history with variation would have made it drift
             // instead. `V_p` moves when a property actually sells (A.121 and
             // the housing completion system), which is the paper's mechanism.
+            // A.113/A.115 are per-property draws. Keying them on the property
+            // rather than on a shared stream makes the outcome independent of
+            // the order properties happen to be visited in.
+            let mut property_rng = state.rng_for_agent(
+                ecs.run_context(),
+                rng_salt::PROPERTY_REPRICE,
+                u64::from(property.id),
+            );
             if property.market_status == PROPERTY_FOR_SALE {
                 property.quarters_on_sale += 1;
-                if rng.unit_f64() < state.params.sale_price_reduction_probability {
-                    let epsilon = rng.normal_f64(
+                if property_rng.unit_f64() < state.params.sale_price_reduction_probability {
+                    let epsilon = property_rng.normal_f64(
                         state.params.sale_price_reduction_mu,
                         state.params.sale_price_reduction_sigma,
                     );
@@ -1419,8 +1433,8 @@ fn housing_preclear_system(
             }
             if property.market_status == PROPERTY_FOR_RENT {
                 property.quarters_on_rent_market += 1;
-                if rng.unit_f64() < state.params.rent_reduction_probability {
-                    let epsilon = rng.normal_f64(
+                if property_rng.unit_f64() < state.params.rent_reduction_probability {
+                    let epsilon = property_rng.normal_f64(
                         state.params.rent_reduction_mu,
                         state.params.rent_reduction_sigma,
                     );
