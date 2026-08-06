@@ -724,10 +724,10 @@ fn planning_and_production_system(
         let wages: Vec<WagePayment> = buffers.brute_force(messages.wage_payment)?.collect();
         let mut state = macro_state(ecs, env_boundary)?;
         let mut rng = state.rng(ecs.run_context(), rng_salt::PLANNING);
-        let mut firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
-        let mut firm_stocks = collect_rows_by(ecs, |row: &FirmStocks| row.id)?;
-        let mut firm_stock_baseline = collect_rows_by(ecs, |row: &FirmStockBaseline| row.id)?;
-        let mut firm_targets = collect_rows_by(ecs, |row: &FirmTargets| row.id)?;
+        // Read-only: A.77's previous sectoral prices and the employment count
+        // are both taken before production is recomputed. The firm rows
+        // themselves are written in place below, so they are never collected.
+        let firms = collect_rows_by(ecs, |row: &Firm| row.id)?;
         let mut individuals = collect_rows_by(ecs, |row: &Individual| row.id)?;
         let mut individual_wage_histories =
             collect_rows_by(ecs, |row: &IndividualWageHistory| row.id)?;
@@ -814,12 +814,42 @@ fn planning_and_production_system(
         state.audit.employed_headcount = firms.iter().map(|firm| u64::from(firm.employees)).sum();
 
         let _pl1 = PlTimer(1, std::time::Instant::now());
-        for (((firm, stocks), baseline), targets) in firms
-            .iter_mut()
-            .zip(firm_stocks.iter_mut())
-            .zip(firm_stock_baseline.iter())
-            .zip(firm_targets.iter_mut())
-        {
+        // A.62-A.84 are a per-firm computation: each firm reads its own row and
+        // the shared parameter block, and writes only its own row. Iterating the
+        // ECS columns in place avoids copying every firm out to a `Vec` and back
+        // -- the collect/write round trip that dominated this system.
+        //
+        // Three things the sequential loop could take for granted have to be
+        // made explicit for a parallel body:
+        //
+        //  * the parameter block is snapshotted, so the closure holds shared
+        //    references rather than borrowing `state` while the audit is written;
+        //  * the audit maxima become atomics, since chunks update them
+        //    concurrently;
+        //  * the debug probe goes behind a mutex, since it fires for at most one
+        //    firm but the body cannot know which chunk holds it.
+        let params = state.params.clone();
+        let calibration = state.calibration.clone();
+        let forecast = state.forecast.clone();
+        let debug_firm_id = state.policy.debug_firm_id;
+        let sector_prices = previous_sector_prices;
+        let max_production_over_labour = AtomicMaxF64::new(0.0);
+        let max_labour_over_materials = AtomicMaxF64::new(0.0);
+        let firm_probe: Mutex<Option<FirmProbe>> = Mutex::new(None);
+
+        let query = ecs
+            .query()?
+            .read::<FirmStockBaseline>()?
+            .write::<Firm>()?
+            .write::<FirmStocks>()?
+            .write::<FirmTargets>()?
+            .build()?;
+        ecs.for_each_entity_fallible::<(
+            Read<FirmStockBaseline>,
+            Write<Firm>,
+            Write<FirmStocks>,
+            Write<FirmTargets>,
+        ), _>(query, |(_entity, baseline, firm, stocks, targets)| {
             let sector = firm.sector as usize;
             // A.72's labour argument is H_f(t) itself. `firm.labour` already
             // holds it: A.65 is applied in `firm_individual_targets`, and the
@@ -833,11 +863,11 @@ fn planning_and_production_system(
             let labour_constraint = firm.labour.max(0.0);
             let intermediate_constraint = min_input_constraint_a63_a64(
                 &stocks.intermediate_stock,
-                &state.params.io_matrix[sector],
+                &params.io_matrix[sector],
             );
             let capital_constraint = min_input_constraint_a63_a64(
                 &stocks.capital_stock,
-                &state.params.net_fixed_assets_matrix[sector],
+                &params.net_fixed_assets_matrix[sector],
             );
             firm.production = firm
                 .target_production
@@ -849,17 +879,12 @@ fn planning_and_production_system(
             // labour inputs. Substituting A.66 into A.65 additionally pins
             // H_f = min(h^max * h_f(0) * sum_i H_i, min(M_f, K_f)), so labour
             // weakly dominates the material constraints.
-            state.audit.max_production_over_labour = state
-                .audit
-                .max_production_over_labour
-                .max(firm.production - firm.labour);
-            state.audit.max_labour_over_materials = state
-                .audit
-                .max_labour_over_materials
-                .max(firm.labour - intermediate_constraint.min(capital_constraint));
+            max_production_over_labour.observe(firm.production - firm.labour);
+            max_labour_over_materials
+                .observe(firm.labour - intermediate_constraint.min(capital_constraint));
             // A.74/A.75 share A.59's case condition -- see the note there.
             let supply_offered = firm.previous_production + firm.inventory_two_periods_ago;
-            let sector_average_price = previous_sector_prices[firm.sector as usize];
+            let sector_average_price = sector_prices[firm.sector as usize];
             let demand_pull_applies = (supply_offered <= firm.previous_demand
                 && firm.previous_price >= sector_average_price)
                 || (supply_offered >= firm.previous_demand
@@ -875,17 +900,17 @@ fn planning_and_production_system(
             let cost_push = cost_push_inflation_a76(firm.unit_cost, firm.previous_price);
             firm.price = price_a73(
                 firm.previous_price,
-                state.forecast.predicted_ppi_inflation,
-                state.calibration.phi_dp,
+                forecast.predicted_ppi_inflation,
+                calibration.phi_dp,
                 demand_pull,
-                state.calibration.phi_cp,
+                calibration.phi_cp,
                 cost_push,
             )
             .max(0.01);
-            if state.policy.debug_firm_id == Some(firm.id) {
+            if debug_firm_id == Some(firm.id) {
                 // `unit_cost` and `demand` are still last quarter's -- both are
                 // written by `realised_accounting` at the end of the tick.
-                state.audit.firm_probe = Some(FirmProbe {
+                *firm_probe.lock().unwrap() = Some(FirmProbe {
                     id: firm.id,
                     employees: firm.employees,
                     work_effort: firm.work_effort,
@@ -904,18 +929,18 @@ fn planning_and_production_system(
             }
             for s in 0..SECTORS {
                 targets.target_intermediate[s] = target_intermediate_a78(
-                    state.params.io_matrix[sector][s],
+                    params.io_matrix[sector][s],
                     firm.target_production,
-                    state.params.firm_input_adjustment,
+                    params.firm_input_adjustment,
                     stocks.intermediate_stock[s],
                     baseline.initial_intermediate_stock[s],
                     firm.production,
                     firm.initial_production,
                 );
                 targets.target_capital[s] = target_capital_a79(
-                    state.params.capital_compensation_matrix[sector][s],
+                    params.capital_compensation_matrix[sector][s],
                     firm.target_production,
-                    state.params.firm_capital_adjustment,
+                    params.firm_capital_adjustment,
                     stocks.capital_stock[s],
                     baseline.initial_capital_stock[s],
                     firm.production,
@@ -967,10 +992,10 @@ fn planning_and_production_system(
             // A.81/A.82: `[predicted deposits - cost of the inputs]^-`, valued
             // at `P_s'(t-1)`. `[x]^-` is a non-negative shortfall magnitude.
             let intermediate_cost = (0..SECTORS)
-                .map(|s| previous_sector_prices[s] * targets.target_intermediate[s])
+                .map(|s| sector_prices[s] * targets.target_intermediate[s])
                 .sum::<f64>();
             let capital_cost = (0..SECTORS)
-                .map(|s| previous_sector_prices[s] * targets.target_capital[s])
+                .map(|s| sector_prices[s] * targets.target_capital[s])
                 .sum::<f64>();
             firm.target_short_loan = negative_abs(predicted_deposits - intermediate_cost);
             firm.target_long_loan =
@@ -1005,6 +1030,13 @@ fn planning_and_production_system(
                     },
                 )?;
             }
+            Ok(())
+        })?;
+
+        state.audit.max_production_over_labour = max_production_over_labour.get();
+        state.audit.max_labour_over_materials = max_labour_over_materials.get();
+        if let Some(probe) = firm_probe.into_inner().unwrap_or(None) {
+            state.audit.firm_probe = Some(probe);
         }
 
         // A.95 distributes the sector's government consumption across the
@@ -1271,10 +1303,7 @@ fn planning_and_production_system(
             account.other_benefits *= 1.0 + state.forecast.predicted_growth;
         }
 
-        write_rows(ecs, firms, |firm: &Firm| firm.id)?;
-        write_rows(ecs, firm_stocks, |row: &FirmStocks| row.id)?;
-        write_rows(ecs, firm_stock_baseline, |row: &FirmStockBaseline| row.id)?;
-        write_rows(ecs, firm_targets, |row: &FirmTargets| row.id)?;
+
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
         write_rows(ecs, individual_wage_histories, |row: &IndividualWageHistory| row.id)?;
         write_rows(ecs, households, |household: &Household| household.id)?;
@@ -3322,6 +3351,36 @@ impl SectorSampler {
             step >>= 1;
         }
         Some(position.min(self.len - 1))
+    }
+}
+
+/// An `f64` running maximum that a parallel `for_each` body can update.
+///
+/// The audit records a few maxima over agents. Inside a sequential loop that is
+/// a plain `max`; inside chunk-parallel iteration it needs to be atomic. Only
+/// non-negative values are compared here, and IEEE-754 bit patterns order
+/// correctly for those, so the bits can be maxed directly.
+struct AtomicMaxF64(std::sync::atomic::AtomicU64);
+
+impl AtomicMaxF64 {
+    fn new(initial: f64) -> Self {
+        Self(std::sync::atomic::AtomicU64::new(initial.max(0.0).to_bits()))
+    }
+
+    fn observe(&self, value: f64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let bits = value.max(0.0).to_bits();
+        let mut current = self.0.load(Relaxed);
+        while bits > current {
+            match self.0.compare_exchange_weak(current, bits, Relaxed, Relaxed) {
+                Ok(_) => return,
+                Err(seen) => current = seen,
+            }
+        }
+    }
+
+    fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
