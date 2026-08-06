@@ -156,6 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("PROF collect={c:.2}s write={w:.2}s rows_collected={n}");
         let names = ["", "aggregate", "expectations", "targets", "labour", "planning",
                      "housing_pre", "credit", "housing_done", "goods", "accounting"];
+        {
+            let by_type = macroeconomy::systems::PROF_COLLECT_BY_TYPE.lock().unwrap();
+            let mut rows: Vec<_> = by_type.iter().collect();
+            rows.sort_by_key(|(_, (ns, _))| std::cmp::Reverse(*ns));
+            for (name, (ns, count)) in rows.iter().take(8) {
+                let short = name.rsplit("::").next().unwrap_or(name);
+                eprintln!("  COL {short:<22} {:>7.2}s {count:>10} rows", *ns as f64 / 1e9);
+            }
+        }
         let pl = ["pl_individuals", "pl_firms", "pl_government", "pl_row",
                   "pl_wages", "pl_households", "pl_accounts", "pl_spare"];
         for (i, name) in pl.iter().enumerate() {

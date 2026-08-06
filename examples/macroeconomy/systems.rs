@@ -3669,6 +3669,10 @@ pub static PROF_SYS_NS: [std::sync::atomic::AtomicU64; 11] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
+pub static PROF_COLLECT_BY_TYPE: std::sync::LazyLock<
+    Mutex<std::collections::BTreeMap<&'static str, (u64, u64)>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
+
 pub static PROF_COLLECT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_WRITE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_COLLECT_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3690,6 +3694,15 @@ where
     let mut out = Vec::new();
     stage.drain_into(&mut out);
     out.sort_unstable_by_key(id);
+    PROF_COLLECT_BY_TYPE
+        .lock()
+        .unwrap()
+        .entry(std::any::type_name::<T>())
+        .and_modify(|(ns, rows)| {
+            *ns += _t0.elapsed().as_nanos() as u64;
+            *rows += out.len() as u64;
+        })
+        .or_insert((_t0.elapsed().as_nanos() as u64, out.len() as u64));
     PROF_COLLECT_NS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     PROF_COLLECT_ROWS.fetch_add(out.len() as u64, std::sync::atomic::Ordering::Relaxed);
     Ok(out)
