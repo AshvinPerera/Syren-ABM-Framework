@@ -376,6 +376,15 @@ pub fn sync_pending_to_cpu(
     affected_resources: &[GPUResourceID],
 ) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
+        // A CPU-only model has no GPU work to synchronise. Return before
+        // touching the device so a model that uses no GPU resources never
+        // initialises a GPU adapter, which fails on machines without one.
+        if affected_resources.is_empty()
+            && is_signature_empty(&data.gpu_world_state().pending_download)
+        {
+            return Ok(());
+        }
+
         let run_time = device_runtime()?;
 
         data.gpu_resources_mut().ensure_created(&run_time.context)?;

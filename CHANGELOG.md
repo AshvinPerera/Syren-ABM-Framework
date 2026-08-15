@@ -46,6 +46,11 @@ governance, and packaging. See the migration notes at the end of this section.
 
 ### Fixed
 
+- A model with no GPU systems no longer initialises a GPU adapter during
+  `tick`. The per-stage GPU download step returned early only after opening the
+  device; it now returns before touching the device when there is no GPU work,
+  so CPU-only models run under the `gpu` feature on machines without an adapter.
+- Updated `crossbeam-epoch` to 0.9.20 to resolve RUSTSEC-2026-0204.
 - The macroeconomy stdout CSV header no longer contains an embedded newline; it
   prints as a single physical line. The headline, aggregate-trace, and
   firm-trace column names are each defined once and shared with their row
