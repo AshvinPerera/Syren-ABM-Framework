@@ -52,6 +52,12 @@ accumulates as the release lands; see the migration notes at its end.
 
 ### Internal
 
+- Added GitHub Actions CI (third-party actions pinned to commit SHA):
+  formatting, clippy, the explicit feature matrix, MSRV checks on Rust 1.87
+  (library, no-features and all-features), benchmark compilation, strict
+  rustdoc, `cargo package` with content assertions, and an external-consumer
+  smoke build against the packaged artifact. A manual workflow runs the GPU
+  tests on a self-hosted runner.
 - Pinned the development toolchain to Rust 1.91.1 (`rust-toolchain.toml`) with
   `rustfmt` and `clippy`; the library MSRV remains 1.87.
 - Resolved strict `clippy` (`--all-targets --all-features -D warnings`) and

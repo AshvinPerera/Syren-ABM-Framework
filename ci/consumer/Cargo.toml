@@ -1,0 +1,13 @@
+# Smoke-test crate for CI: it depends on the *packaged* artifact (the unpacked
+# `.crate`, not the working tree) and compiles a small program against the
+# public `model` API. If the package `include` list omits a source file the
+# library needs, this build fails. CI unpacks `cargo package`'s output to
+# `target/verify/syren` before building this crate; see `.github/workflows/ci.yml`.
+[package]
+name = "syren-consumer-smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+syren = { path = "../../target/verify/syren", features = ["model"] }

@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Least privilege: no job needs write access to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Development toolchain. The library MSRV (1.87) is checked separately.
+  DEV_TOOLCHAIN: 1.91.1
+  MSRV: 1.87.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Default features off
+        run: cargo test --no-default-features
+      - name: Model and messaging
+        run: cargo test --features "model messaging"
+      - name: All features (library)
+        run: cargo test --all-features --lib
+      - name: Integration tests compile (all features)
+        run: cargo test --all-features --no-run
+
+  features:
+    name: features (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "none"
+          - "agents"
+          - "environment"
+          - "messaging"
+          - "model"
+          - "model messaging"
+          - "gpu"
+          - "model messaging_gpu"
+          - "all"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check feature set
+        run: |
+          set -euo pipefail
+          case "${{ matrix.features }}" in
+            none) cargo check --no-default-features ;;
+            all)  cargo check --all-features ;;
+            *)    cargo check --no-default-features --features "${{ matrix.features }}" ;;
+          esac
+
+  msrv:
+    name: msrv (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["none", "all"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The library only: dev-dependencies (benchmarks, integration tests) are
+      # not bound by the MSRV.
+      - name: Check library at MSRV
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.features }}" = "all" ]; then
+            cargo check --lib --all-features
+          else
+            cargo check --lib --no-default-features
+          fi
+
+  bench-compile:
+    name: benches compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo bench --no-run --all-features
+
+  rustdoc:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo doc --all-features --no-deps
+
+  package:
+    name: package and external consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build package
+        run: cargo package --locked
+      - name: Assert package excludes local files
+        run: |
+          set -euo pipefail
+          list="$(cargo package --list --locked)"
+          if echo "$list" | grep -E '(^|/)(\.claude|target|profile|\.vs|\.idea|\.vscode)(/|$)'; then
+            echo "::error::package contains files that must be excluded"
+            exit 1
+          fi
+      - name: Compile external consumer against the packaged artifact
+        run: |
+          set -euo pipefail
+          rm -rf target/verify
+          mkdir -p target/verify
+          tar -xzf target/package/syren-*.crate -C target/verify
+          mv target/verify/syren-* target/verify/syren
+          cargo run --manifest-path ci/consumer/Cargo.toml

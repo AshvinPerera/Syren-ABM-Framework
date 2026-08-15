@@ -1,4 +1,8 @@
 /target
+# The CI external-consumer smoke crate builds against the unpacked package; its
+# build output and lockfile are regenerated per run.
+/ci/consumer/target
+/ci/consumer/Cargo.lock
 /profile/*.etl
 /profile/*.csv
 /profile/*.json
