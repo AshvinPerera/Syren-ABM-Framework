@@ -2,8 +2,10 @@
 
 ## 0.6.0-rc.1 — unreleased
 
-First release candidate published under the crate name `syren`. This section
-accumulates as the release lands; see the migration notes at its end.
+First release candidate under the crate name `syren`. It renames the crate, adds
+a model-wide seed API, migrates the macroeconomy example onto it, introduces an
+introductory example and a full documentation system, and establishes CI,
+governance, and packaging. See the migration notes at the end of this section.
 
 ### Added
 
