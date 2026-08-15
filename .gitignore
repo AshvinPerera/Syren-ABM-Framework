@@ -3,6 +3,8 @@
 # build output and lockfile are regenerated per run.
 /ci/consumer/target
 /ci/consumer/Cargo.lock
+# Rendered mdBook output; the guide sources live in docs/src.
+/docs/book
 /profile/*.etl
 /profile/*.csv
 /profile/*.json

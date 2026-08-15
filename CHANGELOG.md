@@ -50,6 +50,19 @@ accumulates as the release lands; see the migration notes at its end.
   builders (`examples/macroeconomy/output.rs`), and the example tests assert
   every header is one line, has unique names, and matches its row's field count.
 
+### Documentation
+
+- Rewrote the README as a project landing page (purpose, status, capabilities,
+  installation, a short example, and links) and moved the architecture,
+  performance, testing, benchmarking, profiling, and layout material into the
+  guide.
+- Added an mdBook user and contributor guide under `docs/`: getting started,
+  core concepts, how-to recipes, the science of reproducibility and provenance,
+  a reference section, and contributor documentation. Getting-started code is
+  included from the compiled `first_model` example.
+- Rewrote the crate-level rustdoc page around installation, features, the
+  first-model path, determinism, and stability.
+
 ### Internal
 
 - Added community and governance files: `CONTRIBUTING.md` (setup, checks,

@@ -1,355 +1,112 @@
-# Syren ABM Framework
+# Syren
 
-Syren is a Rust framework for agent-based models. It combines a custom
-archetype ECS, declared system access sets, optional model-level composition,
-typed environments, typed per-tick messaging, and an optional `wgpu` compute
-backend.
+Syren is a parallel Rust framework for agent-based models. It stores agents in an
+archetype entity-component-system (ECS), runs systems over them through a
+deterministic stage scheduler on top of [Rayon], and adds agent, environment,
+messaging, and optional GPU layers behind Cargo features.
 
-The crate is maintained with a documented public API, feature-gated subsystems,
-and correctness-oriented integration tests.
+It is for researchers and engineers who write agent-based models in Rust and care
+about reproducibility and scale. A model is a Rust program that uses the library;
+there is no separate model-definition language.
 
 ## Status
 
-- Crate name: `syren`
-- Rust edition: 2021
-- MSRV: 1.87
-- Library artifact: `rlib`
-- Current focus: ECS storage, scheduler behavior, model composition,
-  messaging, GPU dispatch, documentation, and release hardening
-
-Determinism is provided by explicit scheduling and access declarations. Model
-determinism still depends on the systems you write, especially RNG and floating
-point behavior.
-
-## Architecture Overview
-
-Syren's core is an archetype-based Entity–Component System (ECS). Entities that
-share the same set of component types are grouped into archetypes, where each
-component is stored in a dense, columnar array. This layout maximises cache
-locality during iteration.
-
-Simulation logic is expressed as systems. Each system declares an `AccessSets`
-value that lists the components it reads and writes, the channels it produces
-and consumes, and any GPU resources it touches. The scheduler compiles these
-declarations into a deterministic execution plan of stages. Systems whose
-access sets do not conflict run in parallel within a stage (via `rayon`);
-boundary stages sit between parallel stages and handle deferred command
-application, channel finalisation, and GPU synchronisation.
-
-Channels are the ordering primitive. A system that *produces* a channel must
-complete before any system that *consumes* it. Boundary resources — objects that
-implement the `BoundaryResource` trait — hook into the per-tick lifecycle
-(`begin_tick` → `finalise` → `end_tick`) and own one or more channels. The
-environment store and the message buffer set are both boundary resources.
-
-The optional higher-level layers build on top of the raw ECS. The `agents`
-feature provides `AgentTemplate`, `AgentSpawner`, `AgentBatch`, and lifecycle
-hooks. The `environment` feature adds a typed key-value parameter store with
-dirty-channel tracking. The `messaging` feature provides typed per-tick message
-buffers in four specialisations: brute-force, bucket, spatial, and targeted.
-The `model` feature ties these together behind `ModelBuilder`, which wires up
-component registration, agent populations, environments, messaging, and
-scheduling in a single fluent API.
-
-Randomness is deliberately *keyed*, not thread-local: activation-order
-shuffles derive from a `splitmix64` stream seeded by (global seed, system,
-archetype, chunk), and the public `DetRng` type gives model systems the same
-property for per-agent draws. Because Rayon's work stealing assigns chunks to
-worker threads nondeterministically, a thread-local RNG would break run-to-run
-reproducibility; deriving randomness from simulation coordinates keeps results
-identical for a fixed seed at any thread count.
-
-## Performance Guide
-
-The fast paths, in the order they usually matter:
-
-- **Iterate with typed queries.** Both the generic
-  `for_each::<P, _>(query, |item| …)` form and the named `for_each_rNwM`
-  helpers are statically dispatched and vectorise; a trivial 1M-agent pass
-  costs a fraction of a millisecond. Work is split into row ranges targeting
-  `2 × threads` tasks, so populations from ~10k agents up use the whole
-  machine.
-- **Spawn in bulk.** `with_agent_population`, `AgentBatch::set_column`, or a
-  raw `Command::SpawnBatchTagged` carry one `Vec<T>` per component and are
-  ~20× faster than per-entity spawning (34.7 ms for 1M three-component agents
-  on the reference machine). Use `Command::DespawnBatchTagged` for grouped
-  removal.
-- **Emit through a `MessageEmitter`.** In per-agent loops, obtain
-  `msgs.emitter(handle)?` once per system/thread and call `emit` on it
-  (~12× the per-call `emit` path at 1M messages/tick).
-- **Draw randomness from `DetRng`.** Thread-local RNGs are not reproducible
-  under work stealing; `DetRng::from_context(ctx, salt)` keys the stream on
-  simulation coordinates instead.
-- **Read environment values once per system**, into locals, before entering a
-  `for_each` — not inside the per-agent closure.
-- **Tag components need one byte.** Zero-sized components are rejected
-  (columns are byte views); use `struct Tag(pub u8)` and
-  `QueryBuilder::without::<T>()` for exclusion filters.
-
-## Feature Flags
-
-| Flag | Enables |
+| | |
 | --- | --- |
-| `agents` | Agent templates, spawners, lifecycle hooks, and agent handles |
-| `environment` | Typed model environment values, dirty-channel boundary tracking, and the `space` module (grids, continuous space, geometry) |
-| `messaging` | Typed brute-force, bucket, spatial, and targeted per-tick messages |
-| `gpu` | `wgpu` compute systems, GPU-safe components, and CPU/GPU mirroring |
-| `messaging_gpu` | GPU-backed message resources and GPU finalisation; includes `messaging` and `gpu` |
-| `model` | High-level `ModelBuilder`, agent registry integration, environments, sub-schedulers, and nested models; includes `agents` and `environment` |
-| `profiling` | Chrome Trace output for scheduler and ECS spans |
-| `gpu_profiling` | `gpu` plus `profiling` |
-| `all` | Every optional subsystem |
+| Package | `syren` |
+| Version | `0.6.0-rc.1` |
+| MSRV | Rust 1.87 |
+| License | [MIT](LICENSE) |
+| Guide | <https://ashvinperera.github.io/Syren-ABM-Framework/> |
+| API reference | <https://docs.rs/syren> |
 
-## Dependencies
+Syren is pre-1.0; see the [compatibility policy](https://ashvinperera.github.io/Syren-ABM-Framework/reference/compatibility.html).
+(The docs.rs and crates.io links resolve once the crate is published.)
 
-The framework's runtime dependencies are deliberately small. `rayon` drives
-parallel system execution. `parking_lot` (with `arc_lock`) provides fast
-reader-writer locking for borrow tracking and boundary access. `smallvec`
-keeps small component sets inline. `thiserror` structures error types. The
-optional `gpu` feature pulls in `wgpu` 29.x for the compute backend,
-`bytemuck` for safe Pod casts, and `pollster` for blocking on GPU futures.
-`criterion` is used as a dev-dependency for benchmarks.
+## Capabilities
 
-## Quickstart
+- **Archetype-ECS storage** — components in chunked, columnar arrays for
+  cache-friendly iteration over large populations.
+- **Deterministic scheduling** — systems declare their data access; the scheduler
+  packs non-conflicting systems into parallel stages and keeps a reproducible
+  activation order.
+- **Query-derived access** — a system's read/write set is derived from the queries
+  it runs, so the declaration cannot drift from what it touches.
+- **Deterministic randomness** — `DetRng` keys draws on the run context and a salt,
+  so results do not depend on which worker thread visits which rows.
+- **Model layer** (`model`) — `ModelBuilder`, agent templates, environments,
+  sub-schedulers, and nested models.
+- **Messaging** (`messaging`) — brute-force, bucketed, spatial, and targeted
+  message specialisations.
+- **Optional GPU execution** (`gpu`) — mirror component columns to the GPU and
+  dispatch compute systems through [wgpu].
 
-Add the crate from this repository:
+## Installation
 
 ```toml
 [dependencies]
-syren = { git = "https://github.com/AshvinPerera/Syren-ABM-Framework.git" }
+syren = { version = "0.6.0-rc.1", features = ["model"] }
 ```
 
-### Low-level ECS
+Syren has no default features; enable the ones your model needs. See the [feature
+matrix](https://ashvinperera.github.io/Syren-ABM-Framework/reference/features.html).
 
-At the ECS level, simulations register component types, spawn bundles through
-deferred commands, and run systems through a scheduler:
+## A first taste
 
-```rust
-use std::sync::{Arc, RwLock};
-use syren::{
-    advanced::EntityShards, Bundle, Command, ComponentRegistry, ECSManager,
-    ECSResult, FnSystem, QueryBuilder, Read, Scheduler,
-};
+A component is a plain `Copy` struct; a model is assembled with `ModelBuilder` and
+advanced with `tick`:
 
-#[derive(Clone, Copy)]
-struct Wealth {
-    value: f64,
+```rust,ignore
+#[derive(Clone, Copy, Default)]
+struct Position {
+    x: i64,
 }
 
-fn main() -> ECSResult<()> {
-    let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
-    let wealth_id = registry.write().unwrap().register::<Wealth>().unwrap();
-    registry.write().unwrap().freeze();
-
-    let ecs = ECSManager::with_registry(EntityShards::new(1)?, registry.clone());
-    let world = ecs.world_ref();
-
-    let mut bundle = Bundle::new();
-    bundle.insert(wealth_id, Wealth { value: 10.0 });
-    world.defer(Command::Spawn { bundle })?;
-    ecs.apply_deferred_commands()?;
-
-    // The system's access set is derived from the queries it runs - no
-    // hand-written AccessSets to drift out of sync.
-    let query = QueryBuilder::with_registry(registry)
-        .read::<Wealth>()?
-        .build()?;
-    let mut scheduler = Scheduler::new();
-    let q = query.clone();
-    scheduler.add_system(FnSystem::from_queries(
-        0,
-        "observe_wealth",
-        &[&query],
-        move |ecs| {
-            ecs.for_each::<(Read<Wealth>,), _>(q.clone(), |wealth| {
-                let _ = wealth.0.value;
-            })
-        },
-    ));
-
-    ecs.run(&mut scheduler)
-}
-```
-
-### Model-level API
-
-When the `model` feature is enabled, prefer `ModelBuilder` and `AgentTemplate`
-over the raw ECS API. `ModelBuilder` handles component registration, agent
-templates, environments, messaging, and scheduling in one fluent chain.
-
-For large initial populations, use the bulk path (`with_agent_population`)
-instead of calling `AgentSpawner` once per entity. For finer-grained control
-over multi-component batches, see `AgentBatch`.
-
-```rust
-# #[cfg(feature = "model")]
-# fn bulk_population_example() -> Result<(), Box<dyn std::error::Error>> {
-# use std::sync::{Arc, RwLock};
-# use syren::advanced::EntityShards;
-# use syren::agents::AgentTemplate;
-# use syren::model::ModelBuilder;
-# use syren::ComponentRegistry;
-# #[derive(Clone, Copy, Default)]
-# struct Household { cash: u32 }
-let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
-let household_id = registry.write().unwrap().register::<Household>()?;
-registry.write().unwrap().freeze();
-
-let households: Vec<Household> = (0..1_000_000)
-    .map(|_| Household { cash: 100 })
-    .collect();
-
-let model = ModelBuilder::new()
-    .with_component_registry(registry)
-    .with_shards(EntityShards::new(4)?)
+let mut model = ModelBuilder::new()
+    .with_seed(42)
+    .with_component_registry(Arc::clone(&registry))
+    .with_shards(EntityShards::new(1)?)
     .with_agent_template(
-        AgentTemplate::builder("household")
-            .with_component::<Household>(household_id)?
-            .with_capacity(households.len())
+        AgentTemplate::builder("walker")
+            .with_component::<Position>(position_id)?
+            .with_capacity(walkers.len())
             .build(),
     )?
-    .with_agent_population("household", household_id, households)?
+    .with_agent_population("walker", position_id, walkers)?
+    .with_system(system)
     .build()?;
-# let _ = model;
-# Ok(())
-# }
+
+model.run(50)?;
 ```
 
-## The `advanced` Module
-
-The `advanced` module re-exports storage and scheduling internals that are
-deliberately kept out of the root API: `Archetype`, `ChunkBorrow`,
-`EntityShards`, `ECSData`, `ChannelAllocator`, raw typed-slice casts
-(`cast_slice`, `cast_slice_mut`, `Attribute`, `TypeErasedAttribute`), and the
-worker-staging primitives `WorkerStage`, `worker_id`, and `max_workers`.
-
-`WorkerStage<T>` gives every Rayon worker its own slot to push into from inside
-a parallel `for_each`, with no lock on the hot path; a boundary drains all slots
-under `&mut self`. Which worker stages which item depends on work stealing, so
-a consumer that needs run-to-run stable output must impose an order after
-draining.
-
-`EntityShards` controls how entity IDs are partitioned across allocation
-shards and is required by both the low-level `ECSManager::with_registry` path
-and `ModelBuilder::with_shards`. The remaining types expose archetype storage
-internals; callers using them directly must uphold the ECS storage invariants
-that the public API normally enforces automatically.
+The full, compiled version is the `first_model` example, which the guide walks
+through step by step.
 
 ## Examples
 
-Two worked models live under `examples/`:
+- [`first_model`](examples/first_model.rs) — the smallest complete model
+  (`cargo run --example first_model --features model`).
+- [Sugarscape](examples/sugarscape/) — a large grid-based model with an optional
+  GPU path.
+- [Macroeconomy](examples/macroeconomy/) — a fully documented, calibrated
+  macroeconomic model.
 
-| Example | Features | What it is |
-| --- | --- | --- |
-| `examples/macroeconomy` | `model messaging` | A multi-market macroeconomic ABM implementing appendix equations A.1–A.142 of Wiese et al. (2024) on synthetic data: firms, individuals, households, banks, a central bank, government, properties, and the rest of the world across goods, labour, credit and housing markets. Ten systems per quarterly tick. See [`examples/macroeconomy/README.md`](examples/macroeconomy/README.md). |
-| `examples/sugarscape` | (none) | Epstein–Axtell Sugarscape on a toroidal grid, driven straight from the low-level ECS API. |
+## Documentation
 
-```bash
-cargo run --release --features "model messaging" --example macroeconomy -- --fixture tiny --ticks 40 --seed 42
-```
+- **Guide** — <https://ashvinperera.github.io/Syren-ABM-Framework/> — installation,
+  concepts, how-to recipes, the science of reproducibility, and contributor docs.
+- **API reference** — <https://docs.rs/syren>.
 
-## Tests
+## Contributing and citation
 
-The integration tests double as executable specifications:
-
-| Test | Features | What it covers |
-| --- | --- | --- |
-| `tests/closed_market_economy.rs` | `model messaging` | A small closed labor/goods market with household agents, firm agents, wage payments, goods orders, receipts, and accounting invariants |
-| `tests/economy_messaging_gpu.rs` | `model messaging_gpu` | GPU household order emission, CPU market clearing, CPU receipt emission, and GPU receipt consumption |
-| `tests/sugarscape_axtell.rs` | `model` or `gpu` | Epstein-Axtell Chapter 2 style Sugarscape fixtures with toroidal terrain, vision, metabolism, death/replacement, and CPU/GPU equality checks |
-| `tests/scheduler_graph.rs` | (none) | Scheduler dependency-graph construction, stage packing, activation ordering, and boundary channel routing |
-| `tests/gpu_dispatch_params.rs` | `gpu` | GPU dispatch parameter passing, write-back, and multi-archetype filtering |
-| `tests/engine_boundary_lifecycle.rs` | (none) | Boundary resource per-slot locking, channel routing, registration collisions, and fallible parallel iteration |
-| `tests/mem_layout.rs` | (none) | Memory layout and alignment assertions for archetype columnar storage, chunk capacity, and typed slice casts |
-| `tests/entity_aware_iteration.rs` | (none) | Entity-aware and fallible iteration paths, including `for_each_entity_fallible` error propagation |
-| `examples/macroeconomy/tests.rs` | `model messaging` | The macroeconomy example: scheduler and market ordering, parameter defaults, equation arithmetic, config overrides, and byte-identical trajectories across seeds and thread counts |
-
-Useful targeted commands:
-
-```bash
-cargo test --features "model messaging" --test closed_market_economy
-cargo test --features "model messaging_gpu" --test economy_messaging_gpu
-cargo test --features model --test sugarscape_axtell
-cargo test --features gpu --test sugarscape_axtell
-```
-
-Broader validation commands:
-
-```bash
-cargo test --no-default-features
-cargo test --features all --lib
-cargo test --features all --tests
-cargo bench --no-run --features all
-```
-
-## Benchmarks
-
-Criterion benchmarks live under `benches/`. The full set of targets:
-
-| Bench | Required features | Area |
-| --- | --- | --- |
-| `spawn` | — | Core ECS entity spawning |
-| `iterate` | — | Archetype iteration throughput |
-| `tick` | — | Full scheduler tick cost |
-| `reduce` | — | Parallel reduction primitives |
-| `query_matching` | — | Query/signature matching |
-| `scheduler_packing` | — | Stage packing and plan compilation |
-| `scheduler_execution` | — | End-to-end scheduler execution |
-| `structural_mutation` | — | Add/remove component structural changes |
-| `parallel_scaling` | — | Throughput against worker-thread count |
-| `environment_dirty_tracking` | `environment` | Environment dirty-channel overhead |
-| `messaging_finalisation` | `messaging` | Message buffer finalisation |
-| `message_specialisations` | `messaging` | Brute-force, bucket, spatial, targeted dispatch |
-| `model_agent` | `model` | Agent template and spawner throughput |
-| `gpu_startup` | `gpu` | GPU device and pipeline initialisation |
-| `gpu_dispatch` | `gpu` | GPU compute dispatch |
-| `gpu_tick` | `gpu` | GPU-inclusive tick cost |
-| `gpu_dispatch_poll` | `gpu` | GPU dispatch with poll-based completion |
-| `gpu_readback` | `gpu` | GPU buffer readback latency |
-| `gpu_bind_group_creation` | `gpu` | Bind group creation overhead |
-| `gpu_message_finalisation` | `model messaging_gpu` | GPU message buffer finalisation |
-
-Run all benchmarks with:
-
-```bash
-cargo bench --features all
-```
-
-## Profiling
-
-Enable `profiling` to emit Chrome Trace Event Format JSON that can be
-inspected in `chrome://tracing` or Perfetto. The trace captures per-system
-execution spans, boundary finalisation, deferred command application, and
-(with `gpu_profiling`) GPU dispatch timing.
-
-```rust
-syren::init("profile/trace.json");
-// run simulation work
-syren::shutdown();
-```
-
-## Project Layout
-
-```
-src/
-  lib.rs                — public API re-exports, `advanced` module, and prelude
-  engine/               — core ECS: archetypes, entities, components, scheduler,
-                          queries, commands, boundaries, borrow tracking, workers
-    random.rs           — deterministic seed-keyed RNG (DetRng, splitmix64)
-    worker_stage.rs     — lock-free per-worker staging for parallel collection
-  agents/               — agent templates, spawners, batch spawning, handles, registry
-  environment/          — typed key-value parameter store with dirty-channel tracking
-  space/                — grids, continuous space, and geometry (behind `environment`)
-  messaging/            — per-tick typed message buffers (brute-force, bucket,
-                          spatial, targeted) and optional GPU message resources
-  model/                — ModelBuilder, Model, nested models, sub-schedulers
-  gpu/                  — wgpu compute pipeline, GPU-safe components, CPU/GPU mirroring
-  profiling/            — Chrome Trace output
-examples/               — worked models (macroeconomy, sugarscape)
-tests/                  — integration tests (executable specifications)
-benches/                — Criterion benchmarks
-```
+- [Contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
+- [Security policy](SECURITY.md).
+- If you use Syren in academic work, please cite it — see
+  [`CITATION.cff`](CITATION.cff).
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE).
+
+[Rayon]: https://docs.rs/rayon
+[wgpu]: https://docs.rs/wgpu
