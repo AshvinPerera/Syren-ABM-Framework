@@ -18,11 +18,14 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write # audit-check opens an issue when an advisory is found
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          toolchain: stable
+      # Install a prebuilt cargo-audit binary rather than compiling it, which is
+      # faster and avoids build failures on the runner's default toolchain.
+      - uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

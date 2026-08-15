@@ -155,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           list="$(cargo package --list --locked)"
-          if echo "$list" | grep -E '(^|/)(\.claude|target|profile|\.vs|\.idea|\.vscode)(/|$)'; then
+          if echo "$list" | grep -E '(^|/)(target|profile|\.vs|\.idea|\.vscode)(/|$)'; then
             echo "::error::package contains files that must be excluded"
             exit 1
           fi

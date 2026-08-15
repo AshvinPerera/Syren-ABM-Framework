@@ -12,8 +12,8 @@ keywords = ["agent-based", "simulation", "ecs", "parallel", "science"]
 categories = ["science", "simulation"]
 # The published package is an allow-list: only the crate sources, examples,
 # tests, benchmarks, changelog, readme, license, and citation ship. Local
-# tooling (.claude), build output (target), profiling captures (profile), and
-# IDE settings are never included.
+# tooling, build output (target), profiling captures (profile), and IDE
+# settings are never included.
 include = [
     "src/**/*.rs",
     "examples/**/*.rs",
