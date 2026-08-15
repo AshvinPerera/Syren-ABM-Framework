@@ -12,6 +12,7 @@ pub mod data;
 pub mod equations;
 pub mod forecasting;
 pub mod messages;
+pub mod output;
 pub mod state;
 pub mod systems;
 
@@ -38,6 +39,10 @@ pub use forecasting::{
     TaylorRuleEstimate,
 };
 pub use messages::*;
+pub use output::{
+    aggregate_row, csv_header, firm_row, headline_row, AGGREGATE_COLUMNS, FIRM_COLUMNS,
+    HEADLINE_COLUMNS,
+};
 pub use state::{
     rng_salt, FirmProbe, GoodsClearingPolicy, MacroEnvironment, MacroRng, MacroeconomyConfig,
     MarketAudit, ModelPolicy, RunMode, MACRO_ENV_KEY,
@@ -72,6 +77,7 @@ where
     let (registry, ids) = register_components()?;
 
     let mut builder = ModelBuilder::new()
+        .with_seed(data.environment.seed)
         .with_component_registry(Arc::clone(&registry))
         .with_shards(EntityShards::new(shards_for_population(&data))?);
 

@@ -105,26 +105,23 @@ pub struct MacroRng {
 }
 
 impl MacroRng {
-    /// Keys a stream on the run context, the model's own seed, and a salt.
+    /// Keys a stream on the run context and a salt.
     ///
-    /// The model seed is folded in explicitly because `ModelBuilder` exposes no
-    /// `with_seed`, leaving `RunContext::simulation_seed` permanently zero
-    /// (`src/engine/activation.rs:103`). Without this fold every seed would
-    /// produce an identical trajectory.
-    pub fn new(context: RunContext, model_seed: u64, salt: u64) -> Self {
+    /// The model seed reaches the draw site through
+    /// `RunContext::simulation_seed`, which `ModelBuilder::with_seed` sets on the
+    /// root scheduler and every shared sub-scheduler. `DetRng::from_context`
+    /// folds `(simulation_seed, tick, system_id, salt)`, so distinct seeds yield
+    /// distinct streams and the draw is independent of the thread count.
+    pub fn new(context: RunContext, salt: u64) -> Self {
         Self {
-            inner: DetRng::from_context(context, salt ^ model_seed.rotate_left(17)),
+            inner: DetRng::from_context(context, salt),
         }
     }
 
     /// Keys a stream on an agent id, so each agent draws independently of the
     /// order in which agents happen to be visited.
-    pub fn for_agent(context: RunContext, model_seed: u64, salt: u64, agent_id: u64) -> Self {
-        Self::new(
-            context,
-            model_seed,
-            salt ^ agent_id.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-        )
+    pub fn for_agent(context: RunContext, salt: u64, agent_id: u64) -> Self {
+        Self::new(context, salt ^ agent_id.wrapping_mul(0x9E37_79B9_7F4A_7C15))
     }
 
     pub fn unit_f64(&mut self) -> f64 {
@@ -889,7 +886,7 @@ impl MacroEnvironment {
     ///
     /// `context` comes from `ECSReference::run_context()`.
     pub fn rng(&self, context: RunContext, salt: u64) -> MacroRng {
-        MacroRng::new(context, self.seed, salt)
+        MacroRng::new(context, salt)
     }
 
     /// Opens a per-agent deterministic stream.
@@ -898,7 +895,7 @@ impl MacroEnvironment {
     /// agent, not on the position at which the agent happens to be visited,
     /// which is what makes the loop safe to parallelise.
     pub fn rng_for_agent(&self, context: RunContext, salt: u64, agent_id: u64) -> MacroRng {
-        MacroRng::for_agent(context, self.seed, salt, agent_id)
+        MacroRng::for_agent(context, salt, agent_id)
     }
 }
 

@@ -28,6 +28,21 @@ accumulates as the release lands; see the migration notes at its end.
 - Renamed the Sugarscape example source `sugarscape_v2.rs` to `sugarscape.rs`
   and corrected the target name in its usage text and README. The Cargo example
   target remains `sugarscape` (`cargo run --example sugarscape`).
+- Migrated the macroeconomy example onto `ModelBuilder::with_seed(config.seed)`,
+  removing its manual `MacroRng` seed fold. The model seed now reaches the draw
+  sites through `RunContext::simulation_seed`. **This changes the trajectory
+  produced for a given numeric seed** versus 0.5.0; determinism is unchanged
+  (a fixed seed reproduces exactly at any thread count, and distinct seeds
+  diverge). The measured 40-quarter fixture figures in the example docs were
+  regenerated.
+
+### Fixed
+
+- The macroeconomy stdout CSV header no longer contains an embedded newline; it
+  prints as a single physical line. The headline, aggregate-trace, and
+  firm-trace column names are each defined once and shared with their row
+  builders (`examples/macroeconomy/output.rs`), and the example tests assert
+  every header is one line, has unique names, and matches its row's field count.
 
 ### Internal
 
