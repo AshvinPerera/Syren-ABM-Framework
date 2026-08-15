@@ -14,19 +14,13 @@ there is no separate model-definition language.
 | | |
 | --- | --- |
 | Package | `syren` |
-| Version | `0.6.0-rc.1` |
+| Version | `0.6.0` |
 | MSRV | Rust 1.87 |
 | License | [MIT](LICENSE) |
 | Guide | <https://ashvinperera.github.io/Syren-ABM-Framework/> |
 | API reference | <https://docs.rs/syren> |
 
 Syren is pre-1.0; see the [compatibility policy](docs/src/reference/compatibility.md).
-
-> **Note:** the guide and API-reference links above are the destinations they
-> will have once published. The guide goes live on GitHub Pages when this work
-> merges to `master` and Pages is enabled; `docs.rs` and `crates.io` resolve
-> once the crate is published. Until then, read the guide sources under
-> [`docs/src`](docs/src).
 
 ## Capabilities
 
@@ -50,7 +44,7 @@ Syren is pre-1.0; see the [compatibility policy](docs/src/reference/compatibilit
 
 ```toml
 [dependencies]
-syren = { version = "0.6.0-rc.1", features = ["model"] }
+syren = { version = "0.6.0", features = ["model"] }
 ```
 
 Syren has no default features; enable the ones your model needs. See the [feature
