@@ -9,7 +9,7 @@ Syren has no default features. Enable the features your model uses:
 
 ```toml
 [dependencies]
-syren = { version = "0.6.0-rc.1", features = ["model", "messaging"] }
+syren = { version = "0.6.0", features = ["model", "messaging"] }
 ```
 
 ## Feature selection

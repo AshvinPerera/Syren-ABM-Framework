@@ -15,7 +15,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! syren = { version = "0.6.0-rc.1", features = ["model"] }
+//! syren = { version = "0.6.0", features = ["model"] }
 //! ```
 //!
 //! ## Features
