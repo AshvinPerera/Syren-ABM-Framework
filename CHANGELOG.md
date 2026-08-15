@@ -5,6 +5,16 @@
 First release candidate published under the crate name `syren`. This section
 accumulates as the release lands; see the migration notes at its end.
 
+### Added
+
+- **Model-wide seed API.** `ModelBuilder::with_seed(u64)` sets a global RNG
+  seed and `Model::seed()` returns it. The seed is applied to the root
+  scheduler and every shared sub-scheduler at build time, reaching systems as
+  `RunContext::simulation_seed`; combined with `DetRng::from_context`, model
+  draws are reproducible for a given seed independently of the thread count.
+  Nested models are isolated worlds and keep the seed configured by their own
+  builders. The default seed is `0`.
+
 ### Breaking changes and migration
 
 - **Crate renamed `abm_framework` → `syren`.** Update dependency declarations

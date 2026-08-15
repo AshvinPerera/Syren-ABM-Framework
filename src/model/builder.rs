@@ -53,6 +53,9 @@ pub struct ModelBuilder {
     component_registry: Option<Arc<RwLock<ComponentRegistry>>>,
     shards: Option<EntityShards>,
     scheduler: Scheduler,
+    /// Global RNG seed applied to the root scheduler and every shared
+    /// sub-scheduler at build time. Nested models keep their own seed.
+    seed: u64,
     sub_schedulers: Vec<SubScheduler>,
     nested_models: Vec<NestedModel>,
     environment_builder: Option<EnvironmentBuilder>,
@@ -117,6 +120,7 @@ impl ModelBuilder {
             component_registry: None,
             shards: None,
             scheduler: Scheduler::new(),
+            seed: 0,
             sub_schedulers: Vec::new(),
             nested_models: Vec::new(),
             environment_builder: None,
@@ -144,6 +148,19 @@ impl ModelBuilder {
     /// Supplies an environment builder.
     pub fn with_environment(mut self, environment_builder: EnvironmentBuilder) -> Self {
         self.environment_builder = Some(environment_builder);
+        self
+    }
+
+    /// Sets the global RNG seed for the model.
+    ///
+    /// The seed is applied to the root scheduler and every shared sub-scheduler
+    /// during [`build`](Self::build), where it reaches systems as
+    /// `RunContext::simulation_seed`. Combined with `DetRng::from_context`, this
+    /// makes model draws reproducible for a given seed independently of the
+    /// thread count. Nested models are isolated worlds and keep the seed
+    /// configured by their own builders. The default seed is `0`.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
         self
     }
 
@@ -501,8 +518,10 @@ impl ModelBuilder {
         Self::validate_unique_sub_scheduler_names(&self.sub_schedulers)?;
 
         self.scheduler.try_rebuild()?;
+        self.scheduler.seed(self.seed);
         for sub in &mut self.sub_schedulers {
             sub.scheduler_mut().try_rebuild()?;
+            sub.scheduler_mut().seed(self.seed);
         }
 
         Self::validate_channel_scope(
@@ -549,6 +568,7 @@ impl ModelBuilder {
             environment,
             agents: self.agents,
             scheduler: self.scheduler,
+            seed: self.seed,
             sub_schedulers: self.sub_schedulers,
             nested_models: self.nested_models,
             environment_boundary_id,
@@ -681,7 +701,12 @@ mod tests {
     use crate::engine::systems::{AccessSets, FnSystem};
     use crate::environment::EnvironmentBoundary;
     use crate::model::ModelError;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+
+    /// Sentinel stored before a tick so a capture of `0` is distinguishable
+    /// from "the system never ran".
+    const UNSEEN: u64 = u64::MAX;
 
     #[cfg(feature = "messaging")]
     use crate::messaging::BruteForceMessage;
@@ -742,6 +767,114 @@ mod tests {
 
         model.tick().unwrap();
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn with_seed_reaches_root_and_shared_sub_scheduler() {
+        let root_seed = Arc::new(AtomicU64::new(UNSEEN));
+        let sub_seed = Arc::new(AtomicU64::new(UNSEEN));
+
+        let mut sub = SubScheduler::new("sub");
+        let sub_capture = Arc::clone(&sub_seed);
+        sub.scheduler_mut().add_system(FnSystem::new(
+            0,
+            "sub",
+            AccessSets::default(),
+            move |ecs| {
+                sub_capture.store(ecs.run_context().simulation_seed, Ordering::Relaxed);
+                Ok(())
+            },
+        ));
+
+        let root_capture = Arc::clone(&root_seed);
+        let mut model = ModelBuilder::new()
+            .with_seed(42)
+            .with_sub_scheduler(sub)
+            .with_system(FnSystem::new(
+                1,
+                "root",
+                AccessSets::default(),
+                move |ecs| {
+                    root_capture.store(ecs.run_context().simulation_seed, Ordering::Relaxed);
+                    Ok(())
+                },
+            ))
+            .build()
+            .unwrap();
+
+        assert_eq!(model.seed(), 42);
+        model.tick().unwrap();
+        assert_eq!(root_seed.load(Ordering::Relaxed), 42);
+        assert_eq!(sub_seed.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn default_seed_is_zero_in_context_and_accessor() {
+        let seen = Arc::new(AtomicU64::new(UNSEEN));
+        let capture = Arc::clone(&seen);
+        let mut model = ModelBuilder::new()
+            .with_system(FnSystem::new(
+                0,
+                "root",
+                AccessSets::default(),
+                move |ecs| {
+                    capture.store(ecs.run_context().simulation_seed, Ordering::Relaxed);
+                    Ok(())
+                },
+            ))
+            .build()
+            .unwrap();
+
+        assert_eq!(model.seed(), 0);
+        model.tick().unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn nested_model_keeps_its_own_seed() {
+        let child_seen = Arc::new(AtomicU64::new(UNSEEN));
+        let root_seen = Arc::new(AtomicU64::new(UNSEEN));
+
+        let child_capture = Arc::clone(&child_seen);
+        let child = ModelBuilder::new()
+            .with_seed(99)
+            .with_system(FnSystem::new(
+                0,
+                "child",
+                AccessSets::default(),
+                move |ecs| {
+                    child_capture.store(ecs.run_context().simulation_seed, Ordering::Relaxed);
+                    Ok(())
+                },
+            ))
+            .build()
+            .unwrap();
+        assert_eq!(child.seed(), 99);
+
+        let nested = NestedModel::new("child", child).with_bridge(|_, _| Ok(()));
+
+        let root_capture = Arc::clone(&root_seen);
+        let mut model = ModelBuilder::new()
+            .with_seed(42)
+            .with_nested_model(nested)
+            .with_system(FnSystem::new(
+                1,
+                "root",
+                AccessSets::default(),
+                move |ecs| {
+                    root_capture.store(ecs.run_context().simulation_seed, Ordering::Relaxed);
+                    Ok(())
+                },
+            ))
+            .build()
+            .unwrap();
+
+        assert_eq!(model.seed(), 42);
+        model.tick().unwrap();
+        // The nested child keeps the seed from its own builder; the parent seed
+        // governs only the root scheduler and shared sub-schedulers.
+        assert_eq!(child_seen.load(Ordering::Relaxed), 99);
+        assert_eq!(root_seen.load(Ordering::Relaxed), 42);
     }
 
     #[test]
