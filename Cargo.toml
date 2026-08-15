@@ -160,6 +160,11 @@ harness = false
 required-features = ["model", "messaging_gpu"]
 
 [[example]]
+name = "first_model"
+path = "examples/first_model.rs"
+required-features = ["model"]
+
+[[example]]
 name = "sugarscape"
 path = "examples/sugarscape/sugarscape.rs"
 

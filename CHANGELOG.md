@@ -7,6 +7,12 @@ accumulates as the release lands; see the migration notes at its end.
 
 ### Added
 
+- **Introductory example `first_model`** (`cargo run --example first_model
+  --features model`): a population of random walkers that demonstrates the
+  smallest end-to-end path — component registration, `ModelBuilder`, a system
+  whose access is derived from its query, per-entity deterministic RNG from the
+  run context, and a `Welford` reduction for count, mean, and variance. Its
+  source is marked with `ANCHOR` comments so the guide includes compiled code.
 - **Model-wide seed API.** `ModelBuilder::with_seed(u64)` sets a global RNG
   seed and `Model::seed()` returns it. The seed is applied to the root
   scheduler and every shared sub-scheduler at build time, reaching systems as
