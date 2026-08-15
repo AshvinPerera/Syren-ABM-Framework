@@ -1,0 +1,30 @@
+name: Documentation issue
+description: Report something wrong, unclear, or missing in the documentation.
+labels: ["documentation"]
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which documentation
+      options:
+        - The mdBook guide
+        - rustdoc (API reference)
+        - README
+        - An example's documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: The page, section, type, or file the issue is in.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing
+      description: Describe the inaccuracy, ambiguity, or gap.
+    validations:
+      required: true

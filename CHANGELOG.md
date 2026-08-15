@@ -52,6 +52,11 @@ accumulates as the release lands; see the migration notes at its end.
 
 ### Internal
 
+- Added community and governance files: `CONTRIBUTING.md` (setup, checks,
+  documentation, pull-request process, and the API-stability and release
+  policies), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `SECURITY.md`
+  (private vulnerability reporting), `CITATION.cff`, `CODEOWNERS`, issue forms,
+  and a pull-request template.
 - Added GitHub Actions CI (third-party actions pinned to commit SHA):
   formatting, clippy, the explicit feature matrix, MSRV checks on Rust 1.87
   (library, no-features and all-features), benchmark compilation, strict

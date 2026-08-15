@@ -1,0 +1,52 @@
+name: Bug report
+description: Report incorrect or unexpected behaviour.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do not use this form for security issues;
+        see SECURITY.md for private reporting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: A minimal example or steps that reproduce the issue.
+      render: rust
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The Syren version or commit hash.
+    validations:
+      required: true
+  - type: input
+    id: features
+    attributes:
+      label: Cargo features
+      description: The features enabled, e.g. "model messaging".
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and toolchain
+      description: Operating system, CPU, GPU adapter (if relevant), and Rust version.
+    validations:
+      required: true
+  - type: checkboxes
+    id: determinism
+    attributes:
+      label: Determinism
+      options:
+        - label: The issue reproduces at a fixed seed and thread count.
+        - label: The issue only appears at some thread counts (a possible determinism bug).
