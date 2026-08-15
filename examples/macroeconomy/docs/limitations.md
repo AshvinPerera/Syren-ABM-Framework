@@ -24,6 +24,12 @@ whole collection — the labour market's hiring order, the credit market's
 arrival order, the goods market's seller sampling — still come from one
 sequential stream per system, which is what those equations describe.
 
+The model seed reaches those draws through `RunContext::simulation_seed`, which
+`ModelBuilder::with_seed(config.seed)` sets on the root scheduler and every
+shared sub-scheduler. `DetRng::from_context` keys each stream on
+`(simulation_seed, tick, system_id, salt)`, so distinct seeds diverge and a
+fixed seed reproduces exactly at any thread count.
+
 ## Scale
 
 Three ticks, one process, all cores:
@@ -159,13 +165,14 @@ The example does not exercise everything the framework offers:
 
 ## What the model does do
 
-40 quarters at 595 firms: zero bankruptcies, output converging to a steady
-state, full employment of the active population from t4, PPI 1.000 → 1.111
-(~1.06%/yr), profits positive throughout, and GDP by output and by expenditure
-agreeing within ~1% — the main stock-flow-consistency check. Housing clears 874
-sales against 24 blocked mortgages. Robust across seeds 1, 7, 42, 99, 2024.
+40 quarters at 595 firms (`--seed 42`): zero bankruptcies, output converging to
+a steady state, full employment of the active population from t4, PPI 1.000 →
+1.112 (~1.06%/yr), profits positive throughout, and GDP by output and by
+expenditure agreeing within ~1% at steady state — the main stock-flow-consistency
+check. Housing clears 854 sales against 27 blocked mortgages. Robust across seeds
+1, 7, 42, 99, 2024.
 
 | Tick | 1 | 5 | 10 | 20 | 30 | 40 |
 |---|---|---|---|---|---|---|
-| Production | 18,810 | 21,173 | 25,879 | 29,978 | 30,087 | 30,087 |
-| PPI | 1.000 | 1.013 | 1.029 | 1.058 | 1.086 | 1.111 |
+| Production | 18,810 | 21,104 | 25,777 | 29,961 | 30,061 | 30,061 |
+| PPI | 1.000 | 1.013 | 1.029 | 1.059 | 1.086 | 1.112 |

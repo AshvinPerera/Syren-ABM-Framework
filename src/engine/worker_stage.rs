@@ -46,6 +46,12 @@ pub struct WorkerStage<T> {
 unsafe impl<T: Send> Send for WorkerStage<T> {}
 unsafe impl<T: Send> Sync for WorkerStage<T> {}
 
+impl<T: Send> Default for WorkerStage<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Send> WorkerStage<T> {
     /// Creates a stage sized for the current Rayon pool.
     pub fn new() -> Self {

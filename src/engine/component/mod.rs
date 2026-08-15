@@ -54,8 +54,8 @@ pub use bundle::{Bundle, DynamicBundle};
 pub use registry::ComponentRegistry;
 
 // -- Global convenience API --
-// These remain available for internal use and single-world convenience,
-// but are no longer re-exported from the crate root.
+// Available for internal use and single-world convenience; not re-exported
+// from the crate root.
 #[allow(unused)]
 pub(crate) use global::{component_id_of, freeze_components, register_component};
 

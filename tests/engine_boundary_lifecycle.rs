@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use abm_framework::{
+use syren::{
     advanced::{ChannelAllocator, EntityShards},
     max_workers, worker_id, AccessSets, BoundaryContext, BoundaryResource, ChannelID,
     ComponentRegistry, ECSError, ECSManager, ECSReference, ECSResult, ExecutionError, Scheduler,
@@ -288,7 +288,7 @@ fn boundary_finalise_skips_irrelevant_resources() {
 
 #[test]
 fn for_each_fallible_propagates_first_error_deterministically() {
-    use abm_framework::{Bundle, Command};
+    use syren::{Bundle, Command};
 
     // Component used purely to drive iteration over a row count.
     #[derive(Copy, Clone, Default)]

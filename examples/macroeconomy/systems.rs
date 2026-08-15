@@ -1,17 +1,17 @@
 use std::sync::{Arc, Mutex};
 
-use abm_framework::environment::{EnvKey, EnvironmentBoundary};
-use abm_framework::messaging::{Capacity, MessageBufferSet, MessageHandle};
-use abm_framework::model::ModelBuilder;
-use abm_framework::advanced::WorkerStage;
-use abm_framework::{AccessSets, ComponentID, ECSReference, ECSResult, FnSystem, Read, Write};
+use syren::advanced::WorkerStage;
+use syren::environment::{EnvKey, EnvironmentBoundary};
+use syren::messaging::{Capacity, MessageBufferSet, MessageHandle};
+use syren::model::ModelBuilder;
+use syren::{AccessSets, ComponentID, ECSReference, ECSResult, FnSystem, Read, Write};
 
 use super::accounting::{negative_abs, positive_part, AccountingReport, GdpIdentity};
 use super::components::*;
 use super::equations::{
-    bank_liabilities_a42, bank_reserves_a43, buy_probability_a110, cost_push_inflation_a76,
-    constrained_goods_target_a83_a84, firm_predicted_profit_a61, firm_target_demand_a60,
-    firm_target_production_a62, idiosyncratic_growth_a59, log_growth,
+    bank_liabilities_a42, bank_reserves_a43, buy_probability_a110,
+    constrained_goods_target_a83_a84, cost_push_inflation_a76, firm_predicted_profit_a61,
+    firm_target_demand_a60, firm_target_production_a62, idiosyncratic_growth_a59, log_growth,
     min_input_constraint_a63_a64, ppi_a3, price_a73, price_or_rent_reduction_a113_a115,
     purchase_cost_a109, ratio, rent_cost_a108, sector_price_a5, target_capital_a79,
     target_intermediate_a78, unit_cost_a77, work_effort_a66_a67,
@@ -24,6 +24,10 @@ use super::state::{
     rng_salt, FirmProbe, MacroAggregates, MacroEnvironment, MacroRng, MACRO_ENV_KEY,
 };
 
+/// Quarters in a year. A.30's loan-to-income multiple is an annual figure
+/// applied to a quarterly income series.
+const QUARTERS_PER_YEAR: f64 = 4.0;
+
 /// Fraction of a household's saving that goes to deposits rather than other
 /// financial assets (A.119/A.120).
 ///
@@ -32,11 +36,6 @@ use super::state::{
 /// debt" but never gives those fractions. This is a replication blocker, not a
 /// calibrated value: it is stated here so the gap is visible, and it must not
 /// be tuned to change the trajectory.
-
-/// Quarters in a year. A.30's loan-to-income multiple is an annual figure
-/// applied to a quarterly income series.
-const QUARTERS_PER_YEAR: f64 = 4.0;
-
 const DEPOSIT_SHARE_OF_SAVING: f64 = 0.6;
 
 /// A loan the lending bank loses when its borrower fails (A.41).
@@ -101,7 +100,7 @@ pub struct PhaseKeys {
 
 pub fn register_message_handles(
     builder: &mut ModelBuilder,
-) -> Result<MacroMessageHandles, abm_framework::model::ModelError> {
+) -> Result<MacroMessageHandles, syren::model::ModelError> {
     Ok(MacroMessageHandles {
         labour_offer: builder
             .register_brute_force_message::<LabourOffer>(Capacity::unbounded(64))?,
@@ -197,7 +196,7 @@ pub fn add_macroeconomy_systems(
 fn aggregate_previous_state_system(
     ids: MacroComponentIds,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.read.set(ids.firm);
@@ -237,7 +236,7 @@ fn aggregate_previous_state_system(
 
 fn refit_expectations_system(
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.consumes.insert(phases.aggregate_done.channel_id());
@@ -305,7 +304,7 @@ fn refit_expectations_system(
 fn target_setting_system(
     ids: MacroComponentIds,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
@@ -332,8 +331,8 @@ fn target_setting_system(
         // A.59-A.71 are per-firm: own row in, own row out. Iterated in place so
         // the rows are never copied to a `Vec` and back.
         let params = state.params.clone();
-        let calibration = state.calibration.clone();
-        let forecast = state.forecast.clone();
+        let calibration = state.calibration;
+        let forecast = state.forecast;
         let firm_query = ecs
             .query()?
             .write::<Firm>()?
@@ -352,10 +351,10 @@ fn target_setting_system(
             // point of the ignored regression test.
             let supply_offered = firm.previous_production + firm.inventory_two_periods_ago;
             let sector_average_price = sector_prices_previous[firm.sector as usize];
-            let excess_demand_case =
-                supply_offered <= firm.previous_demand && firm.previous_price >= sector_average_price;
-            let excess_supply_case =
-                supply_offered >= firm.previous_demand && firm.previous_price <= sector_average_price;
+            let excess_demand_case = supply_offered <= firm.previous_demand
+                && firm.previous_price >= sector_average_price;
+            let excess_supply_case = supply_offered >= firm.previous_demand
+                && firm.previous_price <= sector_average_price;
             let gamma_applies = excess_demand_case || excess_supply_case;
             let gamma_f = idiosyncratic_growth_a59(
                 firm.previous_demand.max(1e-9),
@@ -383,15 +382,10 @@ fn target_setting_system(
                 gamma_f,
                 firm.previous_demand.max(1.0),
             );
-            firm.predicted_profits = firm_predicted_profit_a61(
-                forecast.predicted_ppi_inflation,
-                gamma_f,
-                firm.profits,
-            );
-            let intermediate_constraint = min_input_constraint_a63_a64(
-                &stocks.intermediate_stock,
-                &params.io_matrix[sector],
-            );
+            firm.predicted_profits =
+                firm_predicted_profit_a61(forecast.predicted_ppi_inflation, gamma_f, firm.profits);
+            let intermediate_constraint =
+                min_input_constraint_a63_a64(&stocks.intermediate_stock, &params.io_matrix[sector]);
             let capital_constraint = min_input_constraint_a63_a64(
                 &stocks.capital_stock,
                 &params.net_fixed_assets_matrix[sector],
@@ -473,9 +467,8 @@ fn target_setting_system(
                 // so overtime raises the wage by a level and never compounds.
                 // Indexation still accumulates on the base, exactly as A.69
                 // applies it to the previous wage.
-                firm.base_wage *= ((1.0 + forecast.predicted_ppi_inflation)
-                    * (1.0 + tightness_markup))
-                    .max(0.0);
+                firm.base_wage *=
+                    ((1.0 + forecast.predicted_ppi_inflation) * (1.0 + tightness_markup)).max(0.0);
                 firm.wage = firm.base_wage * work_effort_factor.max(0.0);
             } else {
                 // Wiese A.69 verbatim. Left bit-identical to the form this
@@ -500,33 +493,33 @@ fn target_setting_system(
         ecs.for_each::<(Write<Individual>, Write<IndividualWageHistory>), _>(
             individual_query,
             |(individual, wage_history)| {
-            match individual.labour_status {
-                LABOUR_UNEMPLOYED => {
-                    individual.labour_input /= 1.0 + params.unemployment_growth_h;
+                match individual.labour_status {
+                    LABOUR_UNEMPLOYED => {
+                        individual.labour_input /= 1.0 + params.unemployment_growth_h;
+                    }
+                    LABOUR_EMPLOYED => {
+                        individual.labour_input *= 1.0 + params.employed_growth_h;
+                    }
+                    _ => individual.labour_input = 0.0,
                 }
-                LABOUR_EMPLOYED => {
-                    individual.labour_input *= 1.0 + params.employed_growth_h;
-                }
-                _ => individual.labour_input = 0.0,
-            }
-            let average_wage =
-                wage_history.wage_history.iter().sum::<f64>() / wage_history.wage_history.len() as f64;
-            individual.reservation_wage =
-                (forecast.predicted_cpi * account.unemployment_benefit).max(average_wage);
-            individual.predicted_income = if individual.labour_status == LABOUR_EMPLOYED {
-                forecast.predicted_cpi
-                    * individual.wage
-                    * (1.0
-                        - account.social_insurance_worker_rate
-                        - account.income_tax_rate * (1.0 - account.social_insurance_worker_rate))
-            } else if individual.labour_status == LABOUR_UNEMPLOYED {
-                forecast.predicted_cpi * account.unemployment_benefit
-            } else {
-                0.0
-            };
+                let average_wage = wage_history.wage_history.iter().sum::<f64>()
+                    / wage_history.wage_history.len() as f64;
+                individual.reservation_wage =
+                    (forecast.predicted_cpi * account.unemployment_benefit).max(average_wage);
+                individual.predicted_income = if individual.labour_status == LABOUR_EMPLOYED {
+                    forecast.predicted_cpi
+                        * individual.wage
+                        * (1.0
+                            - account.social_insurance_worker_rate
+                            - account.income_tax_rate
+                                * (1.0 - account.social_insurance_worker_rate))
+                } else if individual.labour_status == LABOUR_UNEMPLOYED {
+                    forecast.predicted_cpi * account.unemployment_benefit
+                } else {
+                    0.0
+                };
             },
         )?;
-
 
         state.push_phase("target_setting");
         set_phase_and_state(ecs, env_boundary, phases.targets_done, state)
@@ -537,8 +530,8 @@ fn labour_market_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
@@ -700,8 +693,8 @@ fn planning_and_production_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
@@ -831,8 +824,8 @@ fn planning_and_production_system(
         //  * the debug probe goes behind a mutex, since it fires for at most one
         //    firm but the body cannot know which chunk holds it.
         let params = state.params.clone();
-        let calibration = state.calibration.clone();
-        let forecast = state.forecast.clone();
+        let calibration = state.calibration;
+        let forecast = state.forecast;
         let debug_firm_id = state.policy.debug_firm_id;
         let sector_prices = previous_sector_prices;
         let max_production_over_labour = AtomicMaxF64::new(0.0);
@@ -863,10 +856,8 @@ fn planning_and_production_system(
             // when `firm.labour` really was a raw headcount; both fixes landed
             // and compounded.)
             let labour_constraint = firm.labour.max(0.0);
-            let intermediate_constraint = min_input_constraint_a63_a64(
-                &stocks.intermediate_stock,
-                &params.io_matrix[sector],
-            );
+            let intermediate_constraint =
+                min_input_constraint_a63_a64(&stocks.intermediate_stock, &params.io_matrix[sector]);
             let capital_constraint = min_input_constraint_a63_a64(
                 &stocks.capital_stock,
                 &params.net_fixed_assets_matrix[sector],
@@ -1192,21 +1183,23 @@ fn planning_and_production_system(
             .zip(household_histories.iter_mut())
         {
             let slot = household.id as usize;
-            let labour_income = predicted_labour_by_household.get(slot).copied().unwrap_or(0.0);
+            let labour_income = predicted_labour_by_household
+                .get(slot)
+                .copied()
+                .unwrap_or(0.0);
             let rent_income = rent_by_household.get(slot).copied().unwrap_or(0.0);
             household.predicted_income = labour_income
                 + state.forecast.predicted_cpi * household.social_benefits_other
                 + rent_income
                 + state.params.financial_asset_income_phi * household.other_financial_assets
                 + household.dividend_income;
-            let financial_asset_epsilon =
-                state
-                    .rng_for_agent(
-                        ecs.run_context(),
-                        rng_salt::HOUSEHOLD_ASSET_INCOME,
-                        u64::from(household.id),
-                    )
-                    .normal_f64(0.0, state.params.financial_asset_income_sigma);
+            let financial_asset_epsilon = state
+                .rng_for_agent(
+                    ecs.run_context(),
+                    rng_salt::HOUSEHOLD_ASSET_INCOME,
+                    u64::from(household.id),
+                )
+                .normal_f64(0.0, state.params.financial_asset_income_sigma);
             household.income = labour_by_household.get(slot).copied().unwrap_or(0.0)
                 + state.aggregates.cpi * household.social_benefits_other
                 + rent_income
@@ -1300,9 +1293,12 @@ fn planning_and_production_system(
             account.other_benefits *= 1.0 + state.forecast.predicted_growth;
         }
 
-
         write_rows(ecs, individuals, |individual: &Individual| individual.id)?;
-        write_rows(ecs, individual_wage_histories, |row: &IndividualWageHistory| row.id)?;
+        write_rows(
+            ecs,
+            individual_wage_histories,
+            |row: &IndividualWageHistory| row.id,
+        )?;
         write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, household_demands, |row: &HouseholdDemand| row.id)?;
         write_rows(ecs, household_histories, |row: &HouseholdHistory| row.id)?;
@@ -1323,8 +1319,8 @@ fn housing_preclear_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.household);
@@ -1501,8 +1497,7 @@ fn housing_preclear_system(
                     for_sale.insert(property.price, position);
                 }
             }
-            let epsilon =
-                rng.normal_f64(state.params.housing_mu_hp, state.params.housing_sigma_hp);
+            let epsilon = rng.normal_f64(state.params.housing_mu_hp, state.params.housing_sigma_hp);
             household.desired_house_price = state.params.housing_phi_hp
                 * household
                     .predicted_income
@@ -1547,9 +1542,7 @@ fn housing_preclear_system(
 
         for household_idx in buyers {
             let household = &mut households[household_idx];
-            if let Some(property_idx) =
-                for_sale.nearest(household.desired_house_price)
-            {
+            if let Some(property_idx) = for_sale.nearest(household.desired_house_price) {
                 let property = &mut properties[property_idx];
                 let financial_wealth =
                     (household.deposits + household.other_financial_assets).max(0.0);
@@ -1557,8 +1550,7 @@ fn housing_preclear_system(
                 // consumption still has to be funded out of it, so a household
                 // covering a consumption shortfall borrows correspondingly more
                 // against the property.
-                let down_payment =
-                    positive_part(financial_wealth - household.consumption_gap);
+                let down_payment = positive_part(financial_wealth - household.consumption_gap);
                 let mortgage_required = positive_part(property.price - down_payment);
                 household.desired_property_id = property.id;
                 household.desired_mortgage = mortgage_required;
@@ -1590,9 +1582,7 @@ fn housing_preclear_system(
 
         for household_idx in renters {
             let household = &mut households[household_idx];
-            if let Some(property_idx) =
-                for_rent.nearest(household.desired_rent)
-            {
+            if let Some(property_idx) = for_rent.nearest(household.desired_rent) {
                 let property = &mut properties[property_idx];
                 household.desired_property_id = property.id;
                 property.market_status = PROPERTY_TENTATIVE_RENT;
@@ -1620,8 +1610,8 @@ fn credit_market_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.bank);
@@ -1803,9 +1793,8 @@ fn credit_market_system(
                             let firm = &firms[position];
                             let stocks = &firm_stocks[position];
                             let sp = sector_prices_for_caps;
-                            let cv: f64 = (0..SECTORS)
-                                .map(|s| sp[s] * stocks.capital_stock[s])
-                                .sum();
+                            let cv: f64 =
+                                (0..SECTORS).map(|s| sp[s] * stocks.capital_stock[s]).sum();
                             let dbt = firm.short_debt + firm.long_debt + firm.overdraft;
                             let od = negative_abs(firm.deposits);
                             let dte = positive_part(
@@ -1838,7 +1827,9 @@ fn credit_market_system(
                                 .map(|firm| {
                                     ratio(
                                         firm.predicted_profits,
-                                        firm.short_debt + firm.long_debt + firm.overdraft
+                                        firm.short_debt
+                                            + firm.long_debt
+                                            + firm.overdraft
                                             + firm.equity,
                                     ) < state.params.return_on_assets
                                 })
@@ -1924,6 +1915,9 @@ fn credit_market_system(
 
         let previous_sector_prices = previous_sector_prices(&firms);
         for (firm, targets) in firms.iter_mut().zip(firm_targets.iter_mut()) {
+            // `s` indexes both the price series and the firm's per-sector target
+            // arrays, so a range loop reads more directly than a zipped iterator.
+            #[allow(clippy::needless_range_loop)]
             for s in 0..SECTORS {
                 let previous_sector_price = previous_sector_prices[s];
                 targets.target_intermediate[s] = constrained_goods_target_a83_a84(
@@ -2017,8 +2011,8 @@ fn housing_completion_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.household);
@@ -2059,8 +2053,7 @@ fn housing_completion_system(
                         && grant.loan_class == LOAN_MORTGAGE
                         && grant.amount + 1e-9 >= purchase.mortgage_required
                 });
-            let Some(property_idx) = property_index.get(purchase.property_id)
-            else {
+            let Some(property_idx) = property_index.get(purchase.property_id) else {
                 continue;
             };
             if !has_mortgage {
@@ -2103,8 +2096,7 @@ fn housing_completion_system(
         }
 
         for rental in rentals {
-            let Some(property_idx) = property_index.get(rental.property_id)
-            else {
+            let Some(property_idx) = property_index.get(rental.property_id) else {
                 continue;
             };
             if let Some(idx) = household_index.get(rental.household_id) {
@@ -2133,8 +2125,8 @@ fn goods_market_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
@@ -2288,7 +2280,11 @@ fn goods_market_system(
                 let sellable = positive_part(
                     firms[*idx].production + firms[*idx].inventory - firms[*idx].sales_quantity,
                 );
-                weights.push(if sellable > 1e-9 { a140_weight[*idx] } else { 0.0 });
+                weights.push(if sellable > 1e-9 {
+                    a140_weight[*idx]
+                } else {
+                    0.0
+                });
             }
             samplers.push(SectorSampler::new(&weights));
         }
@@ -2315,14 +2311,18 @@ fn goods_market_system(
                     firms[idx].production + firms[idx].inventory - firms[idx].sales_quantity,
                 );
                 let sector_of = firms[idx].sector as usize;
-                let weight = if sellable > 1e-9 { a140_weight[idx] } else { 0.0 };
+                let weight = if sellable > 1e-9 {
+                    a140_weight[idx]
+                } else {
+                    0.0
+                };
                 samplers[sector_of].set(position_in_sector[idx], weight);
             }
             while remaining > 1e-9 && remaining_budget > 1e-9 {
                 // Candidates come straight from the sector membership. The
                 // outer `sellers` filter applied the same availability test one
                 // extra time per buyer, for 5.0 s of an 11.9 s system.
-let members = sector_members
+                let members = sector_members
                     .get(sector)
                     .map(|m| m.as_slice())
                     .unwrap_or(&[]);
@@ -2387,7 +2387,10 @@ let members = sector_members
                 state.audit.goods_excess_demand += remaining;
                 distribute_excess_demand(
                     &mut firms,
-                    sector_members.get(sector).map(|m| m.as_slice()).unwrap_or(&[]),
+                    sector_members
+                        .get(sector)
+                        .map(|m| m.as_slice())
+                        .unwrap_or(&[]),
                     &a140_weight,
                     remaining,
                 );
@@ -2425,8 +2428,8 @@ fn realised_accounting_system(
     ids: MacroComponentIds,
     messages: MacroMessageHandles,
     phases: PhaseKeys,
-    env_boundary: abm_framework::BoundaryID,
-    message_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
+    message_boundary: syren::BoundaryID,
 ) -> FnSystem<impl Fn(ECSReference<'_>) -> ECSResult<()> + Send + Sync + 'static> {
     let mut access = AccessSets::default();
     access.write.set(ids.firm);
@@ -2559,9 +2562,12 @@ fn realised_accounting_system(
             .write::<FirmStockBaseline>()?
             .write::<FirmRealised>()?
             .build()?;
-        ecs.for_each::<(Write<Firm>, Write<FirmStocks>, Write<FirmStockBaseline>, Write<FirmRealised>), _>(
-            firm_query,
-            |(firm, stocks, baseline, realised)| {
+        ecs.for_each::<(
+            Write<Firm>,
+            Write<FirmStocks>,
+            Write<FirmStockBaseline>,
+            Write<FirmRealised>,
+        ), _>(firm_query, |(firm, stocks, baseline, realised)| {
             let sector = firm.sector as usize;
             let previous_inventory = firm.inventory;
             let previous_production = firm.production;
@@ -2572,8 +2578,7 @@ fn realised_accounting_system(
                 // `sales_quantity` decouples input usage from output and lets
                 // stocks drift arbitrarily against production.
                 stocks.intermediate_stock[s] = positive_part(
-                    stocks.intermediate_stock[s]
-                        - params.io_matrix[sector][s] * firm.production
+                    stocks.intermediate_stock[s] - params.io_matrix[sector][s] * firm.production
                         + realised.realised_intermediate[s],
                 );
                 let installed_capital = baseline.capital_to_install[s];
@@ -2602,8 +2607,10 @@ fn realised_accounting_system(
             // already apportions the sector total across sellers by the A.140
             // weights, and leaves each firm's share in `excess_demand`.
             firm.demand = firm.sales_quantity + firm.excess_demand;
-            let intermediate_purchases =
-                intermediate_by_firm.get(firm.id as usize).copied().unwrap_or(0.0);
+            let intermediate_purchases = intermediate_by_firm
+                .get(firm.id as usize)
+                .copied()
+                .unwrap_or(0.0);
             let production_tax =
                 account_production_tax(&accounts, sector) * firm.price * firm.production;
             // A.89's capital term is what the firm *bought*,
@@ -2612,8 +2619,10 @@ fn realised_accounting_system(
             // intermediate term equal the receipt payments. The previous code
             // charged a notional depreciation of the stock instead, which is
             // neither a payment nor a price.
-            let capital_purchases =
-                capital_by_firm.get(firm.id as usize).copied().unwrap_or(0.0);
+            let capital_purchases = capital_by_firm
+                .get(firm.id as usize)
+                .copied()
+                .unwrap_or(0.0);
             let loan_interest_cost = loan_settlement.firm_interest(firm.id);
             firm.costs = firm_wage_bill(firm)
                 + intermediate_purchases
@@ -2621,12 +2630,12 @@ fn realised_accounting_system(
                 + capital_purchases
                 + loan_interest_cost;
             // A.90/A.89 term breakdown -- diagnostic only, see MarketAudit.
-            sum_cost_wages.add( firm_wage_bill(firm));
-            sum_cost_intermediate.add( intermediate_purchases);
-            sum_cost_capital.add( capital_purchases);
-            sum_cost_production_tax.add( production_tax);
-            sum_cost_interest.add( loan_interest_cost);
-            sum_profit_costs.add( firm.costs);
+            sum_cost_wages.add(firm_wage_bill(firm));
+            sum_cost_intermediate.add(intermediate_purchases);
+            sum_cost_capital.add(capital_purchases);
+            sum_cost_production_tax.add(production_tax);
+            sum_cost_interest.add(loan_interest_cost);
+            sum_profit_costs.add(firm.costs);
             // A.77 -- per-unit, from technology coefficients and prices. Not
             // `firm.costs / production`: that numerator includes restocking
             // purchases and loan interest, and divides by a denominator that
@@ -2644,8 +2653,8 @@ fn realised_accounting_system(
             // A.90.
             firm.profits =
                 firm.price * firm.sales_quantity + firm.price * delta_inventory - firm.costs;
-            sum_profit_sales_revenue.add( firm.price * firm.sales_quantity);
-            sum_profit_inventory_change.add( firm.price * delta_inventory);
+            sum_profit_sales_revenue.add(firm.price * firm.sales_quantity);
+            sum_profit_inventory_change.add(firm.price * delta_inventory);
             // A.91: D_f(t) = D_f(t-1) + P_f*Q~_f - C_f - tau^CORP[Pi_f]^+ , with
             // loan instalments and new credit already applied by
             // `settle_loan_book` / `apply_loan`.
@@ -2679,7 +2688,9 @@ fn realised_accounting_system(
             // stock -- inventory and capital enter at price, not as bare
             // quantities, and M is part of the total.
             let stock_value: f64 = (0..SECTORS)
-                .map(|s| previous_prices[s] * (stocks.intermediate_stock[s] + stocks.capital_stock[s]))
+                .map(|s| {
+                    previous_prices[s] * (stocks.intermediate_stock[s] + stocks.capital_stock[s])
+                })
                 .sum();
             firm.equity = firm.deposits + firm.price * firm.inventory + stock_value
                 - firm.short_debt
@@ -2688,10 +2699,10 @@ fn realised_accounting_system(
             if firm.deposits < 0.0 && firm.equity < 0.0 {
                 firm.bankrupt = true;
                 // A.41: the lending bank appropriates whatever is left as a
-                // deposit and loses the loan outright. Previously the borrower's
-                // debt was simply zeroed and the loss landed nowhere -- and the
-                // loan-book entry survived, so a bankrupt firm went on being
-                // debited and went on crediting its bank with interest forever.
+                // deposit and loses the loan outright. The remaining debt is
+                // recorded as a bad-debt write-off and the loan-book entry is
+                // removed, so a bankrupt firm stops being debited and stops
+                // crediting its bank with interest.
                 write_offs.lock().unwrap().push(BadDebt {
                     bank_id: firm.bank_id,
                     borrower_kind: BUYER_FIRM,
@@ -2710,8 +2721,7 @@ fn realised_accounting_system(
             firm.previous_demand = firm.demand;
             firm.previous_production = previous_production;
             firm.previous_price = firm.price;
-            },
-        )?;
+        })?;
         let mut write_offs = write_offs.into_inner().unwrap();
         // Re-read after the in-place pass: the aggregates below need this
         // quarter's closed rows, not the opening ones.
@@ -2727,8 +2737,7 @@ fn realised_accounting_system(
         state.audit.cost_production_tax = sum_cost_production_tax.total();
         state.audit.cost_interest = sum_cost_interest.total();
 
-        let household_income_total: f64 =
-            households.iter().map(|h| positive_part(h.income)).sum();
+        let household_income_total: f64 = households.iter().map(|h| positive_part(h.income)).sum();
         let household_count_f = households.len().max(1) as f64;
         // A.105/A.122/A.123 need each household's own receipts, rented-out
         // properties and property transfers. Written as filters inside the
@@ -2773,8 +2782,7 @@ fn realised_accounting_system(
         }
         let mut transferred_in_by_household = vec![0.0; household_slots];
         for transfer in &property_transfers {
-            if let Some(value) =
-                transferred_in_by_household.get_mut(transfer.household_id as usize)
+            if let Some(value) = transferred_in_by_household.get_mut(transfer.household_id as usize)
             {
                 *value += transfer.price;
             }
@@ -2829,10 +2837,14 @@ fn realised_accounting_system(
             // A.121, with the completed transfers of this quarter reflected: a
             // buyer's wealth rises by what it paid, a seller's falls by the
             // same, on top of the mark-to-market of what each still owns.
-            household.property_wealth =
-                property_value_by_household.get(slot).copied().unwrap_or(0.0);
-            let transferred_in =
-                transferred_in_by_household.get(slot).copied().unwrap_or(0.0);
+            household.property_wealth = property_value_by_household
+                .get(slot)
+                .copied()
+                .unwrap_or(0.0);
+            let transferred_in = transferred_in_by_household
+                .get(slot)
+                .copied()
+                .unwrap_or(0.0);
             state.audit.housing_transfer_value += transferred_in;
             household.net_wealth = household.property_wealth
                 + household.other_real_assets
@@ -2878,10 +2890,7 @@ fn realised_accounting_system(
             household.previous_income = household.income;
         }
 
-        let total_wages = firms
-            .iter()
-            .map(|firm| firm_wage_bill(firm))
-            .sum::<f64>();
+        let total_wages = firms.iter().map(firm_wage_bill).sum::<f64>();
         let total_profits = firms.iter().map(|firm| firm.profits).sum::<f64>();
         // A.98's VAT base is household *consumption*. Filtering on buyer kind
         // alone swept in `GOODS_CAPITAL` receipts, which A.98 already taxes
@@ -2910,8 +2919,7 @@ fn realised_accounting_system(
         if !write_offs.is_empty() {
             state.loan_book.loans.retain(|loan| {
                 !write_offs.iter().any(|debt| {
-                    debt.borrower_kind == loan.borrower_kind
-                        && debt.borrower_id == loan.borrower_id
+                    debt.borrower_kind == loan.borrower_kind && debt.borrower_id == loan.borrower_id
                 })
             });
         }
@@ -3065,8 +3073,7 @@ fn realised_accounting_system(
             if required > 1e-12 && positive_total > 1e-12 {
                 for bank in banks.iter_mut() {
                     if bank.insolvent {
-                        if let Some((_, amount)) =
-                            injections.iter().find(|(id, _)| *id == bank.id)
+                        if let Some((_, amount)) = injections.iter().find(|(id, _)| *id == bank.id)
                         {
                             bank.equity += amount;
                         }
@@ -3095,12 +3102,10 @@ fn realised_accounting_system(
         state.audit.firm_equity_total = firms.iter().map(|f| f.equity).sum();
         state.audit.firms_bankrupt = firms.iter().filter(|f| f.bankrupt).count() as u32;
         state.audit.household_deposits_total = households.iter().map(|h| h.deposits).sum();
-        state.audit.household_ofa_total =
-            households.iter().map(|h| h.other_financial_assets).sum();
+        state.audit.household_ofa_total = households.iter().map(|h| h.other_financial_assets).sum();
         state.audit.household_income_total = households.iter().map(|h| h.income).sum();
         state.audit.household_net_wealth_total = households.iter().map(|h| h.net_wealth).sum();
-        state.audit.households_bankrupt =
-            households.iter().filter(|h| h.bankrupt).count() as u32;
+        state.audit.households_bankrupt = households.iter().filter(|h| h.bankrupt).count() as u32;
         state.audit.bank_equity_total = banks.iter().map(|b| b.equity).sum();
         state.audit.bank_reserves_total = banks.iter().map(|b| b.reserves).sum();
         state.audit.bank_deposits_total = banks.iter().map(|b| b.deposits).sum();
@@ -3111,8 +3116,7 @@ fn realised_accounting_system(
             .filter(|i| i.labour_status == LABOUR_EMPLOYED)
             .count()
             .max(1) as f64;
-        state.audit.average_wage =
-            firms.iter().map(|f| firm_wage_bill(f)).sum::<f64>() / employed_now;
+        state.audit.average_wage = firms.iter().map(firm_wage_bill).sum::<f64>() / employed_now;
         state.audit.firm_trace.clear();
         if state.policy.trace {
             for (firm, stocks) in firms.iter().zip(firm_stocks.iter()) {
@@ -3219,9 +3223,7 @@ fn realised_accounting_system(
         // Firm capital purchases are gross fixed capital formation too.
         let firm_capital_formation: f64 = receipts
             .iter()
-            .filter(|receipt| {
-                receipt.buyer_kind == BUYER_FIRM && receipt.purpose == GOODS_CAPITAL
-            })
+            .filter(|receipt| receipt.buyer_kind == BUYER_FIRM && receipt.purpose == GOODS_CAPITAL)
             .map(|receipt| receipt.payment)
             .sum();
         let inventory_change: f64 = firms
@@ -3231,8 +3233,7 @@ fn realised_accounting_system(
 
         state.aggregates.gdp = GdpIdentity {
             // taxes on products + (1 - tau^PROD) * P_f Y_f - intermediate inputs
-            output: taxes_on_products + production_value - production_tax_total
-                - intermediate_use,
+            output: taxes_on_products + production_value - production_tax_total - intermediate_use,
             expenditure: (1.0 + account.vat_rate) * state.aggregates.household_consumption
                 + state.aggregates.government_consumption
                 + (1.0 + account.export_tax_rate) * state.aggregates.exports
@@ -3242,9 +3243,7 @@ fn realised_accounting_system(
                 + inventory_change,
             // taxes on products + gross operating surplus + compensation of
             // employees, which collapses to the output leg by construction.
-            income: taxes_on_products + production_value
-                - production_tax_total
-                - intermediate_use,
+            income: taxes_on_products + production_value - production_tax_total - intermediate_use,
         };
         state.accounting = AccountingReport {
             gdp: state.aggregates.gdp,
@@ -3281,7 +3280,6 @@ fn realised_accounting_system(
             .sector_production
             .push(state.aggregates.sector_production);
         state.quarter += 1;
-
 
         write_rows(ecs, households, |household: &Household| household.id)?;
         write_rows(ecs, household_histories, |row: &HouseholdHistory| row.id)?;
@@ -3392,14 +3390,14 @@ struct ParallelSumF64 {
 
 impl ParallelSumF64 {
     fn new() -> Self {
-        let workers = abm_framework::advanced::max_workers() as usize + 1;
+        let workers = syren::advanced::max_workers() as usize + 1;
         Self {
             partials: (0..workers).map(|_| Mutex::new(0.0)).collect(),
         }
     }
 
     fn add(&self, value: f64) {
-        let slot = (abm_framework::advanced::worker_id() as usize).min(self.partials.len() - 1);
+        let slot = (syren::advanced::worker_id() as usize).min(self.partials.len() - 1);
         *self.partials[slot].lock().unwrap() += value;
     }
 
@@ -3421,7 +3419,9 @@ struct AtomicMaxF64(std::sync::atomic::AtomicU64);
 
 impl AtomicMaxF64 {
     fn new(initial: f64) -> Self {
-        Self(std::sync::atomic::AtomicU64::new(initial.max(0.0).to_bits()))
+        Self(std::sync::atomic::AtomicU64::new(
+            initial.max(0.0).to_bits(),
+        ))
     }
 
     fn observe(&self, value: f64) {
@@ -3429,7 +3429,10 @@ impl AtomicMaxF64 {
         let bits = value.max(0.0).to_bits();
         let mut current = self.0.load(Relaxed);
         while bits > current {
-            match self.0.compare_exchange_weak(current, bits, Relaxed, Relaxed) {
+            match self
+                .0
+                .compare_exchange_weak(current, bits, Relaxed, Relaxed)
+            {
                 Ok(_) => return,
                 Err(seen) => current = seen,
             }
@@ -3542,7 +3545,11 @@ struct RowIndex {
 
 impl RowIndex {
     fn build<T>(rows: &[T], id: impl Fn(&T) -> u32) -> Self {
-    let capacity = rows.iter().map(|row| id(row) as usize + 1).max().unwrap_or(0);
+        let capacity = rows
+            .iter()
+            .map(|row| id(row) as usize + 1)
+            .max()
+            .unwrap_or(0);
         let mut positions = vec![u32::MAX; capacity];
         for (position, row) in rows.iter().enumerate() {
             positions[id(row) as usize] = position as u32;
@@ -3581,15 +3588,16 @@ impl RowIndex {
 /// any thread count: work stealing decides which worker sees which rows, so
 /// neither the per-worker split nor the concatenation is stable on its own.
 ///
-/// This is the pattern `abm_framework::space` uses after its counting sort,
-
+/// This is the pattern `syren::space` uses after its counting sort.
 fn collect_rows_by<T, F>(ecs: ECSReference<'_>, id: F) -> ECSResult<Vec<T>>
 where
     T: Copy + Send + Sync + 'static,
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
-    let _span = abm_framework::span("collect_rows_by")
-        .arg("component", abm_framework::Arg::Str(std::any::type_name::<T>().to_owned()));
+    let _span = syren::span("collect_rows_by").arg(
+        "component",
+        syren::Arg::Str(std::any::type_name::<T>().to_owned()),
+    );
     let stage: WorkerStage<T> = WorkerStage::new();
     let q = ecs.query()?.read::<T>()?.build()?;
     // `push` takes `&self` and writes only the calling worker's slot, so a
@@ -3620,9 +3628,15 @@ where
     T: Copy + Send + Sync + 'static,
     F: Fn(&T) -> u32 + Copy + Send + Sync + 'static,
 {
-    let _span = abm_framework::span("write_rows")
-        .arg("component", abm_framework::Arg::Str(std::any::type_name::<T>().to_owned()));
-    let capacity = rows.iter().map(|row| id(row) as usize + 1).max().unwrap_or(0);
+    let _span = syren::span("write_rows").arg(
+        "component",
+        syren::Arg::Str(std::any::type_name::<T>().to_owned()),
+    );
+    let capacity = rows
+        .iter()
+        .map(|row| id(row) as usize + 1)
+        .max()
+        .unwrap_or(0);
     let mut index: Vec<u32> = vec![u32::MAX; capacity];
     for (position, row) in rows.iter().enumerate() {
         index[id(row) as usize] = position as u32;
@@ -3641,7 +3655,7 @@ where
 
 fn macro_state(
     ecs: ECSReference<'_>,
-    env_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
 ) -> ECSResult<MacroEnvironment> {
     ecs.boundary::<EnvironmentBoundary>(env_boundary)?
         .environment()
@@ -3651,7 +3665,7 @@ fn macro_state(
 
 fn set_phase_and_state(
     ecs: ECSReference<'_>,
-    env_boundary: abm_framework::BoundaryID,
+    env_boundary: syren::BoundaryID,
     key: EnvKey<u64>,
     state: MacroEnvironment,
 ) -> ECSResult<()> {
@@ -3662,6 +3676,9 @@ fn set_phase_and_state(
     Ok(())
 }
 
+// Each argument is a distinct entity population the aggregate identities read;
+// grouping them into a struct would not simplify the accounting.
+#[allow(clippy::too_many_arguments)]
 fn compute_aggregates(
     state: &MacroEnvironment,
     firms: &[Firm],
@@ -3672,8 +3689,10 @@ fn compute_aggregates(
     properties: &[Property],
     rows: &[RestOfWorld],
 ) -> MacroAggregates {
-    let mut aggregate = MacroAggregates::default();
-    aggregate.production = firms.iter().map(|firm| firm.production).sum();
+    let mut aggregate = MacroAggregates {
+        production: firms.iter().map(|firm| firm.production).sum(),
+        ..MacroAggregates::default()
+    };
     for firm in firms {
         aggregate.sector_production[firm.sector as usize] += firm.production;
         aggregate.firm_loans_by_sector[firm.sector as usize] += firm.short_debt + firm.long_debt;
@@ -3779,7 +3798,7 @@ fn compute_aggregates(
     }
     aggregate.exports = rows.iter().map(|row| row.exports).sum();
     aggregate.government_consumption = governments.iter().map(|gov| gov.realised_consumption).sum();
-    aggregate.wage_income = firms.iter().map(|firm| firm_wage_bill(firm)).sum();
+    aggregate.wage_income = firms.iter().map(firm_wage_bill).sum();
     aggregate.profit_income = firms.iter().map(|firm| firm.profits).sum();
     aggregate.gdp = GdpIdentity {
         output: aggregate.production,
@@ -3792,7 +3811,6 @@ fn compute_aggregates(
     };
     aggregate
 }
-
 
 fn lagged_cpi_inflation(state: &MacroEnvironment) -> f64 {
     let lag = state.params.rent_partial_indexation_lag.max(1);
@@ -3948,12 +3966,7 @@ fn weighted_choice(rng: &mut MacroRng, weights: &[f64]) -> usize {
 /// model's persistent ~20% excess demand, is most of them -- and it was
 /// rescanning every firm in the economy and recomputing both A.140 denominators
 /// each time.
-fn distribute_excess_demand(
-    firms: &mut [Firm],
-    members: &[usize],
-    weights: &[f64],
-    excess: f64,
-) {
+fn distribute_excess_demand(firms: &mut [Firm], members: &[usize], weights: &[f64], excess: f64) {
     let total: f64 = members.iter().map(|idx| weights[*idx]).sum();
     if total <= 1e-12 {
         if let Some(idx) = members.first() {
@@ -4151,9 +4164,7 @@ fn settle_loan_book(
         let interest_due = loan.outstanding * loan.rate;
         match loan.borrower_kind {
             BUYER_FIRM => {
-                if let Some(firm) =
-                    firm_positions.get(loan.borrower_id).map(|p| &mut firms[p])
-                {
+                if let Some(firm) = firm_positions.get(loan.borrower_id).map(|p| &mut firms[p]) {
                     firm.deposits -= principal_due + interest_due;
                     match loan.loan_class {
                         LOAN_FIRM_SHORT => {
@@ -4276,7 +4287,8 @@ fn bank_class_credit_supply(
             bank.firm_loan_volume_by_sector[s].max(0.0) * (-phi * bank.npl_firm_by_sector[s]).exp()
         })
         .sum();
-    let consumption_weight = bank.consumption_loan_volume.max(0.0) * (-phi * bank.npl_consumption).exp();
+    let consumption_weight =
+        bank.consumption_loan_volume.max(0.0) * (-phi * bank.npl_consumption).exp();
     let mortgage_weight = bank.mortgage_volume.max(0.0) * (-phi * bank.npl_mortgage).exp();
     let total = firm_weight + consumption_weight + mortgage_weight;
     let envelope = bank_credit_supply(bank, state);
@@ -4287,8 +4299,7 @@ fn bank_class_credit_supply(
     let share = match loan_class {
         LOAN_FIRM_SHORT | LOAN_FIRM_LONG => {
             let s = sector as usize;
-            bank.firm_loan_volume_by_sector[s].max(0.0)
-                * (-phi * bank.npl_firm_by_sector[s]).exp()
+            bank.firm_loan_volume_by_sector[s].max(0.0) * (-phi * bank.npl_firm_by_sector[s]).exp()
         }
         LOAN_HOUSEHOLD_CONSUMPTION => consumption_weight,
         LOAN_MORTGAGE => mortgage_weight,
@@ -4341,7 +4352,8 @@ fn borrower_credit_cap(
                 // it would double-count the capital stock that A.93 equity
                 // already contains.
                 let dte_cap = positive_part(
-                    state.params.debt_to_equity * capital_value - debt + overdraft
+                    state.params.debt_to_equity * capital_value - debt
+                        + overdraft
                         + rate * overdraft
                         - interest,
                 );
@@ -4515,9 +4527,7 @@ fn apply_buyer_goods(
         BUYER_FIRM => {
             // Resolved by the caller's index. This ran once per transaction and
             // scanned every firm in the economy.
-            if let Some(realised) =
-                buyer_firm_idx.and_then(|idx| firm_realised.get_mut(idx))
-            {
+            if let Some(realised) = buyer_firm_idx.and_then(|idx| firm_realised.get_mut(idx)) {
                 match demand.purpose {
                     GOODS_CAPITAL => realised.realised_capital[demand.sector as usize] += quantity,
                     _ => realised.realised_intermediate[demand.sector as usize] += quantity,

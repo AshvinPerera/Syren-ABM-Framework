@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use syren::{
     advanced::EntityShards, Bundle, Command, ComponentID, ComponentRegistry, ECSError, ECSManager,
     ECSResult, QueryBuilder,
 };

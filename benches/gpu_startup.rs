@@ -1,7 +1,7 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::Scheduler;
+use syren::Scheduler;
 
 mod gpu_common;
 use gpu_common::*;

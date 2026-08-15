@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Cargo dependencies in the root manifest.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  # GitHub Actions used by the workflows (kept pinned to SHAs; Dependabot bumps
+  # the pin and updates the version comment).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

@@ -1,4 +1,4 @@
-﻿//! Archetype storage and query-matching primitives for the ECS engine.
+//! Archetype storage and query-matching primitives for the ECS engine.
 //!
 //! An [`Archetype`] groups entities that share an identical component
 //! [`Signature`]. Component data is stored column-major in chunked, densely
@@ -213,7 +213,8 @@ impl Archetype {
     /// - Does not allocate component data; only entity metadata.
     pub(super) fn ensure_capacity(meta: &mut ArchetypeMeta, chunk_count: usize) {
         while meta.entity_positions.len() < chunk_count {
-            meta.entity_positions.push(vec![Entity::PLACEHOLDER; CHUNK_CAP]);
+            meta.entity_positions
+                .push(vec![Entity::PLACEHOLDER; CHUNK_CAP]);
         }
     }
 
@@ -356,8 +357,11 @@ impl Archetype {
             };
             let mut entities = Vec::with_capacity(len);
             for row in 0..len {
-                let Some(entity) = positions.get(row).copied()
-                    .filter(|entity| *entity != Entity::PLACEHOLDER) else {
+                let Some(entity) = positions
+                    .get(row)
+                    .copied()
+                    .filter(|entity| *entity != Entity::PLACEHOLDER)
+                else {
                     return Err(ECSError::from(
                         InternalViolation::ArchetypeEntityPositionMissing,
                     ));

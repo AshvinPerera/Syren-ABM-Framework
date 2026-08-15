@@ -266,8 +266,7 @@ impl ContinuousSpace2D {
             for cell in 0..total_cells {
                 let start = self.cell_starts[cell] as usize;
                 let end = self.cell_starts[cell + 1] as usize;
-                self.items[start..end]
-                    .sort_unstable_by_key(|&(entity, _, _)| entity.to_raw());
+                self.items[start..end].sort_unstable_by_key(|&(entity, _, _)| entity.to_raw());
             }
         }
     }
@@ -290,7 +289,11 @@ impl BoundaryResource for ContinuousSpace2D {
         Ok(())
     }
 
-    fn finalise(&mut self, _ctx: &mut BoundaryContext<'_>, channels: &[ChannelID]) -> ECSResult<()> {
+    fn finalise(
+        &mut self,
+        _ctx: &mut BoundaryContext<'_>,
+        channels: &[ChannelID],
+    ) -> ECSResult<()> {
         if channels.contains(&self.channels[0]) {
             self.rebuild();
         }
@@ -350,8 +353,11 @@ mod tests {
             }
             rebuild(&mut s);
 
-            for &(qx, qy, r) in &[(5.0f32, 5.0f32, 12.0f32), (99.0, 1.0, 15.0), (50.0, 50.0, 7.5)]
-            {
+            for &(qx, qy, r) in &[
+                (5.0f32, 5.0f32, 12.0f32),
+                (99.0, 1.0, 15.0),
+                (50.0, 50.0, 7.5),
+            ] {
                 let mut expected: Vec<u64> = points
                     .iter()
                     .filter(|&&(_, x, y)| s.geometry().distance2(qx, qy, x, y) <= r * r)
@@ -391,7 +397,11 @@ mod tests {
             s.stage(entity(raw), 1.0 + raw as f32 * 0.1, 1.0);
         }
         rebuild(&mut s);
-        let ids: Vec<u64> = s.cell_items(0, 0).iter().map(|&(e, _, _)| e.to_raw()).collect();
+        let ids: Vec<u64> = s
+            .cell_items(0, 0)
+            .iter()
+            .map(|&(e, _, _)| e.to_raw())
+            .collect();
         assert_eq!(ids, vec![1, 3, 5, 7, 9]);
     }
 

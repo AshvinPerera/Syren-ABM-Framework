@@ -2,13 +2,11 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use abm_framework::advanced::EntityShards;
-use abm_framework::agents::AgentTemplate;
-use abm_framework::messaging::{
-    BruteForceMessage, Capacity, GpuMessage, Message, MessageBufferSet,
-};
-use abm_framework::model::ModelBuilder;
-use abm_framework::{
+use syren::advanced::EntityShards;
+use syren::agents::AgentTemplate;
+use syren::messaging::{BruteForceMessage, Capacity, GpuMessage, Message, MessageBufferSet};
+use syren::model::ModelBuilder;
+use syren::{
     AccessSets, ComponentRegistry, ECSError, ECSReference, ECSResult, ExecutionError, GPUPod,
     GpuSystem, Read, System, SystemBackend, Write,
 };
@@ -62,20 +60,20 @@ unsafe impl GpuMessage for GpuTradeReceipt {}
 
 #[derive(Clone, Copy)]
 struct EconomyGpuIds {
-    household: abm_framework::ComponentID,
-    firm: abm_framework::ComponentID,
+    household: syren::ComponentID,
+    firm: syren::ComponentID,
 }
 
 struct HouseholdOrderGpuSystem {
     access: AccessSets,
-    resources: [abm_framework::GPUResourceID; 1],
-    writes: [abm_framework::GPUResourceID; 1],
+    resources: [syren::GPUResourceID; 1],
+    writes: [syren::GPUResourceID; 1],
 }
 
 impl HouseholdOrderGpuSystem {
     fn new(
-        household_id: abm_framework::ComponentID,
-        orders: abm_framework::messaging::GpuMessageHandle<GpuGoodsOrder>,
+        household_id: syren::ComponentID,
+        orders: syren::messaging::GpuMessageHandle<GpuGoodsOrder>,
     ) -> Self {
         let mut access = AccessSets::default();
         access.read.set(household_id);
@@ -90,7 +88,7 @@ impl HouseholdOrderGpuSystem {
 }
 
 impl System for HouseholdOrderGpuSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         1
     }
 
@@ -166,24 +164,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         64
     }
 
-    fn uses_resources(&self) -> &[abm_framework::GPUResourceID] {
+    fn uses_resources(&self) -> &[syren::GPUResourceID] {
         &self.resources
     }
 
-    fn writes_resources(&self) -> &[abm_framework::GPUResourceID] {
+    fn writes_resources(&self) -> &[syren::GPUResourceID] {
         &self.writes
     }
 }
 
 struct HouseholdReceiptGpuSystem {
     access: AccessSets,
-    resources: [abm_framework::GPUResourceID; 1],
+    resources: [syren::GPUResourceID; 1],
 }
 
 impl HouseholdReceiptGpuSystem {
     fn new(
-        household_id: abm_framework::ComponentID,
-        receipts: abm_framework::messaging::GpuMessageHandle<GpuTradeReceipt>,
+        household_id: syren::ComponentID,
+        receipts: syren::messaging::GpuMessageHandle<GpuTradeReceipt>,
     ) -> Self {
         let mut access = AccessSets::default();
         access.write.set(household_id);
@@ -196,7 +194,7 @@ impl HouseholdReceiptGpuSystem {
 }
 
 impl System for HouseholdReceiptGpuSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         3
     }
 
@@ -273,7 +271,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         64
     }
 
-    fn uses_resources(&self) -> &[abm_framework::GPUResourceID] {
+    fn uses_resources(&self) -> &[syren::GPUResourceID] {
         &self.resources
     }
 }
@@ -295,7 +293,7 @@ fn register_components() -> (Arc<RwLock<ComponentRegistry>>, EconomyGpuIds) {
     )
 }
 
-fn build_gpu_model() -> (abm_framework::model::Model, EconomyGpuIds) {
+fn build_gpu_model() -> (syren::model::Model, EconomyGpuIds) {
     let (registry, ids) = register_components();
     let mut builder = ModelBuilder::new()
         .with_component_registry(Arc::clone(&registry))
@@ -335,7 +333,7 @@ fn build_gpu_model() -> (abm_framework::model::Model, EconomyGpuIds) {
         )
         .unwrap()
         .with_system(HouseholdOrderGpuSystem::new(ids.household, orders))
-        .with_system(abm_framework::FnSystem::new(
+        .with_system(syren::FnSystem::new(
             2,
             "cpu_market_clear",
             market_access,
@@ -387,7 +385,7 @@ fn build_gpu_model() -> (abm_framework::model::Model, EconomyGpuIds) {
     (model, ids)
 }
 
-fn spawn_fixture(model: &mut abm_framework::model::Model, ids: EconomyGpuIds) {
+fn spawn_fixture(model: &mut syren::model::Model, ids: EconomyGpuIds) {
     let world = model.ecs().world_ref();
     let household = model.agents().get("gpu_household").unwrap();
     for id in 0..HOUSEHOLDS {
@@ -425,7 +423,7 @@ fn spawn_fixture(model: &mut abm_framework::model::Model, ids: EconomyGpuIds) {
     model.ecs().apply_deferred_commands().unwrap();
 }
 
-fn households(model: &abm_framework::model::Model) -> ECSResult<Vec<GpuHousehold>> {
+fn households(model: &syren::model::Model) -> ECSResult<Vec<GpuHousehold>> {
     let out = Arc::new(Mutex::new(Vec::new()));
     let out_for_query = Arc::clone(&out);
     let world = model.ecs().world_ref();
@@ -438,7 +436,7 @@ fn households(model: &abm_framework::model::Model) -> ECSResult<Vec<GpuHousehold
     Ok(out)
 }
 
-fn firm(model: &abm_framework::model::Model) -> ECSResult<GpuFirm> {
+fn firm(model: &syren::model::Model) -> ECSResult<GpuFirm> {
     let out = Arc::new(Mutex::new(Vec::new()));
     let out_for_query = Arc::clone(&out);
     let world = model.ecs().world_ref();

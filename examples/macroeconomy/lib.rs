@@ -12,16 +12,17 @@ pub mod data;
 pub mod equations;
 pub mod forecasting;
 pub mod messages;
+pub mod output;
 pub mod state;
 pub mod systems;
 
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 
-use abm_framework::advanced::EntityShards;
-use abm_framework::agents::AgentTemplate;
-use abm_framework::model::{Model, ModelBuilder};
-use abm_framework::ComponentRegistry;
+use syren::advanced::EntityShards;
+use syren::agents::AgentTemplate;
+use syren::model::{Model, ModelBuilder};
+use syren::ComponentRegistry;
 
 pub use accounting::{AccountingReport, GdpIdentity};
 pub use calibration::CalibrationParameters;
@@ -38,6 +39,10 @@ pub use forecasting::{
     TaylorRuleEstimate,
 };
 pub use messages::*;
+pub use output::{
+    aggregate_row, csv_header, firm_row, headline_row, AGGREGATE_COLUMNS, FIRM_COLUMNS,
+    HEADLINE_COLUMNS,
+};
 pub use state::{
     rng_salt, FirmProbe, GoodsClearingPolicy, MacroEnvironment, MacroRng, MacroeconomyConfig,
     MarketAudit, ModelPolicy, RunMode, MACRO_ENV_KEY,
@@ -72,6 +77,7 @@ where
     let (registry, ids) = register_components()?;
 
     let mut builder = ModelBuilder::new()
+        .with_seed(data.environment.seed)
         .with_component_registry(Arc::clone(&registry))
         .with_shards(EntityShards::new(shards_for_population(&data))?);
 
@@ -150,7 +156,11 @@ where
         .with_agent_population("firm", ids.firm_targets, data.firm_targets)?
         .with_agent_population("firm", ids.firm_realised, data.firm_realised)?
         .with_agent_population("individual", ids.individual, data.individuals)?
-        .with_agent_population("individual", ids.individual_wage_history, data.individual_wage_histories)?
+        .with_agent_population(
+            "individual",
+            ids.individual_wage_history,
+            data.individual_wage_histories,
+        )?
         .with_agent_population("household", ids.household, data.households)?
         .with_agent_population("household", ids.household_demand, data.household_demands)?
         .with_agent_population("household", ids.household_history, data.household_histories)?
@@ -220,8 +230,11 @@ pub fn shards_for_population(data: &InitialData) -> usize {
         .max(1)
 }
 
-fn register_components(
-) -> Result<(Arc<RwLock<ComponentRegistry>>, MacroComponentIds), Box<dyn Error>> {
+/// Shared handle to the component registry, cloned into the builder and kept by
+/// the caller so populations can be seeded after `build`.
+type SharedRegistry = Arc<RwLock<ComponentRegistry>>;
+
+fn register_components() -> Result<(SharedRegistry, MacroComponentIds), Box<dyn Error>> {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let ids = {
         let mut reg = registry
@@ -249,9 +262,7 @@ fn register_components(
     Ok((registry, ids))
 }
 
-fn register_phase_keys(
-    builder: &mut ModelBuilder,
-) -> Result<PhaseKeys, abm_framework::model::ModelError> {
+fn register_phase_keys(builder: &mut ModelBuilder) -> Result<PhaseKeys, syren::model::ModelError> {
     Ok(PhaseKeys {
         aggregate_done: builder.register_environment::<u64>(PHASE_AGGREGATE_DONE, 0)?,
         expectations_done: builder.register_environment::<u64>(PHASE_EXPECTATIONS_DONE, 0)?,

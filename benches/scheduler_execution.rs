@@ -1,11 +1,11 @@
 use std::hint::black_box;
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use syren::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry, ECSManager, FnSystem,
     Scheduler,
 };
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 const SYSTEMS: usize = 256;
 const ROWS: usize = 4096;

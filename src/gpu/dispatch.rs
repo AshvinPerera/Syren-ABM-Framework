@@ -376,6 +376,15 @@ pub fn sync_pending_to_cpu(
     affected_resources: &[GPUResourceID],
 ) -> ECSResult<()> {
     ecs.with_exclusive(|data| {
+        // A CPU-only model has no GPU work to synchronise. Return before
+        // touching the device so a model that uses no GPU resources never
+        // initialises a GPU adapter, which fails on machines without one.
+        if affected_resources.is_empty()
+            && is_signature_empty(&data.gpu_world_state().pending_download)
+        {
+            return Ok(());
+        }
+
         let run_time = device_runtime()?;
 
         data.gpu_resources_mut().ensure_created(&run_time.context)?;
@@ -500,6 +509,10 @@ pub fn execute_gpu_system(
     })
 }
 
+// Each parameter is a distinct engine resource the dispatch loop needs by
+// reference; bundling them into a struct would only move the same set of
+// borrows behind an extra indirection without improving clarity.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_over_archetypes(
     run_time: &mut DeviceRuntime,
     world_state: &mut GpuWorldState,

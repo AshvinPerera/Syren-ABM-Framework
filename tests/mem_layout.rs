@@ -1,7 +1,7 @@
 use std::mem::{align_of, size_of};
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use syren::{
     advanced::{cast_slice, Archetype, Attribute, EntityShards, TypeErasedAttribute},
     ArchetypeID, Bundle, ChunkID, Command, ComponentRegistry, ECSManager, Signature, CHUNK_CAP,
 };

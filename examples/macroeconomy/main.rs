@@ -7,7 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::env;
 
     use macroeconomy::{
-        build_macroeconomy_model, macro_state, FixtureDataProvider, RealDataProvider, RunMode,
+        aggregate_row, build_macroeconomy_model, csv_header, firm_row, headline_row, macro_state,
+        FixtureDataProvider, RealDataProvider, RunMode, AGGREGATE_COLUMNS, FIRM_COLUMNS,
+        HEADLINE_COLUMNS,
     };
 
     let config = parse_args(env::args().skip(1))?;
@@ -15,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compile to nothing unless the `profiling` feature is on, so an ordinary
     // run pays nothing for them.
     if let Some(path) = &config.profile_path {
-        abm_framework::init(path);
+        syren::init(path);
     }
     let mut example = match config.mode {
         RunMode::TinyFixture => build_macroeconomy_model(config.clone(), FixtureDataProvider)?,
@@ -32,96 +34,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agg_rows: Vec<String> = Vec::new();
     let mut firm_rows: Vec<String> = Vec::new();
     if tracing {
-        agg_rows.push(
-            "tick,production,ppi,cpi,hpi,rpi,employed,individuals,goods_demand,goods_supply,excess_demand,sales_rev,inv_chg,costs,c_wage,c_interm,c_cap,c_tax,c_int,firm_deposits,firm_debt,firm_equity,firms_bankrupt,hh_deposits,hh_ofa,hh_income,hh_consumption,hh_net_wealth,hh_bankrupt,bank_equity,bank_reserves,bank_deposits,gov_revenue,gov_deficit,gov_debt,unemp_benefit,avg_wage,total_loans,credit_req,credit_granted,roa_apps,roa_fails,roa_max,bail_ins,gdp_out,gdp_exp,b_loanint,b_resinc,b_rescost,b_depint,b_tax,b_seized,b_lost,policy_rate,cpi_infl,growth,blk_roa,blk_cap,blk_supply,envelope,cap_total,cap_dte,cap_roe,dte_zero,roe_zero,d_interm,d_fcap,d_cons,d_hcap,d_gov,d_exp"
-                .to_owned(),
-        );
-        firm_rows.push(
-            "tick,firm,employees,work_effort,h_f0,H,M,K,target,production,price,unit_cost,demand,excess_demand,wage,deposits,debt,equity,profits,sales,inventory,target_short_loan,granted_short_loan"
-                .to_owned(),
-        );
+        agg_rows.push(csv_header(AGGREGATE_COLUMNS));
+        firm_rows.push(csv_header(FIRM_COLUMNS));
     }
 
-    println!(
-        "tick,production,ppi,cpi,hpi,rpi,total_loans,gdp_gap,blocked_mortgages,excess_demand,\
-         prod_over_labour,labour_over_materials,employed,individuals,goods_demand,goods_supply,roa_apps,roa_fails,roa_max,credit_req,credit_granted,\n         sales_rev,inv_chg,costs,c_wage,c_interm,c_cap,c_tax,c_int"
-    );
+    println!("{}", csv_header(HEADLINE_COLUMNS));
     for _ in 0..config.ticks {
         example.model.tick()?;
         let state = macro_state(&example.model)?;
-        println!(
-            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{:.6},{:.6},{},{},{:.6},{:.6},{},{},{:.5},{:.2},{:.2},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}",
-            state.quarter,
-            state.aggregates.production,
-            state.aggregates.ppi,
-            state.aggregates.cpi,
-            state.aggregates.hpi,
-            state.aggregates.rpi,
-            state.aggregates.total_loans,
-            state.accounting.gdp.max_gap(),
-            state.audit.mortgage_blocked_purchases,
-            state.audit.goods_excess_demand,
-            state.audit.max_production_over_labour,
-            state.audit.max_labour_over_materials,
-            state.audit.employed_headcount,
-            state.audit.individual_headcount,
-            state.audit.goods_demand_quantity,
-            state.audit.goods_supply_quantity,
-            state.audit.firm_credit_applications,
-            state.audit.firm_credit_roa_failures,
-            state.audit.firm_roa_max,
-            state.audit.firm_credit_requested,
-            state.audit.firm_credit_granted,
-            state.audit.profit_sales_revenue,
-            state.audit.profit_inventory_change,
-            state.audit.profit_costs,
-            state.audit.cost_wages,
-            state.audit.cost_intermediate,
-            state.audit.cost_capital,
-            state.audit.cost_production_tax,
-            state.audit.cost_interest
-        );
+        println!("{}", headline_row(&state));
         if tracing {
-            let a = &state.audit;
-            agg_rows.push(format!(
-                "{},{:.4},{:.6},{:.6},{:.6},{:.6},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.4},{:.4},{:.4},{:.4},{},{},{:.5},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6},{},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
-                state.quarter,
-                state.aggregates.production, state.aggregates.ppi, state.aggregates.cpi,
-                state.aggregates.hpi, state.aggregates.rpi,
-                a.employed_headcount, a.individual_headcount,
-                a.goods_demand_quantity, a.goods_supply_quantity, a.goods_excess_demand,
-                a.profit_sales_revenue, a.profit_inventory_change, a.profit_costs,
-                a.cost_wages, a.cost_intermediate, a.cost_capital, a.cost_production_tax,
-                a.cost_interest,
-                a.firm_deposits_total, a.firm_debt_total, a.firm_equity_total, a.firms_bankrupt,
-                a.household_deposits_total, a.household_ofa_total, a.household_income_total,
-                a.household_consumption_total, a.household_net_wealth_total, a.households_bankrupt,
-                a.bank_equity_total, a.bank_reserves_total, a.bank_deposits_total,
-                a.government_revenue, a.government_deficit, a.government_debt,
-                a.unemployment_benefit, a.average_wage,
-                state.aggregates.total_loans, a.firm_credit_requested, a.firm_credit_granted,
-                a.firm_credit_applications, a.firm_credit_roa_failures, a.firm_roa_max,
-                a.bank_bail_ins,
-                state.aggregates.gdp.output, state.aggregates.gdp.expenditure,
-                a.bank_loan_interest, a.bank_reserve_income, a.bank_reserve_cost,
-                a.bank_deposit_interest, a.bank_corporate_tax, a.bank_writeoff_seized,
-                a.bank_writeoff_lost, a.policy_rate, a.taylor_cpi_inflation, a.taylor_growth,
-                a.credit_blocked_by_roa, a.credit_blocked_by_cap, a.credit_blocked_by_supply,
-                a.credit_envelope_total, a.credit_cap_total,
-                a.cap_dte_total, a.cap_roe_total, a.cap_dte_zero, a.cap_roe_zero,
-                a.demand_firm_intermediate, a.demand_firm_capital,
-                a.demand_household_consumption, a.demand_household_capital,
-                a.demand_government, a.demand_export
-            ));
-            for f in &a.firm_trace {
-                firm_rows.push(format!(
-                    "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
-                    state.quarter, f.id, f.employees, f.work_effort, f.initial_work_effort,
-                    f.labour, f.intermediate_constraint, f.capital_constraint,
-                    f.target_production, f.production, f.price, f.unit_cost, f.demand,
-                    f.excess_demand, f.wage, f.deposits, f.debt, f.equity, f.profits,
-                    f.sales_quantity, f.inventory, f.target_short_loan, f.granted_short_loan
-                ));
+            agg_rows.push(aggregate_row(&state));
+            for f in &state.audit.firm_trace {
+                firm_rows.push(firm_row(state.quarter, f));
             }
         }
         if let Some(probe) = state.audit.firm_probe {
@@ -153,15 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&dir)?;
         let aggregates = dir.join("trace_aggregates.csv");
         let firms = dir.join("trace_firms.csv");
-        std::fs::write(&aggregates, agg_rows.join("
-"))?;
-        std::fs::write(&firms, firm_rows.join("
-"))?;
+        std::fs::write(&aggregates, agg_rows.join("\n"))?;
+        std::fs::write(&firms, firm_rows.join("\n"))?;
         eprintln!("wrote {} and {}", aggregates.display(), firms.display());
     }
     let state = macro_state(&example.model)?;
     if config.profile_path.is_some() {
-        abm_framework::shutdown();
+        syren::shutdown();
     }
     eprintln!("completed {} quarters", state.quarter);
     eprintln!(
@@ -236,8 +159,10 @@ fn parse_args(
                     .ok_or("--initialisation requires a yyyy-Qn value")?;
             }
             "--firms-per-sector" => {
-                config.firms_per_sector =
-                    args.next().ok_or("--firms-per-sector requires a value")?.parse()?;
+                config.firms_per_sector = args
+                    .next()
+                    .ok_or("--firms-per-sector requires a value")?
+                    .parse()?;
             }
             "--profile" => {
                 config.profile_path = Some(PathBuf::from(
@@ -250,8 +175,11 @@ fn parse_args(
                 config.policy.trace = true;
             }
             "--debug-firm" => {
-                config.policy.debug_firm_id =
-                    Some(args.next().ok_or("--debug-firm requires a firm id")?.parse()?);
+                config.policy.debug_firm_id = Some(
+                    args.next()
+                        .ok_or("--debug-firm requires a firm id")?
+                        .parse()?,
+                );
             }
             "-h" | "--help" => {
                 println!(

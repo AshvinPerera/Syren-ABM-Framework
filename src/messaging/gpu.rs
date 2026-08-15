@@ -1148,7 +1148,7 @@ impl GpuMessageResource {
         let index_bytes = self.index_capacity_bytes().max(4);
         let valid_bytes = align_to_4(self.capacity * std::mem::size_of::<u32>()).max(4);
         let scratch_bytes = self.scratch_capacity_bytes().max(4);
-        let recreate = self.buffers.as_ref().map_or(true, |b| {
+        let recreate = self.buffers.as_ref().is_none_or(|b| {
             b.raw_bytes < raw_bytes
                 || b.index_bytes < index_bytes
                 || b.valid_bytes < valid_bytes
@@ -1332,7 +1332,7 @@ fn validate_gpu_layout(
     specialisation: Specialisation,
     key_metadata: GpuKeyMetadata,
 ) -> Result<(), MessagingError> {
-    if item_size % 4 != 0 {
+    if !item_size.is_multiple_of(4) {
         return Err(MessagingError::InvalidGpuMessageLayout {
             type_name,
             reason: "GPU-native finalise requires item_size to be a multiple of 4".to_string(),
@@ -1473,7 +1473,7 @@ fn write_padded(ctx: &GPUContext, buffer: &wgpu::Buffer, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
-    if bytes.len() % 4 == 0 {
+    if bytes.len().is_multiple_of(4) {
         ctx.queue.write_buffer(buffer, 0, bytes);
     } else {
         let mut padded = bytes.to_vec();

@@ -33,28 +33,20 @@ Each agent carries the following attributes, all assigned randomly at creation:
 
 ## Running the Example
 
-Since the example file lives in `examples/sugarscape/sugarscape_v2.rs` rather than the standard `examples/` root, you need to point Cargo at it explicitly. You can do this by adding an `[[example]]` entry to your `Cargo.toml`:
-
-```toml
-[[example]]
-name = "sugarscape_v2"
-path = "examples/sugarscape/sugarscape_v2.rs"
-```
-
-Then run with:
+The example ships as a Cargo target named `sugarscape`, so no extra configuration is needed. Run it directly from the repository root:
 
 ```bash
 # CPU-only, default settings (1M agents, 4096x4096 grid, 20 ticks)
-cargo run --release --example sugarscape_v2
+cargo run --release --example sugarscape
 
 # With GPU metabolism acceleration
-cargo run --release --features gpu --example sugarscape_v2
+cargo run --release --features gpu --example sugarscape
 
 # With profiling (writes a Chrome Trace JSON file)
-cargo run --release --features profiling --example sugarscape_v2
+cargo run --release --features profiling --example sugarscape
 
 # Both GPU and profiling
-cargo run --release --features "gpu profiling" --example sugarscape_v2
+cargo run --release --features "gpu profiling" --example sugarscape
 ```
 
 ## Command-Line Options
@@ -78,13 +70,13 @@ All parameters have sensible defaults, so the example runs out of the box with n
 
 ```bash
 # Small test run
-cargo run --release --example sugarscape_v2 -- --agents 1000 --width 128 --height 128 --ticks 5
+cargo run --release --example sugarscape -- --agents 1000 --width 128 --height 128 --ticks 5
 
 # Large-scale benchmark
-cargo run --release --features gpu --example sugarscape_v2 -- --agents 2000000 --width 8192 --height 8192 --ticks 50
+cargo run --release --features gpu --example sugarscape -- --agents 2000000 --width 8192 --height 8192 --ticks 50
 
 # Reproducible run with a specific seed
-cargo run --release --example sugarscape_v2 -- --seed 0xDEADBEEF
+cargo run --release --example sugarscape -- --seed 0xDEADBEEF
 ```
 
 ## Output Format
@@ -98,7 +90,7 @@ tick,agents,avg_sugar_per_tile,wealth_mean,wealth_p50,wealth_p90,wealth_p99,weal
 This makes it straightforward to redirect data to a file for analysis:
 
 ```bash
-cargo run --release --example sugarscape_v2 -- --ticks 100 > results.csv
+cargo run --release --example sugarscape -- --ticks 100 > results.csv
 ```
 
 ## Framework Features Demonstrated
@@ -109,7 +101,7 @@ This example exercises several key features of the Syren ABM Framework:
 - **Entity sharding** — `EntityShards` distributes entities across multiple shards (one per worker thread) for parallel access.
 - **Deterministic scheduling** — Systems declare `AccessSets` with `produces`/`consumes` dependencies, and the `Scheduler` enforces a strict execution order (Growback → Move → Metabolism → Replacement → Stats).
 - **GPU compute** — The metabolism system can optionally run as a WGSL compute shader via `wgpu`, demonstrating the framework's `GpuSystem` trait and `GPUPod` marker for GPU-safe data types.
-- **Profiling** — All systems emit tracing spans via `abm_framework::span()`, producing Chrome Trace JSON output when compiled with the `profiling` feature.
+- **Profiling** — All systems emit tracing spans via `syren::span()`, producing Chrome Trace JSON output when compiled with the `profiling` feature.
 - **Deferred commands** — Agent spawning uses `Command::Spawn` with deferred application, showing the framework's structural mutation pattern.
 
 ## Notes

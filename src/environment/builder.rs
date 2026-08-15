@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! use std::sync::Arc;
-//! use abm_framework::environment::EnvironmentBuilder;
+//! use syren::environment::EnvironmentBuilder;
 //!
 //! let env: Arc<Environment> = EnvironmentBuilder::new()
 //!     .register::<f32>("interest_rate", 0.05)?

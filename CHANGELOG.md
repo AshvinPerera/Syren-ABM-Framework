@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.6.0-rc.1 — unreleased
+
+First release candidate under the crate name `syren`. It renames the crate, adds
+a model-wide seed API, migrates the macroeconomy example onto it, introduces an
+introductory example and a full documentation system, and establishes CI,
+governance, and packaging. See the migration notes at the end of this section.
+
+### Added
+
+- **Introductory example `first_model`** (`cargo run --example first_model
+  --features model`): a population of random walkers that demonstrates the
+  smallest end-to-end path — component registration, `ModelBuilder`, a system
+  whose access is derived from its query, per-entity deterministic RNG from the
+  run context, and a `Welford` reduction for count, mean, and variance. Its
+  source is marked with `ANCHOR` comments so the guide includes compiled code.
+- **Model-wide seed API.** `ModelBuilder::with_seed(u64)` sets a global RNG
+  seed and `Model::seed()` returns it. The seed is applied to the root
+  scheduler and every shared sub-scheduler at build time, reaching systems as
+  `RunContext::simulation_seed`; combined with `DetRng::from_context`, model
+  draws are reproducible for a given seed independently of the thread count.
+  Nested models are isolated worlds and keep the seed configured by their own
+  builders. The default seed is `0`.
+
+### Breaking changes and migration
+
+- **Crate renamed `abm_framework` → `syren`.** Update dependency declarations
+  and imports: `use abm_framework::…` becomes `use syren::…`. The library name,
+  the public module paths, and the documentation URL all change accordingly.
+  The crate was not previously published to crates.io, so no released version
+  is affected.
+
+### Changed
+
+- Renamed the Sugarscape example source `sugarscape_v2.rs` to `sugarscape.rs`
+  and corrected the target name in its usage text and README. The Cargo example
+  target remains `sugarscape` (`cargo run --example sugarscape`).
+- Migrated the macroeconomy example onto `ModelBuilder::with_seed(config.seed)`,
+  removing its manual `MacroRng` seed fold. The model seed now reaches the draw
+  sites through `RunContext::simulation_seed`. **This changes the trajectory
+  produced for a given numeric seed** versus 0.5.0; determinism is unchanged
+  (a fixed seed reproduces exactly at any thread count, and distinct seeds
+  diverge). The measured 40-quarter fixture figures in the example docs were
+  regenerated.
+
+### Fixed
+
+- A model with no GPU systems no longer initialises a GPU adapter during
+  `tick`. The per-stage GPU download step returned early only after opening the
+  device; it now returns before touching the device when there is no GPU work,
+  so CPU-only models run under the `gpu` feature on machines without an adapter.
+- Updated `crossbeam-epoch` to 0.9.20 to resolve RUSTSEC-2026-0204.
+- The macroeconomy stdout CSV header no longer contains an embedded newline; it
+  prints as a single physical line. The headline, aggregate-trace, and
+  firm-trace column names are each defined once and shared with their row
+  builders (`examples/macroeconomy/output.rs`), and the example tests assert
+  every header is one line, has unique names, and matches its row's field count.
+
+### Documentation
+
+- Rewrote the README as a project landing page (purpose, status, capabilities,
+  installation, a short example, and links) and moved the architecture,
+  performance, testing, benchmarking, profiling, and layout material into the
+  guide.
+- Added an mdBook user and contributor guide under `docs/`: getting started,
+  core concepts, how-to recipes, the science of reproducibility and provenance,
+  a reference section, and contributor documentation. Getting-started code is
+  included from the compiled `first_model` example.
+- Rewrote the crate-level rustdoc page around installation, features, the
+  first-model path, determinism, and stability.
+
+### Internal
+
+- Added community and governance files: `CONTRIBUTING.md` (setup, checks,
+  documentation, pull-request process, and the API-stability and release
+  policies), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `SECURITY.md`
+  (private vulnerability reporting), `CITATION.cff`, `CODEOWNERS`, issue forms,
+  and a pull-request template.
+- Added GitHub Actions CI (third-party actions pinned to commit SHA):
+  formatting, clippy, the explicit feature matrix, MSRV checks on Rust 1.87
+  (library, no-features and all-features), benchmark compilation, strict
+  rustdoc, `cargo package` with content assertions, and an external-consumer
+  smoke build against the packaged artifact. A manual workflow runs the GPU
+  tests on a self-hosted runner.
+- Added a Pages workflow that builds the mdBook guide, checks internal links,
+  and deploys it to GitHub Pages on the default branch; a weekly RustSec audit
+  workflow; and Dependabot updates for Cargo and GitHub Actions.
+- Pinned the development toolchain to Rust 1.91.1 (`rust-toolchain.toml`) with
+  `rustfmt` and `clippy`; the library MSRV remains 1.87.
+- Resolved strict `clippy` (`--all-targets --all-features -D warnings`) and
+  strict rustdoc findings without relying on APIs newer than the MSRV.
+- Replaced the packaging `exclude` list with an `include` allow-list and added
+  crates.io `keywords`/`categories` and docs.rs metadata.
+
 ## 0.5.0 — 2026-07-05
 
 Performance-focused release following a full code review. Steady-state

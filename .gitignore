@@ -1,4 +1,10 @@
 /target
+# The CI external-consumer smoke crate builds against the unpacked package; its
+# build output and lockfile are regenerated per run.
+/ci/consumer/target
+/ci/consumer/Cargo.lock
+# Rendered mdBook output; the guide sources live in docs/src.
+/docs/book
 /profile/*.etl
 /profile/*.csv
 /profile/*.json

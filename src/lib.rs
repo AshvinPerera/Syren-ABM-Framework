@@ -1,13 +1,53 @@
-//! # ABM Framework
+//! # Syren
 //!
-//! High-performance, parallel Entity-Component-System (ECS) framework
-//! designed for large-scale Agent-Based Models (ABM).
+//! Syren is a parallel Rust framework for agent-based models. It stores agents
+//! in an archetype entity-component-system (ECS), runs systems over them through
+//! a deterministic stage scheduler on top of Rayon, and adds agent, environment,
+//! messaging, and optional GPU layers behind Cargo features.
 //!
-//! ## Design Goals
-//! - Archetype-based storage for cache efficiency
-//! - Deterministic scheduling
-//! - Parallel CPU execution (GPU-ready architecture)
-//! - Safe, explicit data access
+//! This is the API reference. For a task-oriented introduction, worked examples,
+//! and the reproducibility guarantees, see the guide at
+//! <https://ashvinperera.github.io/Syren-ABM-Framework/>.
+//!
+//! ## Installation
+//!
+//! Syren has no default features; enable the ones your model needs:
+//!
+//! ```toml
+//! [dependencies]
+//! syren = { version = "0.6.0-rc.1", features = ["model"] }
+//! ```
+//!
+//! ## Features
+//!
+//! - `agents`, `environment` — agent templates and typed model-wide values.
+//! - `model` — the [`ModelBuilder`](model::ModelBuilder) layer (implies `agents`
+//!   and `environment`).
+//! - `messaging` — the four message specialisations.
+//! - `gpu`, `messaging_gpu` — GPU state mirroring and compute dispatch.
+//! - `profiling` — tracing spans and Chrome Trace output.
+//!
+//! ## Getting started
+//!
+//! The `first_model` example is the smallest complete model: register a
+//! component, build a population with [`ModelBuilder`](model::ModelBuilder), run
+//! a system whose access is derived from its query, draw per-entity randomness
+//! from the run context with [`DetRng`], and summarise with a [`Welford`]
+//! reduction. Run it with `cargo run --example first_model --features model`.
+//!
+//! ## Determinism
+//!
+//! A model run with the same version, features, seed, and initial state produces
+//! the same trajectory regardless of thread count. Draw randomness through
+//! [`DetRng::from_context`], keyed on the run context and a salt, and set the
+//! model seed with [`ModelBuilder::with_seed`](model::ModelBuilder::with_seed).
+//! See the guide's reproducibility chapter for the model author's obligations.
+//!
+//! ## Stability
+//!
+//! Syren is pre-1.0: patch releases keep the public API; minor releases may break
+//! it with migration notes. Lower-level building blocks live in the [`advanced`]
+//! module and may change with less notice.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -97,10 +137,10 @@ pub use engine::types::{BoundaryID, ChannelID};
 pub use engine::types::{GPUAccessMode, GPUResourceID};
 
 pub use engine::activation::{ActivationOrder, RunContext};
-pub use engine::random::DetRng;
 pub use engine::boundary::{BoundaryChannelProfile, BoundaryContext, BoundaryResource};
 pub use engine::dot_export::DotExport;
 pub use engine::plan_display::PlanDisplay;
+pub use engine::random::DetRng;
 pub use engine::workers::{max_workers, worker_id};
 
 // Profiling public API
@@ -146,7 +186,7 @@ pub mod space;
 ///
 /// Import with:
 /// ```rust
-/// use abm_framework::prelude::*;
+/// use syren::prelude::*;
 /// ```
 pub mod prelude {
     pub use crate::{

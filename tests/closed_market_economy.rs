@@ -2,14 +2,12 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use abm_framework::advanced::EntityShards;
-use abm_framework::agents::AgentTemplate;
-use abm_framework::environment::EnvironmentBoundary;
-use abm_framework::messaging::{
-    BruteForceMessage, BucketMessage, Capacity, Message, MessageBufferSet,
-};
-use abm_framework::model::ModelBuilder;
-use abm_framework::{AccessSets, ComponentRegistry, Count, ECSResult, FnSystem, Read, Sum, Write};
+use syren::advanced::EntityShards;
+use syren::agents::AgentTemplate;
+use syren::environment::EnvironmentBoundary;
+use syren::messaging::{BruteForceMessage, BucketMessage, Capacity, Message, MessageBufferSet};
+use syren::model::ModelBuilder;
+use syren::{AccessSets, ComponentRegistry, Count, ECSResult, FnSystem, Read, Sum, Write};
 
 const HOUSEHOLDS: u32 = 4;
 
@@ -80,8 +78,8 @@ impl BucketMessage for TradeReceipt {
 
 #[derive(Clone, Copy)]
 struct EconomyIds {
-    household: abm_framework::ComponentID,
-    firm: abm_framework::ComponentID,
+    household: syren::ComponentID,
+    firm: syren::ComponentID,
 }
 
 fn register_components() -> (Arc<RwLock<ComponentRegistry>>, EconomyIds) {
@@ -101,7 +99,7 @@ fn register_components() -> (Arc<RwLock<ComponentRegistry>>, EconomyIds) {
     )
 }
 
-fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
+fn build_closed_market_model() -> (syren::model::Model, EconomyIds) {
     let (registry, ids) = register_components();
     let mut builder = ModelBuilder::new()
         .with_component_registry(Arc::clone(&registry))
@@ -336,7 +334,7 @@ fn build_closed_market_model() -> (abm_framework::model::Model, EconomyIds) {
     (model, ids)
 }
 
-fn spawn_fixture(model: &mut abm_framework::model::Model, ids: EconomyIds) {
+fn spawn_fixture(model: &mut syren::model::Model, ids: EconomyIds) {
     let world = model.ecs().world_ref();
     let household = model.agents().get("household").unwrap();
     for id in 0..HOUSEHOLDS {
@@ -395,7 +393,7 @@ struct EconomySnapshot {
     household_count: usize,
 }
 
-fn snapshot(model: &abm_framework::model::Model) -> ECSResult<EconomySnapshot> {
+fn snapshot(model: &syren::model::Model) -> ECSResult<EconomySnapshot> {
     let world = model.ecs().world_ref();
     let households = Arc::new(Mutex::new(Vec::<Household>::new()));
     let households_for_query = Arc::clone(&households);

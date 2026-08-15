@@ -11,7 +11,7 @@
 //! with a registry-assigned ID using [`ComponentDesc::with_id`]:
 //!
 //! ```
-//! use abm_framework::ComponentDesc;
+//! use syren::ComponentDesc;
 //!
 //! struct Health(f32);
 //!

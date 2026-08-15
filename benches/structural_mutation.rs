@@ -1,10 +1,10 @@
 use std::hint::black_box;
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use syren::{
     advanced::EntityShards, Bundle, Command, ComponentRegistry, ECSManager, ECSResult, Entity,
 };
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 const N: usize = 4096;
 
@@ -20,8 +20,8 @@ struct AddedValue {
 
 fn registry() -> (
     Arc<RwLock<ComponentRegistry>>,
-    abm_framework::ComponentID,
-    abm_framework::ComponentID,
+    syren::ComponentID,
+    syren::ComponentID,
 ) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let ids = {
@@ -36,7 +36,7 @@ fn registry() -> (
 
 fn world_with_core(
     registry: Arc<RwLock<ComponentRegistry>>,
-    core_id: abm_framework::ComponentID,
+    core_id: syren::ComponentID,
 ) -> ECSResult<(ECSManager, Vec<Entity>)> {
     let ecs = ECSManager::with_registry(EntityShards::new(4)?, registry);
     let world = ecs.world_ref();
@@ -223,7 +223,7 @@ fn structural_mutation_benchmarks(c: &mut Criterion) {
                 world
                     .defer(Command::DespawnBatchTagged {
                         entities,
-                        template_id: abm_framework::AgentTemplateId(0),
+                        template_id: syren::AgentTemplateId(0),
                     })
                     .unwrap();
                 ecs.apply_deferred_commands().unwrap();

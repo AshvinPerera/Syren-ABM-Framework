@@ -68,7 +68,9 @@ pub fn firm_predicted_profit_a61(
     (1.0 + predicted_ppi_inflation) * (1.0 + gamma_f) * previous_profit
 }
 
-// A.62
+// A.62. The argument list mirrors the paper's equation inputs one-to-one;
+// bundling them into a struct would obscure that mapping.
+#[allow(clippy::too_many_arguments)]
 pub fn firm_target_production_a62(
     predicted_demand: f64,
     phi_st_y: f64,

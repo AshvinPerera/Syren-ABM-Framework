@@ -1,0 +1,32 @@
+name: GPU tests (manual)
+
+# GPU execution tests need a real adapter, which the hosted runners do not
+# provide, so they are not part of the pull-request checks (the standard test
+# job skips them when no adapter is present). Trigger this workflow by hand on a
+# self-hosted runner labelled `gpu` to exercise the GPU paths on real hardware.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEV_TOOLCHAIN: 1.91.1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gpu:
+    name: GPU dispatch, equality, and messaging
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.DEV_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: GPU library tests
+        run: cargo test --all-features --lib
+      - name: GPU dispatch and CPU/GPU equality
+        run: cargo test --all-features --test gpu_dispatch_params
+      - name: GPU messaging economy
+        run: cargo test --all-features --test economy_messaging_gpu

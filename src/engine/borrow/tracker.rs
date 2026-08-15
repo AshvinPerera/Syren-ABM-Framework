@@ -94,7 +94,7 @@ impl BorrowTracker {
     ///   A value of `0` means the acquire methods will attempt exactly one
     ///   compare-exchange before failing.
     pub fn with_spin_limit(spin_limit: u32) -> Self {
-        // Phase 2.3: Heap-allocate `states` to avoid 32 KB on the stack.
+        // Heap-allocate `states` to avoid 32 KB on the stack.
         //
         // SAFETY: The layout is valid (non-zero size - COMPONENT_CAP > 0 and
         // AtomicUsize is at least 1 word).  `alloc_zeroed` returns zeroed
@@ -200,7 +200,7 @@ impl BorrowTracker {
                 .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                // Phase 3.1: record this component as touched.
+                // Record this component as touched.
                 self.mark_dirty(component_id);
                 return Ok(());
             }
@@ -319,7 +319,7 @@ impl BorrowTracker {
                 .compare_exchange_weak(0, 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                // Phase 3.1: record this component as touched.
+                // Record this component as touched.
                 self.mark_dirty(component_id);
                 return Ok(());
             }

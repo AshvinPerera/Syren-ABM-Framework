@@ -20,8 +20,8 @@
 //!
 //! ```text
 //! use std::sync::Arc;
-//! use abm_framework::environment::{Environment, EnvironmentBuilder, EnvironmentSystem};
-//! use abm_framework::{AccessSets, Scheduler, Stage};
+//! use syren::environment::{Environment, EnvironmentBuilder, EnvironmentSystem};
+//! use syren::{AccessSets, Scheduler, Stage};
 //!
 //! // 1. Declare parameters.
 //! let env: Arc<Environment> = EnvironmentBuilder::new()
@@ -52,7 +52,7 @@
 //! packed into a `wgpu` uniform buffer:
 //!
 //! ```text
-//! use abm_framework::environment::uniform::EnvUniformBuffer;
+//! use syren::environment::uniform::EnvUniformBuffer;
 //!
 //! let ubuf = EnvUniformBuffer::builder(Arc::clone(&env))
 //!     .include::<f32>("interest_rate")?

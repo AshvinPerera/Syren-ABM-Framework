@@ -30,8 +30,8 @@ pub mod scheduler;
 pub mod storage;
 pub mod systems;
 pub mod types;
-pub mod workers;
 pub mod worker_stage;
+pub mod workers;
 
 #[cfg(feature = "gpu")]
 pub mod dirty;

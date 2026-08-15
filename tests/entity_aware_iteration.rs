@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use syren::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentID, ComponentRegistry,
     ECSManager, ECSReference, ECSResult, Entity, Read, Scheduler, System, Write,
 };
@@ -107,14 +107,13 @@ fn entity_aware_tuple_iteration_returns_matching_entities() {
         .unwrap();
     let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen_capture = Arc::clone(&seen);
-    ecs.for_each_entity::<(Read<Velocity>, Write<Position>), _>(q, move |(
-        entity,
-        velocity,
-        position,
-    )| {
-        seen_capture.lock().push((entity, velocity.dx, position.x));
-        position.x += velocity.dx;
-    })
+    ecs.for_each_entity::<(Read<Velocity>, Write<Position>), _>(
+        q,
+        move |(entity, velocity, position)| {
+            seen_capture.lock().push((entity, velocity.dx, position.x));
+            position.x += velocity.dx;
+        },
+    )
     .unwrap();
 
     let mut seen = seen.lock().clone();
@@ -185,14 +184,14 @@ fn fallible_entity_iteration_propagates_error() {
         .unwrap();
     let err = ecs
         .for_each_entity_w1_fallible::<Position>(q, |_entity, _position| {
-            Err(abm_framework::ECSError::Execute(
-                abm_framework::ExecutionError::InternalExecutionError,
+            Err(syren::ECSError::Execute(
+                syren::ExecutionError::InternalExecutionError,
             ))
         })
         .unwrap_err();
 
     assert!(matches!(
         err,
-        abm_framework::ECSError::Execute(abm_framework::ExecutionError::InternalExecutionError)
+        syren::ECSError::Execute(syren::ExecutionError::InternalExecutionError)
     ));
 }

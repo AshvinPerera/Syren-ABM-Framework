@@ -1,4 +1,4 @@
-﻿//! Spawn and despawn operations for [`Archetype`].
+//! Spawn and despawn operations for [`Archetype`].
 //!
 //! This module implements [`Archetype::spawn_on`] and [`Archetype::despawn_on`],
 //! the two mutating entry points for adding and removing entities from an archetype.
@@ -270,14 +270,12 @@ impl Archetype {
 
             if let Some((moved_chunk, moved_row)) = moved_from {
                 Self::ensure_capacity(&mut meta, moved_chunk as usize + 1);
-                let moved_entity =
-                    meta.entity_positions[moved_chunk as usize][moved_row as usize];
+                let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize];
                 if moved_entity == Entity::PLACEHOLDER {
                     return Err(InternalViolation::DespawnMovedSlotMissingEntity.into());
                 }
 
-                meta.entity_positions[entity_chunk as usize][entity_row as usize] =
-                    moved_entity;
+                meta.entity_positions[entity_chunk as usize][entity_row as usize] = moved_entity;
 
                 shards
                     .set_location(
@@ -463,8 +461,8 @@ impl Archetype {
                 // stale entries beyond the (unchanged) archetype length.
                 for cleared in 0..offset {
                     let cleared_index = start + cleared;
-                    meta.entity_positions[cleared_index / CHUNK_CAP]
-                        [cleared_index % CHUNK_CAP] = Entity::PLACEHOLDER;
+                    meta.entity_positions[cleared_index / CHUNK_CAP][cleared_index % CHUNK_CAP] =
+                        Entity::PLACEHOLDER;
                 }
                 return Err(InternalViolation::SpawnSlotOccupied.into());
             }
@@ -530,8 +528,7 @@ impl Archetype {
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
             if let Some((moved_chunk, moved_row)) = moved_from {
-                let moved_entity =
-                    meta.entity_positions[moved_chunk as usize][moved_row as usize];
+                let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize];
                 if moved_entity == Entity::PLACEHOLDER {
                     return Err(InternalViolation::DespawnMovedSlotMissingEntity.into());
                 }
@@ -561,7 +558,9 @@ impl Archetype {
             .set_locations_grouped(&pending_moves)
             .map_err(ECSError::from)?;
         let despawn_targets: Vec<Entity> = targets.iter().map(|&(entity, _, _)| entity).collect();
-        shards.despawn_grouped(&despawn_targets).map_err(ECSError::from)?;
+        shards
+            .despawn_grouped(&despawn_targets)
+            .map_err(ECSError::from)?;
 
         Ok(())
     }

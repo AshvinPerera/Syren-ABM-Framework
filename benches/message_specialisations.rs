@@ -3,13 +3,13 @@
 use std::hint::black_box;
 use std::sync::{Arc, RwLock};
 
-use abm_framework::advanced::{ChannelAllocator, EntityShards};
-use abm_framework::messaging::{
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use syren::advanced::{ChannelAllocator, EntityShards};
+use syren::messaging::{
     BruteForceMessage, BucketMessage, Capacity, Message, MessageBufferSet, MessageRegistry,
     SpatialConfig, SpatialMessage, TargetedMessage,
 };
-use abm_framework::{AccessSets, ComponentRegistry, ECSManager, Entity, FnSystem, Scheduler};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use syren::{AccessSets, ComponentRegistry, ECSManager, Entity, FnSystem, Scheduler};
 
 const N: u32 = 4096;
 

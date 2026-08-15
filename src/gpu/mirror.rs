@@ -247,7 +247,7 @@ impl Mirror {
         if chunk_count == 0 {
             return Ok(());
         }
-        let require_aligned = (component_size % 4) == 0;
+        let require_aligned = component_size.is_multiple_of(4);
 
         let bytes_total = align_to_4(len * component_size);
         self.ensure_buffer(context, archetype.archetype_id(), component_id, bytes_total);
@@ -309,7 +309,7 @@ impl Mirror {
             let byte_off = row_off * component_size;
 
             // Ensure alignment for write_buffer
-            if (byte_off % 4) != 0 || (bytes % 4) != 0 {
+            if !byte_off.is_multiple_of(4) || !bytes.is_multiple_of(4) {
                 return self.upload_column_full(context, archetype, component_id, component_size);
             }
 

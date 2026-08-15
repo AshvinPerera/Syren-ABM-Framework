@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use abm_framework::{
+use syren::{
     advanced::{ChannelAllocator, EntityShards},
     AccessSets, ActivationOrder, BoundaryContext, BoundaryResource, Bundle, ChannelID, Command,
     ComponentRegistry, Count, ECSError, ECSManager, ECSReference, ECSResult, ExecutionError,
@@ -203,7 +203,7 @@ fn channel_dependency_cycle_is_rejected() {
 struct Marker(u8);
 
 struct SpawnMarkerSystem {
-    component_id: abm_framework::ComponentID,
+    component_id: syren::ComponentID,
     access: AccessSets,
 }
 
@@ -306,7 +306,7 @@ impl System for FirstVisitErrorSystem {
     }
 }
 
-fn world_with_visits(n: usize) -> (ECSManager, abm_framework::ComponentID) {
+fn world_with_visits(n: usize) -> (ECSManager, syren::ComponentID) {
     let shards = EntityShards::new(2).unwrap();
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let visit_id = {
@@ -532,7 +532,7 @@ struct DerivedB(#[allow(dead_code)] u32);
 fn derived_fixture() -> (
     ECSManager,
     std::sync::Arc<RwLock<ComponentRegistry>>,
-    abm_framework::ComponentID,
+    syren::ComponentID,
 ) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let a_id = {
@@ -566,9 +566,15 @@ fn from_queries_packs_disjoint_writes_and_splits_conflicts() {
         .unwrap();
 
     let mut scheduler = Scheduler::new();
-    scheduler.add_system(FnSystem::from_queries(1, "writes_a", &[&q_write_a], |_| Ok(())));
-    scheduler.add_system(FnSystem::from_queries(2, "writes_b", &[&q_write_b], |_| Ok(())));
-    scheduler.add_system(FnSystem::from_queries(3, "reads_a", &[&q_read_a], |_| Ok(())));
+    scheduler.add_system(FnSystem::from_queries(1, "writes_a", &[&q_write_a], |_| {
+        Ok(())
+    }));
+    scheduler.add_system(FnSystem::from_queries(2, "writes_b", &[&q_write_b], |_| {
+        Ok(())
+    }));
+    scheduler.add_system(FnSystem::from_queries(3, "reads_a", &[&q_read_a], |_| {
+        Ok(())
+    }));
     scheduler.try_rebuild().unwrap();
 
     let stages: Vec<Vec<usize>> = scheduler
@@ -601,9 +607,8 @@ fn from_queries_normalises_read_write_overlap_to_write_only() {
         .build()
         .unwrap();
 
-    let system = FnSystem::from_queries(9, "read_then_write_a", &[&q_read_a, &q_write_a], |_| {
-        Ok(())
-    });
+    let system =
+        FnSystem::from_queries(9, "read_then_write_a", &[&q_read_a, &q_write_a], |_| Ok(()));
 
     // Write-only after normalisation, and the merged set passes validation
     // (a raw union would trip the read/write self-alias check).

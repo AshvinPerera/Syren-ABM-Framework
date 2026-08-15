@@ -3,18 +3,16 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(any(feature = "model", feature = "gpu"))]
-use abm_framework::advanced::EntityShards;
-use abm_framework::{AccessSets, ComponentRegistry, ECSReference, ECSResult, Read, System, Write};
+use syren::advanced::EntityShards;
+use syren::{AccessSets, ComponentRegistry, ECSReference, ECSResult, Read, System, Write};
 
 #[cfg(feature = "model")]
-use abm_framework::agents::AgentTemplate;
+use syren::agents::AgentTemplate;
 #[cfg(feature = "model")]
-use abm_framework::model::ModelBuilder;
+use syren::model::ModelBuilder;
 
 #[cfg(feature = "gpu")]
-use abm_framework::{
-    Bundle, Command, ECSManager, GPUPod, GpuSystem, Scheduler, Signature, SystemBackend,
-};
+use syren::{Bundle, Command, ECSManager, GPUPod, GpuSystem, Scheduler, Signature, SystemBackend};
 
 pub const AXTELL_WIDTH: u32 = 50;
 pub const AXTELL_HEIGHT: u32 = 50;
@@ -282,7 +280,7 @@ impl GrowbackSystem {
 }
 
 impl System for GrowbackSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         1
     }
 
@@ -304,7 +302,7 @@ pub struct MoveHarvestAgeSystem {
 impl MoveHarvestAgeSystem {
     pub fn new(
         state: Arc<Mutex<SugarscapeState>>,
-        agent_id: abm_framework::ComponentID,
+        agent_id: syren::ComponentID,
         consumes: u32,
         produces: u32,
     ) -> Self {
@@ -317,7 +315,7 @@ impl MoveHarvestAgeSystem {
 }
 
 impl System for MoveHarvestAgeSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         2
     }
 
@@ -366,7 +364,7 @@ pub struct CpuMetabolismSystem {
 }
 
 impl CpuMetabolismSystem {
-    pub fn new(agent_id: abm_framework::ComponentID, consumes: u32, produces: u32) -> Self {
+    pub fn new(agent_id: syren::ComponentID, consumes: u32, produces: u32) -> Self {
         let mut access = AccessSets::default();
         access.write.set(agent_id);
         access.consumes.insert(consumes);
@@ -376,7 +374,7 @@ impl CpuMetabolismSystem {
 }
 
 impl System for CpuMetabolismSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         3
     }
 
@@ -399,7 +397,7 @@ pub struct GpuMetabolismSystem {
 
 #[cfg(feature = "gpu")]
 impl GpuMetabolismSystem {
-    pub fn new(agent_id: abm_framework::ComponentID, consumes: u32, produces: u32) -> Self {
+    pub fn new(agent_id: syren::ComponentID, consumes: u32, produces: u32) -> Self {
         let mut write = Signature::default();
         write.set(agent_id);
         let mut access = AccessSets {
@@ -414,7 +412,7 @@ impl GpuMetabolismSystem {
 
 #[cfg(feature = "gpu")]
 impl System for GpuMetabolismSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         3
     }
 
@@ -488,7 +486,7 @@ pub struct ReplacementSystem {
 impl ReplacementSystem {
     pub fn new(
         state: Arc<Mutex<SugarscapeState>>,
-        agent_id: abm_framework::ComponentID,
+        agent_id: syren::ComponentID,
         consumes: u32,
     ) -> Self {
         let mut access = AccessSets::default();
@@ -499,7 +497,7 @@ impl ReplacementSystem {
 }
 
 impl System for ReplacementSystem {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         4
     }
 
@@ -533,7 +531,7 @@ impl System for ReplacementSystem {
     }
 }
 
-pub fn register_components() -> (Arc<RwLock<ComponentRegistry>>, abm_framework::ComponentID) {
+pub fn register_components() -> (Arc<RwLock<ComponentRegistry>>, syren::ComponentID) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let agent_id = {
         let mut reg = registry.write().unwrap();
@@ -556,7 +554,7 @@ pub fn initial_agents(state: &mut SugarscapeState) -> Vec<SugarAgent> {
 #[cfg(feature = "gpu")]
 pub fn spawn_agents_raw(
     ecs: &ECSManager,
-    agent_id: abm_framework::ComponentID,
+    agent_id: syren::ComponentID,
     agents: &[SugarAgent],
 ) -> ECSResult<()> {
     let world = ecs.world_ref();
@@ -572,7 +570,7 @@ pub fn spawn_agents_raw(
 #[cfg(feature = "gpu")]
 pub fn make_scheduler(
     state: Arc<Mutex<SugarscapeState>>,
-    agent_id: abm_framework::ComponentID,
+    agent_id: syren::ComponentID,
     use_gpu_metabolism: bool,
 ) -> Scheduler {
     let grow_done = 0;
@@ -624,7 +622,7 @@ pub fn build_raw_world(
     ECSManager,
     Scheduler,
     Arc<Mutex<SugarscapeState>>,
-    abm_framework::ComponentID,
+    syren::ComponentID,
 )> {
     let (registry, agent_id) = register_components();
     let mut state = SugarscapeState::new(config);
@@ -646,9 +644,9 @@ pub fn build_model(
     config: SugarscapeConfig,
     use_gpu_metabolism: bool,
 ) -> (
-    abm_framework::model::Model,
+    syren::model::Model,
     Arc<Mutex<SugarscapeState>>,
-    abm_framework::ComponentID,
+    syren::ComponentID,
 ) {
     let (registry, agent_id) = register_components();
     let mut state = SugarscapeState::new(config);
@@ -737,6 +735,6 @@ pub fn build_model(
 }
 
 #[cfg(feature = "model")]
-pub fn model_agents(model: &abm_framework::model::Model) -> ECSResult<Vec<SugarAgent>> {
+pub fn model_agents(model: &syren::model::Model) -> ECSResult<Vec<SugarAgent>> {
     collect_agents(model.ecs().world_ref())
 }

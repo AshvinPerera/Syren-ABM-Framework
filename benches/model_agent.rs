@@ -1,12 +1,12 @@
 use std::hint::black_box;
 use std::sync::{Arc, RwLock};
 
-use abm_framework::advanced::EntityShards;
-use abm_framework::agents::AgentTemplate;
-use abm_framework::model::ModelBuilder;
-use abm_framework::Write;
-use abm_framework::{AccessSets, ComponentRegistry, FnSystem};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use syren::advanced::EntityShards;
+use syren::agents::AgentTemplate;
+use syren::model::ModelBuilder;
+use syren::Write;
+use syren::{AccessSets, ComponentRegistry, FnSystem};
 
 const AGENTS: usize = 4096;
 const AGENTS_DESPAWN_LARGE: usize = 65_536;
@@ -17,7 +17,7 @@ struct BenchAgent {
     value: u32,
 }
 
-fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, abm_framework::ComponentID) {
+fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, syren::ComponentID) {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let agent_id = {
         let mut reg = registry.write().unwrap();
@@ -28,7 +28,7 @@ fn make_registry() -> (Arc<RwLock<ComponentRegistry>>, abm_framework::ComponentI
     (registry, agent_id)
 }
 
-fn build_model(agent_id: abm_framework::ComponentID) -> abm_framework::model::Model {
+fn build_model(agent_id: syren::ComponentID) -> syren::model::Model {
     let (registry, _) = make_registry();
     let registered = AgentTemplate::builder("bench_agent")
         .with_component::<BenchAgent>(agent_id)
@@ -43,7 +43,7 @@ fn build_model(agent_id: abm_framework::ComponentID) -> abm_framework::model::Mo
         .unwrap()
 }
 
-fn spawn_agents(model: &mut abm_framework::model::Model, agent_id: abm_framework::ComponentID) {
+fn spawn_agents(model: &mut syren::model::Model, agent_id: syren::ComponentID) {
     let world = model.ecs().world_ref();
     let template = model.agents().get("bench_agent").unwrap();
     for i in 0..AGENTS {

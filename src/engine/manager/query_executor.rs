@@ -409,7 +409,14 @@ where
             if let Some(task) = tasks.first() {
                 let mut local = init();
                 let mut read_views: SmallVec<[&[u8]; 8]> = SmallVec::with_capacity(views.n_reads);
-                fold_reduce_task(&views, &query, task, &mut local, &*fold_chunk, &mut read_views);
+                fold_reduce_task(
+                    &views,
+                    &query,
+                    task,
+                    &mut local,
+                    &*fold_chunk,
+                    &mut read_views,
+                );
                 partials
                     .lock()
                     .map_err(|_| ExecutionError::LockPoisoned {
@@ -671,7 +678,13 @@ fn run_chunks(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
+                            fill_range_slices(
+                                views,
+                                query,
+                                range,
+                                &mut read_views,
+                                &mut write_views,
+                            );
                             f(&read_views, &mut write_views);
                         }
                     }
@@ -727,7 +740,13 @@ fn run_chunks_entity(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
+                            fill_range_slices(
+                                views,
+                                query,
+                                range,
+                                &mut read_views,
+                                &mut write_views,
+                            );
                             f(
                                 &entity_chunks[range.chunk][range.row_lo..range.row_hi],
                                 &read_views,
@@ -806,7 +825,13 @@ fn run_chunks_fallible(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
+                            fill_range_slices(
+                                views,
+                                query,
+                                range,
+                                &mut read_views,
+                                &mut write_views,
+                            );
 
                             if let Err(e) = f(&read_views, &mut write_views) {
                                 latch_iteration_error(&err, ordinal, e);
@@ -890,7 +915,13 @@ fn run_chunks_entity_fallible(
                             }
                         }
                         ActivationOrder::Sequential | ActivationOrder::ShuffleChunks => {
-                            fill_range_slices(views, query, range, &mut read_views, &mut write_views);
+                            fill_range_slices(
+                                views,
+                                query,
+                                range,
+                                &mut read_views,
+                                &mut write_views,
+                            );
 
                             if let Err(e) = f(
                                 &entity_chunks[range.chunk][range.row_lo..range.row_hi],

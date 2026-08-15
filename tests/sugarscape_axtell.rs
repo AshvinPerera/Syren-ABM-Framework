@@ -3,11 +3,11 @@ mod sugarscape;
 #[cfg(feature = "model")]
 use std::collections::HashSet;
 
-#[cfg(any(feature = "model", feature = "gpu"))]
-use abm_framework::ECSResult;
-#[cfg(feature = "gpu")]
-use abm_framework::{ECSError, ExecutionError};
 use sugarscape::axtell::*;
+#[cfg(any(feature = "model", feature = "gpu"))]
+use syren::ECSResult;
+#[cfg(feature = "gpu")]
+use syren::{ECSError, ExecutionError};
 
 #[cfg(feature = "model")]
 fn assert_unique_occupancy(agents: &[SugarAgent], width: u32, height: u32) {
@@ -61,7 +61,7 @@ fn axtell_replaces_dead_agents_with_newborns() -> ECSResult<()> {
 
     let world = model.ecs().world_ref();
     let q = world.query()?.write::<SugarAgent>()?.build()?;
-    world.for_each::<(abm_framework::Write<SugarAgent>,), _>(q, |agent| {
+    world.for_each::<(syren::Write<SugarAgent>,), _>(q, |agent| {
         if agent.0.id == 0 {
             agent.0.wealth = 0;
             agent.0.max_age = 0;

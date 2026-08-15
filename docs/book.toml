@@ -1,0 +1,19 @@
+[book]
+title = "The Syren Guide"
+authors = ["Ashvin Perera"]
+description = "User and contributor guide for the Syren agent-based modelling framework."
+language = "en"
+src = "src"
+
+[rust]
+edition = "2021"
+
+[output.html]
+site-url = "/Syren-ABM-Framework/"
+git-repository-url = "https://github.com/AshvinPerera/Syren-ABM-Framework"
+edit-url-template = "https://github.com/AshvinPerera/Syren-ABM-Framework/edit/master/docs/{path}"
+default-theme = "rust"
+
+[output.html.fold]
+enable = true
+level = 1

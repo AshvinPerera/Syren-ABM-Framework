@@ -8,10 +8,22 @@ use super::state::{GoodsClearingPolicy, MacroEnvironment};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
-    Io { path: PathBuf, message: String },
-    Parse { line: usize, message: String },
-    UnknownKey { line: usize, key: String },
-    UnknownScenario { name: String, available: Vec<String> },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
+    Parse {
+        line: usize,
+        message: String,
+    },
+    UnknownKey {
+        line: usize,
+        key: String,
+    },
+    UnknownScenario {
+        name: String,
+        available: Vec<String>,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -132,15 +144,16 @@ pub fn apply_config_str(
     environment: &mut MacroEnvironment,
 ) -> Result<(), ConfigError> {
     let blocks = parse_blocks(text)?;
-    let apply_block = |name: &str, environment: &mut MacroEnvironment| -> Result<bool, ConfigError> {
-        let Some((_, settings)) = blocks.iter().find(|(block, _)| block == name) else {
-            return Ok(false);
+    let apply_block =
+        |name: &str, environment: &mut MacroEnvironment| -> Result<bool, ConfigError> {
+            let Some((_, settings)) = blocks.iter().find(|(block, _)| block == name) else {
+                return Ok(false);
+            };
+            for (line, key, value) in settings {
+                apply_setting(key, value, *line, environment)?;
+            }
+            Ok(true)
         };
-        for (line, key, value) in settings {
-            apply_setting(key, value, *line, environment)?;
-        }
-        Ok(true)
-    };
     apply_block("defaults", environment)?;
     if let Some(scenario) = scenario {
         let path = format!("scenarios.{scenario}");

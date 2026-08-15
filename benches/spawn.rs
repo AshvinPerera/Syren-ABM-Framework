@@ -1,9 +1,9 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::advanced::EntityShards;
-use abm_framework::{AgentTemplateId, Command, ECSManager, Signature};
-use abm_framework::{BatchColumn, SpawnBatch};
+use syren::advanced::EntityShards;
+use syren::{AgentTemplateId, Command, ECSManager, Signature};
+use syren::{BatchColumn, SpawnBatch};
 
 mod common;
 use common::*;

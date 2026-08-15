@@ -322,8 +322,61 @@ fn same_seed_reproduces_and_distinct_seeds_diverge() {
     assert_ne!(
         a, c,
         "distinct seeds must diverge; if they do not, the model seed is not \
-         reaching the draw sites (RunContext::simulation_seed is always 0, so \
-         MacroRng folds the seed in itself)"
+         reaching the draw sites through RunContext::simulation_seed"
+    );
+}
+
+#[test]
+fn csv_headers_are_single_line_with_unique_columns() {
+    for columns in [HEADLINE_COLUMNS, AGGREGATE_COLUMNS, FIRM_COLUMNS] {
+        let header = csv_header(columns);
+        assert!(
+            !header.contains('\n'),
+            "a CSV header must be one physical line: {header}"
+        );
+        assert_eq!(
+            header.split(',').count(),
+            columns.len(),
+            "joined header field count must equal the column list length"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for name in columns {
+            assert!(seen.insert(name), "duplicate column name: {name}");
+        }
+    }
+}
+
+#[test]
+fn csv_rows_match_their_headers_column_for_column() {
+    let mut example = build_macroeconomy_model(
+        MacroeconomyConfig {
+            ticks: 1,
+            ..MacroeconomyConfig::default()
+        },
+        FixtureDataProvider,
+    )
+    .unwrap();
+    example.model.tick().unwrap();
+    let state = macro_state(&example.model).unwrap();
+
+    // Numeric fields never contain a comma, so the field count is the number of
+    // comma-separated pieces.
+    assert_eq!(
+        headline_row(&state).split(',').count(),
+        HEADLINE_COLUMNS.len(),
+        "headline row width differs from HEADLINE_COLUMNS"
+    );
+    assert_eq!(
+        aggregate_row(&state).split(',').count(),
+        AGGREGATE_COLUMNS.len(),
+        "aggregate row width differs from AGGREGATE_COLUMNS"
+    );
+    assert_eq!(
+        firm_row(state.quarter, &FirmProbe::default())
+            .split(',')
+            .count(),
+        FIRM_COLUMNS.len(),
+        "firm row width differs from FIRM_COLUMNS"
     );
 }
 

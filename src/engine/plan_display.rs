@@ -5,7 +5,7 @@
 //! directly with `println!`, `write!`, or [`ToString::to_string`]:
 //!
 //! ```text
-//! use abm_framework::engine::plan_display::PlanDisplay;
+//! use syren::engine::plan_display::PlanDisplay;
 //! println!("{}", PlanDisplay(&scheduler));
 //! ```
 //!

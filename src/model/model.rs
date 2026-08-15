@@ -41,6 +41,10 @@ pub struct Model {
     pub(crate) environment: Arc<Environment>,
     pub(crate) agents: AgentRegistry,
     pub(crate) scheduler: Scheduler,
+    /// Global RNG seed configured through [`ModelBuilder::with_seed`].
+    ///
+    /// [`ModelBuilder::with_seed`]: crate::model::ModelBuilder::with_seed
+    pub(crate) seed: u64,
     pub(crate) sub_schedulers: Vec<SubScheduler>,
     pub(crate) nested_models: Vec<NestedModel>,
     pub(crate) environment_boundary_id: BoundaryID,
@@ -52,6 +56,17 @@ pub struct Model {
 }
 
 impl Model {
+    /// Returns the global RNG seed configured through
+    /// [`ModelBuilder::with_seed`](crate::model::ModelBuilder::with_seed).
+    ///
+    /// This is the value delivered to systems as `RunContext::simulation_seed`
+    /// on the root scheduler and every shared sub-scheduler. Nested models are
+    /// isolated worlds and report the seed configured by their own builders.
+    #[inline]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
     /// Runs one simulation tick.
     ///
     /// Nested models are isolated worlds. Each nested child completes its own

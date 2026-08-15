@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use Syren in academic work, please cite it as below."
+title: "Syren"
+abstract: >-
+  A parallel Rust framework for agent-based models with archetype-ECS storage,
+  deterministic stage scheduling, messaging, environments, and optional GPU
+  execution.
+type: software
+authors:
+  - family-names: "Perera"
+    given-names: "Ashvin"
+version: "0.6.0-rc.1"
+license: MIT
+repository-code: "https://github.com/AshvinPerera/Syren-ABM-Framework"
+url: "https://github.com/AshvinPerera/Syren-ABM-Framework"
+keywords:
+  - agent-based modelling
+  - simulation
+  - entity-component-system
+  - parallel computing
+  - reproducibility

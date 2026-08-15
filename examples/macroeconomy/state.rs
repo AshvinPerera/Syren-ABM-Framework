@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use abm_framework::{DetRng, RunContext};
+use syren::{DetRng, RunContext};
 
 use super::accounting::{AccountingReport, GdpIdentity};
 use super::calibration::CalibrationParameters;
@@ -105,22 +105,23 @@ pub struct MacroRng {
 }
 
 impl MacroRng {
-    /// Keys a stream on the run context, the model's own seed, and a salt.
+    /// Keys a stream on the run context and a salt.
     ///
-    /// The model seed is folded in explicitly because `ModelBuilder` exposes no
-    /// `with_seed`, leaving `RunContext::simulation_seed` permanently zero
-    /// (`src/engine/activation.rs:103`). Without this fold every seed would
-    /// produce an identical trajectory.
-    pub fn new(context: RunContext, model_seed: u64, salt: u64) -> Self {
+    /// The model seed reaches the draw site through
+    /// `RunContext::simulation_seed`, which `ModelBuilder::with_seed` sets on the
+    /// root scheduler and every shared sub-scheduler. `DetRng::from_context`
+    /// folds `(simulation_seed, tick, system_id, salt)`, so distinct seeds yield
+    /// distinct streams and the draw is independent of the thread count.
+    pub fn new(context: RunContext, salt: u64) -> Self {
         Self {
-            inner: DetRng::from_context(context, salt ^ model_seed.rotate_left(17)),
+            inner: DetRng::from_context(context, salt),
         }
     }
 
     /// Keys a stream on an agent id, so each agent draws independently of the
     /// order in which agents happen to be visited.
-    pub fn for_agent(context: RunContext, model_seed: u64, salt: u64, agent_id: u64) -> Self {
-        Self::new(context, model_seed, salt ^ agent_id.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    pub fn for_agent(context: RunContext, salt: u64, agent_id: u64) -> Self {
+        Self::new(context, salt ^ agent_id.wrapping_mul(0x9E37_79B9_7F4A_7C15))
     }
 
     pub fn unit_f64(&mut self) -> f64 {
@@ -332,6 +333,9 @@ pub struct CountryParameters {
 /// balance sheets consistently is the population generator's job.
 fn banded_sector_matrix(diagonal: f64, off_diagonal_total: f64) -> [[f64; SECTORS]; SECTORS] {
     let mut matrix = [[0.0; SECTORS]; SECTORS];
+    // `s` selects the matrix row and drives the circular band arithmetic below,
+    // so a range loop is clearer than indexing a single iterator.
+    #[allow(clippy::needless_range_loop)]
     for s in 0..SECTORS {
         let mut weights = [0.0; SECTORS];
         let mut weight_sum = 0.0;
@@ -882,7 +886,7 @@ impl MacroEnvironment {
     ///
     /// `context` comes from `ECSReference::run_context()`.
     pub fn rng(&self, context: RunContext, salt: u64) -> MacroRng {
-        MacroRng::new(context, self.seed, salt)
+        MacroRng::new(context, salt)
     }
 
     /// Opens a per-agent deterministic stream.
@@ -891,7 +895,7 @@ impl MacroEnvironment {
     /// agent, not on the position at which the agent happens to be visited,
     /// which is what makes the loop safe to parallelise.
     pub fn rng_for_agent(&self, context: RunContext, salt: u64, agent_id: u64) -> MacroRng {
-        MacroRng::for_agent(context, self.seed, salt, agent_id)
+        MacroRng::for_agent(context, salt, agent_id)
     }
 }
 
@@ -917,6 +921,9 @@ pub struct LoanBook {
 }
 
 impl LoanBook {
+    // A loan record carries every one of these fields; a parameter object would
+    // just be the `Loan` struct this method already constructs.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         bank_id: u32,

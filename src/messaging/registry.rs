@@ -88,10 +88,8 @@ impl SpatialConfig {
 
         // A circle whose bounding box lies entirely outside the grid covers
         // no cells. The comparison form also routes NaN inputs here.
-        let intersects = cx + r >= 0.0
-            && cy + r >= 0.0
-            && cx - r < self.width
-            && cy - r < self.height;
+        let intersects =
+            cx + r >= 0.0 && cy + r >= 0.0 && cx - r < self.width && cy - r < self.height;
         if !intersects {
             return (1, 0, 1, 0);
         }

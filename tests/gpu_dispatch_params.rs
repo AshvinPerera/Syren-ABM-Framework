@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use syren::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry, ECSError, ECSManager,
     ECSReference, ECSResult, ExecutionError, GPUPod, GpuSystem, Signature, System, SystemBackend,
 };
@@ -25,7 +25,7 @@ struct CaptureDispatchParams {
 }
 
 impl CaptureDispatchParams {
-    fn new(value_id: abm_framework::ComponentID) -> Self {
+    fn new(value_id: syren::ComponentID) -> Self {
         let mut write = Signature::default();
         write.set(value_id);
         Self {
@@ -38,7 +38,7 @@ impl CaptureDispatchParams {
 }
 
 impl System for CaptureDispatchParams {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         31
     }
 
@@ -137,7 +137,7 @@ fn run_gpu_dispatch_params_test() -> ECSResult<()> {
     let events = world.apply_deferred_commands()?;
     let entities: Vec<_> = events.spawned.iter().map(|event| event.entity).collect();
 
-    let mut scheduler = abm_framework::Scheduler::new();
+    let mut scheduler = syren::Scheduler::new();
     scheduler.add_system(CaptureDispatchParams::new(value_id));
     world.run(&mut scheduler)?;
 

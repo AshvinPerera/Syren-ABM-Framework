@@ -22,7 +22,7 @@
 /// ## Usage
 ///
 /// ```no_run
-/// use abm_framework::{init, shutdown, span};
+/// use syren::{init, shutdown, span};
 ///
 /// init("profile/trace.json");
 ///

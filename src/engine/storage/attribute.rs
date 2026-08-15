@@ -1,4 +1,4 @@
-﻿/// A chunked, contiguous, column-oriented storage container for elements of type `T`.
+/// A chunked, contiguous, column-oriented storage container for elements of type `T`.
 ///
 /// `Attribute<T>` stores elements in fixed-size chunks of capacity `CHUNK_CAP`,
 /// each chunk represented as an array of `MaybeUninit<T>`. All elements are stored
@@ -751,7 +751,10 @@ impl<T> Attribute<T> {
     /// Returns [`AttributeError::IndexOverflow`] if the resulting length would
     /// exceed what `(ChunkID, RowID)` coordinates can address. The attribute
     /// is unchanged in that case.
-    pub fn extend_from_vec(&mut self, mut values: Vec<T>) -> Result<(usize, usize), AttributeError> {
+    pub fn extend_from_vec(
+        &mut self,
+        mut values: Vec<T>,
+    ) -> Result<(usize, usize), AttributeError> {
         let count = values.len();
         let start = self.length;
         if count == 0 {
@@ -765,7 +768,8 @@ impl<T> Attribute<T> {
             .map_err(|_| AttributeError::IndexOverflow("ChunkID"))?;
 
         let needed_chunks = (start + count).div_ceil(CHUNK_CAP);
-        self.chunks.reserve(needed_chunks.saturating_sub(self.chunks.len()));
+        self.chunks
+            .reserve(needed_chunks.saturating_sub(self.chunks.len()));
 
         let source = values.as_ptr();
         let mut copied = 0usize;
@@ -843,7 +847,8 @@ impl<T> Attribute<T> {
         }
 
         let needed_chunks = (start + count).div_ceil(CHUNK_CAP);
-        self.chunks.reserve(needed_chunks.saturating_sub(self.chunks.len()));
+        self.chunks
+            .reserve(needed_chunks.saturating_sub(self.chunks.len()));
 
         for &(chunk, row) in rows {
             self.ensure_last_chunk();
@@ -915,7 +920,8 @@ impl<T> Attribute<T> {
         }
 
         let needed_chunks = (start + count).div_ceil(CHUNK_CAP);
-        self.chunks.reserve(needed_chunks.saturating_sub(self.chunks.len()));
+        self.chunks
+            .reserve(needed_chunks.saturating_sub(self.chunks.len()));
 
         let base = values.as_ptr();
         for &index in order {
@@ -1000,8 +1006,7 @@ impl<T> Attribute<T> {
             // into the (logically vacated) hole. The hole's previous bytes
             // are intentionally not dropped - see the method contract.
             unsafe {
-                let last_value =
-                    ptr::read(self.get_slot_unchecked(last_chunk, last_row).as_ptr());
+                let last_value = ptr::read(self.get_slot_unchecked(last_chunk, last_row).as_ptr());
                 ptr::write(
                     self.get_slot_unchecked(chunk as usize, row as usize)
                         .as_mut_ptr(),

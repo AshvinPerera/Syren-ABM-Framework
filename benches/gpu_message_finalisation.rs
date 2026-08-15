@@ -3,17 +3,15 @@
 use std::hint::black_box;
 use std::sync::{Arc, Mutex, RwLock};
 
-use abm_framework::advanced::EntityShards;
-use abm_framework::agents::AgentTemplate;
-use abm_framework::messaging::{
-    BruteForceMessage, Capacity, GpuMessage, Message, MessageBufferSet,
-};
-use abm_framework::model::ModelBuilder;
-use abm_framework::{
+use criterion::{criterion_group, criterion_main, Criterion};
+use syren::advanced::EntityShards;
+use syren::agents::AgentTemplate;
+use syren::messaging::{BruteForceMessage, Capacity, GpuMessage, Message, MessageBufferSet};
+use syren::model::ModelBuilder;
+use syren::{
     AccessSets, ComponentRegistry, ECSError, ECSReference, ECSResult, ExecutionError, GPUPod,
     GpuSystem, System, SystemBackend,
 };
-use criterion::{criterion_group, criterion_main, Criterion};
 
 const N: usize = 4096;
 
@@ -43,14 +41,14 @@ unsafe impl GpuMessage for GpuOrder {}
 
 struct GpuOrderProducer {
     access: AccessSets,
-    resources: [abm_framework::GPUResourceID; 1],
-    writes: [abm_framework::GPUResourceID; 1],
+    resources: [syren::GPUResourceID; 1],
+    writes: [syren::GPUResourceID; 1],
 }
 
 impl GpuOrderProducer {
     fn new(
-        agent_id: abm_framework::ComponentID,
-        handle: abm_framework::messaging::GpuMessageHandle<GpuOrder>,
+        agent_id: syren::ComponentID,
+        handle: syren::messaging::GpuMessageHandle<GpuOrder>,
     ) -> Self {
         let mut access = AccessSets::default();
         access.read.set(agent_id);
@@ -65,7 +63,7 @@ impl GpuOrderProducer {
 }
 
 impl System for GpuOrderProducer {
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         1
     }
 
@@ -138,16 +136,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         128
     }
 
-    fn uses_resources(&self) -> &[abm_framework::GPUResourceID] {
+    fn uses_resources(&self) -> &[syren::GPUResourceID] {
         &self.resources
     }
 
-    fn writes_resources(&self) -> &[abm_framework::GPUResourceID] {
+    fn writes_resources(&self) -> &[syren::GPUResourceID] {
         &self.writes
     }
 }
 
-fn build_model() -> ECSResult<(abm_framework::model::Model, Arc<Mutex<usize>>)> {
+fn build_model() -> ECSResult<(syren::model::Model, Arc<Mutex<usize>>)> {
     let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
     let agent_id = {
         let mut reg = registry.write().unwrap();
@@ -178,7 +176,7 @@ fn build_model() -> ECSResult<(abm_framework::model::Model, Arc<Mutex<usize>>)> 
         )
         .unwrap()
         .with_system(GpuOrderProducer::new(agent_id, orders))
-        .with_system(abm_framework::FnSystem::new(
+        .with_system(syren::FnSystem::new(
             2,
             "count_orders",
             consume,

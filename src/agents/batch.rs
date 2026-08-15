@@ -67,8 +67,7 @@ impl<'t> AgentBatch<'t> {
             });
         }
         let len = values.len();
-        self.columns
-            .insert(component_id, (Box::new(values), len));
+        self.columns.insert(component_id, (Box::new(values), len));
         Ok(self)
     }
 
