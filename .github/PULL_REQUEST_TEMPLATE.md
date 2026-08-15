@@ -22,7 +22,7 @@ item only if it is genuinely not applicable, and say why.
       combinations.
 - [ ] **Tests** — new or changed behaviour is covered by tests.
 - [ ] **Documentation** — rustdoc and, where relevant, the mdBook guide are
-      updated. Documentation describes the code as it is.
+      updated.
 - [ ] **Benchmarks** — performance-sensitive changes are measured, and any
       quoted number includes its hardware, features, build profile, population,
       and command.

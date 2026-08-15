@@ -59,30 +59,10 @@ change: call it out in the pull request and the changelog.
 
 ## Documentation
 
-- **rustdoc** is the authority for the public Rust API. Document changed public
+- **rustdoc** is the reference for the public Rust API. Document changed public
   items with their behaviour, errors, and required Cargo features.
 - The **mdBook guide** (under `docs/`) is the user and contributor guide. Build
   it with `mdbook build docs`.
-- Keep documentation, doc comments, and code comments describing the code **as
-  it is**. Do not describe past behaviour, migration history, or implementation
-  phases; the changelog is the place for change history.
-
-### Documentation style
-
-- Prefer present tense and factual wording. Avoid "fast", "easy", or
-  "production-ready" unless a measurement or acceptance criterion defines the
-  term.
-- Map every statement to current source types, module documentation, or tests
-  before writing it.
-- State the required Cargo features beside examples, and state limits beside
-  guarantees.
-- Include a performance number only with its hardware, compiler, features, build
-  profile, population, and command.
-- Link method and type names to their rustdoc rather than duplicating
-  signatures. Every guide code block is included from compiled source, compiled
-  as a doctest, or marked as non-executable pseudocode.
-- Give each output schema (for example, a CSV header) a single source of truth
-  next to the code that produces it.
 
 ## Pull requests
 
