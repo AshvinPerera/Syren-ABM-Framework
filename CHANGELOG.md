@@ -76,6 +76,9 @@ accumulates as the release lands; see the migration notes at its end.
   rustdoc, `cargo package` with content assertions, and an external-consumer
   smoke build against the packaged artifact. A manual workflow runs the GPU
   tests on a self-hosted runner.
+- Added a Pages workflow that builds the mdBook guide, checks internal links,
+  and deploys it to GitHub Pages on the default branch; a weekly RustSec audit
+  workflow; and Dependabot updates for Cargo and GitHub Actions.
 - Pinned the development toolchain to Rust 1.91.1 (`rust-toolchain.toml`) with
   `rustfmt` and `clippy`; the library MSRV remains 1.87.
 - Resolved strict `clippy` (`--all-targets --all-features -D warnings`) and
