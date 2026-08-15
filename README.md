@@ -20,8 +20,13 @@ there is no separate model-definition language.
 | Guide | <https://ashvinperera.github.io/Syren-ABM-Framework/> |
 | API reference | <https://docs.rs/syren> |
 
-Syren is pre-1.0; see the [compatibility policy](https://ashvinperera.github.io/Syren-ABM-Framework/reference/compatibility.html).
-(The docs.rs and crates.io links resolve once the crate is published.)
+Syren is pre-1.0; see the [compatibility policy](docs/src/reference/compatibility.md).
+
+> **Note:** the guide and API-reference links above are the destinations they
+> will have once published. The guide goes live on GitHub Pages when this work
+> merges to `master` and Pages is enabled; `docs.rs` and `crates.io` resolve
+> once the crate is published. Until then, read the guide sources under
+> [`docs/src`](docs/src).
 
 ## Capabilities
 
