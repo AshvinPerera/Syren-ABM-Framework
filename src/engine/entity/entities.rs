@@ -1,4 +1,4 @@
-﻿//! Shard-local entity pool managing slot allocation, versioning, and liveness tracking.
+//! Shard-local entity pool managing slot allocation, versioning, and liveness tracking.
 //!
 //! # Overview
 //!
@@ -166,8 +166,7 @@ impl Entities {
             let available = capacity.saturating_sub(self.versions.len());
             if available < deficit {
                 return Err(CapacityError {
-                    entities_needed: (self.versions.len() as EntityID)
-                        + (deficit as EntityID),
+                    entities_needed: (self.versions.len() as EntityID) + (deficit as EntityID),
                     capacity: capacity as EntityID,
                 });
             }

@@ -5,7 +5,7 @@
 //! directly to `dot`, `neato`, or any DOT-aware renderer:
 //!
 //! ```text
-//! use abm_framework::engine::dot_export::DotExport;
+//! use syren::engine::dot_export::DotExport;
 //! std::fs::write("plan.dot", DotExport(&scheduler).to_string())?;
 //! // $ dot -Tsvg plan.dot -o plan.svg
 //! ```

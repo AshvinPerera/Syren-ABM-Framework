@@ -3,12 +3,12 @@
 //! Feature-gated with `--features profiling`.
 //!
 //! Usage:
-//!   abm_framework::profiler::init("profile/trace.json");
+//!   syren::profiler::init("profile/trace.json");
 //!   {
-//!     let _g = abm_framework::profiler::span("Scheduler::run");
+//!     let _g = syren::profiler::span("Scheduler::run");
 //!     // run ECS...
 //!   }
-//!   abm_framework::profiler::shutdown();
+//!   syren::profiler::shutdown();
 
 use std::borrow::Cow;
 use std::fmt;

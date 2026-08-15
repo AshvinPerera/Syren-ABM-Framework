@@ -16,12 +16,12 @@
 //! # Example
 //!
 //! ```
-//! use abm_framework::{Bundle, Signature};
+//! use syren::{Bundle, Signature};
 //!
 //! # #[derive(Clone)] struct Position { x: f32, y: f32 }
 //! # #[derive(Clone)] struct Velocity { dx: f32, dy: f32 }
-//! # let position_id: abm_framework::ComponentID = 0;
-//! # let velocity_id: abm_framework::ComponentID = 1;
+//! # let position_id: syren::ComponentID = 0;
+//! # let velocity_id: syren::ComponentID = 1;
 //! # let mut archetype_requirements = Signature::default();
 //! # archetype_requirements.set(position_id);
 //! # archetype_requirements.set(velocity_id);

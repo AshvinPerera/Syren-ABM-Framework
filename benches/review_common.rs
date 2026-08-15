@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use criterion::{BatchSize, Criterion};
 
-use abm_framework::{
+use syren::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentRegistry, ECSManager, FnSystem,
     Scheduler,
 };
@@ -101,7 +101,7 @@ fn query_matching_world() -> (ECSManager, Arc<RwLock<ComponentRegistry>>) {
 
 pub fn query_matching_benchmark(c: &mut Criterion) {
     let (world, registry) = query_matching_world();
-    let query = abm_framework::QueryBuilder::with_registry(registry)
+    let query = syren::QueryBuilder::with_registry(registry)
         .read::<QueryValue>()
         .unwrap()
         .build()
@@ -158,7 +158,7 @@ pub fn scheduler_packing_benchmark(c: &mut Criterion) {
 pub fn environment_dirty_tracking_benchmark(c: &mut Criterion) {
     #[cfg(feature = "environment")]
     {
-        use abm_framework::environment::{EnvironmentBoundary, EnvironmentBuilder};
+        use syren::environment::{EnvironmentBoundary, EnvironmentBuilder};
 
         let env = EnvironmentBuilder::new()
             .register::<f32>("rate", 0.01)
@@ -200,8 +200,8 @@ pub fn environment_dirty_tracking_benchmark(c: &mut Criterion) {
 pub fn messaging_finalisation_benchmark(c: &mut Criterion) {
     #[cfg(feature = "messaging")]
     {
-        use abm_framework::advanced::ChannelAllocator;
-        use abm_framework::messaging::{
+        use syren::advanced::ChannelAllocator;
+        use syren::messaging::{
             BucketMessage, Capacity, Message, MessageBufferSet, MessageRegistry,
         };
 
@@ -269,7 +269,7 @@ pub fn messaging_finalisation_benchmark(c: &mut Criterion) {
 #[cfg(feature = "gpu")]
 mod gpu_bench {
     use super::*;
-    use abm_framework::{
+    use syren::{
         ECSError, ECSReference, ECSResult, ExecutionError, GPUPod, GpuSystem, Signature, System,
         SystemBackend,
     };
@@ -308,7 +308,7 @@ mod gpu_bench {
     }
 
     impl GpuWriteSystem {
-        pub fn new(value_id: abm_framework::ComponentID) -> Self {
+        pub fn new(value_id: syren::ComponentID) -> Self {
             let mut write = Signature::default();
             write.set(value_id);
             Self {
@@ -321,7 +321,7 @@ mod gpu_bench {
     }
 
     impl System for GpuWriteSystem {
-        fn id(&self) -> abm_framework::SystemID {
+        fn id(&self) -> syren::SystemID {
             77
         }
 

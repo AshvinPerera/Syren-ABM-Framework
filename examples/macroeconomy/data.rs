@@ -3,10 +3,11 @@ use std::fmt;
 use std::path::PathBuf;
 
 use super::components::{
-    HouseholdDemand, HouseholdHistory, IndividualWageHistory, FirmRealised, FirmStockBaseline, FirmStocks, FirmTargets,
-    Bank, CentralBank, Firm, GovernmentAccount, GovernmentEntity, Household, Individual, Property,
-    RestOfWorld, LABOUR_EMPLOYED, LABOUR_INACTIVE, LABOUR_UNEMPLOYED, NOT_LINKED, PROPERTY_FOR_RENT,
-    PROPERTY_FOR_SALE, PROPERTY_OWNER_OCCUPIED, PROPERTY_RENTAL, SECTORS,
+    Bank, CentralBank, Firm, FirmRealised, FirmStockBaseline, FirmStocks, FirmTargets,
+    GovernmentAccount, GovernmentEntity, Household, HouseholdDemand, HouseholdHistory, Individual,
+    IndividualWageHistory, Property, RestOfWorld, LABOUR_EMPLOYED, LABOUR_INACTIVE,
+    LABOUR_UNEMPLOYED, NOT_LINKED, PROPERTY_FOR_RENT, PROPERTY_FOR_SALE, PROPERTY_OWNER_OCCUPIED,
+    PROPERTY_RENTAL, SECTORS,
 };
 use super::messages::{
     BUYER_FIRM, BUYER_HOUSEHOLD, LOAN_FIRM_LONG, LOAN_FIRM_SHORT, LOAN_HOUSEHOLD_CONSUMPTION,
@@ -372,10 +373,8 @@ pub fn synthetic_population(
     initialisation: &str,
     mut environment: MacroEnvironment,
 ) -> InitialData {
-    let history_quarters = quarters_between(
-        environment.history.first_real_data_quarter,
-        initialisation,
-    );
+    let history_quarters =
+        quarters_between(environment.history.first_real_data_quarter, initialisation);
     let mut rng = GenRng::new(seed);
 
     // ---- 1. Employment and output -------------------------------------
@@ -509,8 +508,7 @@ pub fn synthetic_population(
     // which is what sets the debt ratio. `FIRM_DEBT_TO_CAPITAL` becomes the
     // ceiling rather than the value. A.25 is then slack for any `lambda <= 1`.
     let deposits_per_output = margin;
-    let roe_requirement =
-        ROE_HEADROOM * margin / environment.params.return_on_equity.max(1e-9);
+    let roe_requirement = ROE_HEADROOM * margin / environment.params.return_on_equity.max(1e-9);
     let debt_to_capital = if capital_per_output > 1e-9 {
         (1.0 - (roe_requirement - deposits_per_output) / capital_per_output)
             .clamp(0.0, FIRM_DEBT_TO_CAPITAL)
@@ -580,7 +578,11 @@ pub fn synthetic_population(
         // A.77 at P = 1, which is the accounting quantity A.58 needs.
         let unit_cost = LABOUR_SHARE + io_row + capital_row + production_tax;
         // A.140 needs at least one sector with genuine price dispersion.
-        let price = if i == firm_count as usize - 1 { 1.15 } else { 1.0 };
+        let price = if i == firm_count as usize - 1 {
+            1.15
+        } else {
+            1.0
+        };
         let inventory = CALIBRATION_PHI_ST_Y * output;
         let work_effort = productivity[sector];
 
@@ -634,8 +636,14 @@ pub fn synthetic_population(
                 environment.params.net_fixed_assets_matrix[sector][s] * output / OMEGA_CAPITAL;
             baseline.initial_capital_stock[s] = stocks.capital_stock[s];
         }
-        firm_targets.push(FirmTargets { id: firm.id, ..FirmTargets::default() });
-        firm_realised.push(FirmRealised { id: firm.id, ..FirmRealised::default() });
+        firm_targets.push(FirmTargets {
+            id: firm.id,
+            ..FirmTargets::default()
+        });
+        firm_realised.push(FirmRealised {
+            id: firm.id,
+            ..FirmRealised::default()
+        });
         firms.push(firm);
         firm_stocks.push(stocks);
         firm_stock_baselines.push(baseline);
@@ -649,7 +657,8 @@ pub fn synthetic_population(
         .collect();
     let total_capital: f64 = capital_value.iter().sum();
     let total_firm_debt = debt_to_capital * total_capital;
-    let operating_margin = (1.0 - LABOUR_SHARE
+    let operating_margin = (1.0
+        - LABOUR_SHARE
         - firms
             .iter()
             .map(|f| {
@@ -702,17 +711,16 @@ pub fn synthetic_population(
 
     // ---- 5. Individuals and households --------------------------------
     let employed_total: u32 = employees.iter().sum();
-    let unemployed_total =
-        ((employed_total as f64 * scale.unemployment_rate / (1.0 - scale.unemployment_rate))
-            .round() as u32)
-            .max(1);
+    let unemployed_total = ((employed_total as f64 * scale.unemployment_rate
+        / (1.0 - scale.unemployment_rate))
+        .round() as u32)
+        .max(1);
     // A.8's `I^N`. The active population is employed + unemployed, so the
     // inactive count follows from the inactive *share of the total*.
     let active_total = employed_total + unemployed_total;
     let inactive_rate = scale.inactive_rate.clamp(0.0, 0.95);
-    let inactive_total = ((active_total as f64 * inactive_rate / (1.0 - inactive_rate)).round()
-        as u32)
-        .max(0);
+    let inactive_total =
+        (active_total as f64 * inactive_rate / (1.0 - inactive_rate)).round() as u32;
     let population = active_total + inactive_total;
     let household_count = (population / scale.individuals_per_household.max(1)).max(1);
 
@@ -881,7 +889,9 @@ pub fn synthetic_population(
     // solve below has to see.
     let total_household_income: f64 = households
         .iter()
-        .map(|h| h.income + environment.params.financial_asset_income_phi * h.other_financial_assets)
+        .map(|h| {
+            h.income + environment.params.financial_asset_income_phi * h.other_financial_assets
+        })
         .sum();
 
     // ---- 6. Solve the propensities (A.101 / A.102) --------------------
@@ -911,8 +921,8 @@ pub fn synthetic_population(
         household.investment_rate = investment_rate;
         // A.105's smoothing term must not exceed the level the solve just set,
         // or every household opens above its own consumption function.
-        let opening = (1.0 - saving_rate) * household.predicted_income
-            / (1.0 + account_template.vat_rate);
+        let opening =
+            (1.0 - saving_rate) * household.predicted_income / (1.0 + account_template.vat_rate);
         household_histories.push(HouseholdHistory {
             id: household.id,
             consumption_history: [opening; 12],
@@ -1003,9 +1013,9 @@ pub fn synthetic_population(
         }
     }
     for loan in &environment_loans {
-        environment
-            .loan_book
-            .add(loan.0, loan.1, loan.2, loan.3, loan.4, loan.5, loan.6, loan.7, 0);
+        environment.loan_book.add(
+            loan.0, loan.1, loan.2, loan.3, loan.4, loan.5, loan.6, loan.7, 0,
+        );
     }
 
     // Banks: deposits are the *actual* sum of what agents hold with them
@@ -1040,8 +1050,7 @@ pub fn synthetic_population(
         (total_loans * (1.0 + RESERVE_HEADROOM) - bank_equity_total - total_firm_deposits_actual)
             .max(0.0);
     let current_household_deposits: f64 = households.iter().map(|h| h.deposits).sum();
-    if required_household_deposits > current_household_deposits
-        && current_household_deposits > 1e-9
+    if required_household_deposits > current_household_deposits && current_household_deposits > 1e-9
     {
         let uplift = required_household_deposits / current_household_deposits;
         for household in &mut households {
@@ -1249,9 +1258,11 @@ fn solve_sam(
     let mut capital_demand = [0.0; SECTORS];
     // `m_{s's}` is the amount of s' needed per unit of s, so demand *for* good
     // s is the column sum over every producing sector.
+    #[allow(clippy::needless_range_loop)]
     for producing in 0..SECTORS {
         for input in 0..SECTORS {
-            intermediate_demand[input] += params.io_matrix[producing][input] * sector_output[producing];
+            intermediate_demand[input] +=
+                params.io_matrix[producing][input] * sector_output[producing];
             capital_demand[input] +=
                 params.capital_compensation_matrix[producing][input] * sector_output[producing];
         }

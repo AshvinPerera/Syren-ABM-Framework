@@ -346,7 +346,10 @@ mod tests {
 
         let result = attr.swap_remove(0, (CHUNK_CAP + 5) as u32);
         assert!(
-            matches!(result, Err(crate::engine::error::AttributeError::Position(_))),
+            matches!(
+                result,
+                Err(crate::engine::error::AttributeError::Position(_))
+            ),
             "expected Position error, got {result:?}"
         );
         assert_eq!(attr.length, 2 * CHUNK_CAP, "attribute must be unchanged");
@@ -361,7 +364,10 @@ mod tests {
 
         let result = attr.take_swap_remove(0, (CHUNK_CAP + 5) as u32);
         assert!(
-            matches!(result, Err(crate::engine::error::AttributeError::Position(_))),
+            matches!(
+                result,
+                Err(crate::engine::error::AttributeError::Position(_))
+            ),
             "expected Position error, got Ok/other"
         );
         assert_eq!(attr.length, 2 * CHUNK_CAP, "attribute must be unchanged");
@@ -435,7 +441,11 @@ mod tests {
         let rows = [(0u16, 99u32), (0, 50), (0, 5)]; // descending
         let (start, count) = destination.extend_from_rows(&source, &rows).unwrap();
         assert_eq!((start, count), (0, 3));
-        assert_eq!(counter.load(Ordering::Relaxed), 0, "copy phase must not drop");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "copy phase must not drop"
+        );
 
         // Commit phase: forgotten removal transfers ownership to destination.
         for &(chunk, row) in &rows {
@@ -448,7 +458,11 @@ mod tests {
         drop(source);
         assert_eq!(counter.load(Ordering::Relaxed), 97);
         drop(destination);
-        assert_eq!(counter.load(Ordering::Relaxed), 100, "every value dropped exactly once");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            100,
+            "every value dropped exactly once"
+        );
     }
 
     #[test]
@@ -482,12 +496,8 @@ mod tests {
         assert_eq!(observed, vec![13, 11, 12, 10]);
 
         // Length mismatch and out-of-range indices are rejected untouched.
-        assert!(attr
-            .extend_permuted_from_vec(vec![1, 2], &[0])
-            .is_err());
-        assert!(attr
-            .extend_permuted_from_vec(vec![1, 2], &[0, 5])
-            .is_err());
+        assert!(attr.extend_permuted_from_vec(vec![1, 2], &[0]).is_err());
+        assert!(attr.extend_permuted_from_vec(vec![1, 2], &[0, 5]).is_err());
         assert_eq!(attr.length, 4);
     }
 

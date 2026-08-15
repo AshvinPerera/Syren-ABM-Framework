@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0-rc.1 — unreleased
+
+First release candidate published under the crate name `syren`. This section
+accumulates as the release lands; see the migration notes at its end.
+
+### Breaking changes and migration
+
+- **Crate renamed `abm_framework` → `syren`.** Update dependency declarations
+  and imports: `use abm_framework::…` becomes `use syren::…`. The library name,
+  the public module paths, and the documentation URL all change accordingly.
+  The crate was not previously published to crates.io, so no released version
+  is affected.
+
+### Changed
+
+- Renamed the Sugarscape example source `sugarscape_v2.rs` to `sugarscape.rs`
+  and corrected the target name in its usage text and README. The Cargo example
+  target remains `sugarscape` (`cargo run --example sugarscape`).
+
+### Internal
+
+- Pinned the development toolchain to Rust 1.91.1 (`rust-toolchain.toml`) with
+  `rustfmt` and `clippy`; the library MSRV remains 1.87.
+- Resolved strict `clippy` (`--all-targets --all-features -D warnings`) and
+  strict rustdoc findings without relying on APIs newer than the MSRV.
+- Replaced the packaging `exclude` list with an `include` allow-list and added
+  crates.io `keywords`/`categories` and docs.rs metadata.
+
 ## 0.5.0 — 2026-07-05
 
 Performance-focused release following a full code review. Steady-state

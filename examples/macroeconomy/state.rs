@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use abm_framework::{DetRng, RunContext};
+use syren::{DetRng, RunContext};
 
 use super::accounting::{AccountingReport, GdpIdentity};
 use super::calibration::CalibrationParameters;
@@ -120,7 +120,11 @@ impl MacroRng {
     /// Keys a stream on an agent id, so each agent draws independently of the
     /// order in which agents happen to be visited.
     pub fn for_agent(context: RunContext, model_seed: u64, salt: u64, agent_id: u64) -> Self {
-        Self::new(context, model_seed, salt ^ agent_id.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        Self::new(
+            context,
+            model_seed,
+            salt ^ agent_id.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        )
     }
 
     pub fn unit_f64(&mut self) -> f64 {
@@ -332,6 +336,9 @@ pub struct CountryParameters {
 /// balance sheets consistently is the population generator's job.
 fn banded_sector_matrix(diagonal: f64, off_diagonal_total: f64) -> [[f64; SECTORS]; SECTORS] {
     let mut matrix = [[0.0; SECTORS]; SECTORS];
+    // `s` selects the matrix row and drives the circular band arithmetic below,
+    // so a range loop is clearer than indexing a single iterator.
+    #[allow(clippy::needless_range_loop)]
     for s in 0..SECTORS {
         let mut weights = [0.0; SECTORS];
         let mut weight_sum = 0.0;
@@ -917,6 +924,9 @@ pub struct LoanBook {
 }
 
 impl LoanBook {
+    // A loan record carries every one of these fields; a parameter object would
+    // just be the `Loan` struct this method already constructs.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         bank_id: u32,

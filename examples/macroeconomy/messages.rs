@@ -1,4 +1,4 @@
-use abm_framework::messaging::{BruteForceMessage, Message};
+use syren::messaging::{BruteForceMessage, Message};
 
 pub const BUYER_FIRM: u8 = 1;
 pub const BUYER_HOUSEHOLD: u8 = 2;

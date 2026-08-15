@@ -1,4 +1,4 @@
-﻿//! Entity migration between archetypes.
+//! Entity migration between archetypes.
 //!
 //! This module implements [`Archetype::move_row_to_archetype`], the single
 //! production migration surface used when an entity's signature changes - i.e.
@@ -923,8 +923,7 @@ impl Archetype {
 
             Self::ensure_capacity(&mut meta, chunk as usize + 1);
             if let Some((moved_chunk, moved_row)) = moved_from {
-                let moved_entity =
-                    meta.entity_positions[moved_chunk as usize][moved_row as usize];
+                let moved_entity = meta.entity_positions[moved_chunk as usize][moved_row as usize];
                 if moved_entity == Entity::PLACEHOLDER {
                     return Err(InternalViolation::DespawnMovedSlotMissingEntity.into());
                 }
@@ -1027,7 +1026,7 @@ impl Archetype {
                     .get(chunk as usize)
                     .and_then(|chunk_meta| chunk_meta.get(row as usize))
                     .copied()
-                .filter(|entity| *entity != Entity::PLACEHOLDER);
+                    .filter(|entity| *entity != Entity::PLACEHOLDER);
                 if swapped_slot.is_none() {
                     return Err(MoveError::MetadataFailure {
                         entity: Some(entity.to_raw()),

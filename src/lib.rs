@@ -97,10 +97,10 @@ pub use engine::types::{BoundaryID, ChannelID};
 pub use engine::types::{GPUAccessMode, GPUResourceID};
 
 pub use engine::activation::{ActivationOrder, RunContext};
-pub use engine::random::DetRng;
 pub use engine::boundary::{BoundaryChannelProfile, BoundaryContext, BoundaryResource};
 pub use engine::dot_export::DotExport;
 pub use engine::plan_display::PlanDisplay;
+pub use engine::random::DetRng;
 pub use engine::workers::{max_workers, worker_id};
 
 // Profiling public API
@@ -146,7 +146,7 @@ pub mod space;
 ///
 /// Import with:
 /// ```rust
-/// use abm_framework::prelude::*;
+/// use syren::prelude::*;
 /// ```
 pub mod prelude {
     pub use crate::{

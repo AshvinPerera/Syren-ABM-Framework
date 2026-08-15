@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use abm_framework::{
+use syren::{
     advanced::EntityShards, AccessSets, Arg, Bundle, Command, ComponentID, ComponentRegistry,
     ECSError, ECSManager, ECSReference, ECSResult, ExecutionError, Scheduler, System,
 };
 
 #[cfg(feature = "gpu")]
-use abm_framework::{GPUPod, GpuSystem, SystemBackend};
+use syren::{GPUPod, GpuSystem, SystemBackend};
 
 const DEFAULT_AGENTS: usize = 1_000_000;
 const DEFAULT_WIDTH: u32 = 4096;
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     #[cfg(feature = "profiling")]
     if let Some(path) = &cli.profile_path {
-        abm_framework::init(path);
+        syren::init(path);
         eprintln!("profile trace: {}", path.display());
     }
 
@@ -112,12 +112,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("profiling requested, but trace output requires --features profiling");
     }
 
-    abm_framework::thread_name("sugarscape-main");
+    syren::thread_name("sugarscape-main");
 
     let result = run(cli);
 
-    abm_framework::flush_thread();
-    abm_framework::shutdown();
+    syren::flush_thread();
+    syren::shutdown();
 
     result
 }
@@ -126,7 +126,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let backend = select_backend(cli.force_cpu);
     let started = Instant::now();
 
-    let _run_span = abm_framework::span("Sugarscape::run")
+    let _run_span = syren::span("Sugarscape::run")
         .arg("agents", Arg::U64(cli.config.population as u64))
         .arg("width", Arg::U64(cli.config.width as u64))
         .arg("height", Arg::U64(cli.config.height as u64))
@@ -144,7 +144,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
 
     let setup_started = Instant::now();
     let (ecs, mut scheduler) = {
-        let _setup_span = abm_framework::span("Sugarscape::setup");
+        let _setup_span = syren::span("Sugarscape::setup");
         build_simulation(cli.config, backend)?
     };
     eprintln!(
@@ -159,7 +159,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     for tick in 1..=cli.ticks {
         let tick_started = Instant::now();
         {
-            let _tick_span = abm_framework::span("Sugarscape::tick")
+            let _tick_span = syren::span("Sugarscape::tick")
                 .arg("tick", Arg::U64(tick as u64))
                 .arg("agents", Arg::U64(cli.config.population as u64))
                 .arg("width", Arg::U64(cli.config.width as u64))
@@ -167,7 +167,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 .arg("backend", Arg::Str(backend.as_str().to_string()));
             ecs.run(&mut scheduler)?;
         }
-        abm_framework::flush_thread();
+        syren::flush_thread();
         eprintln!(
             "tick {tick} complete in {:.3}s",
             tick_started.elapsed().as_secs_f64()
@@ -185,7 +185,7 @@ fn select_backend(force_cpu: bool) -> MetabolismBackend {
 
     #[cfg(feature = "gpu")]
     {
-        match abm_framework::gpu::GPUContext::new() {
+        match syren::gpu::GPUContext::new() {
             Ok(_) => MetabolismBackend::Gpu,
             Err(err) => {
                 eprintln!("GPU preflight failed; falling back to CPU metabolism: {err}");
@@ -212,7 +212,7 @@ fn build_simulation(
     let agents = initial_agents(&mut state)?;
     let state = Arc::new(Mutex::new(state));
 
-    let shards = abm_framework::max_workers().max(1) as usize;
+    let shards = syren::max_workers().max(1) as usize;
     let ecs = ECSManager::with_registry(EntityShards::new(shards)?, registry);
     spawn_agents(&ecs, agent_id, agents)?;
     let scheduler = make_scheduler(state, agent_id, backend);
@@ -474,8 +474,8 @@ fn initial_agents(state: &mut SugarscapeState) -> Result<Vec<SugarAgent>, Box<dy
 }
 
 fn spawn_agents(ecs: &ECSManager, agent_id: ComponentID, agents: Vec<SugarAgent>) -> ECSResult<()> {
-    let _span = abm_framework::span("Sugarscape::spawn_agents")
-        .arg("agents", Arg::U64(agents.len() as u64));
+    let _span =
+        syren::span("Sugarscape::spawn_agents").arg("agents", Arg::U64(agents.len() as u64));
     let world = ecs.world_ref();
     world.with_exclusive(|_| {
         for agent in agents {
@@ -574,7 +574,7 @@ impl System for GrowbackSystem {
         "Sugarscape::growback"
     }
 
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         1
     }
 
@@ -583,7 +583,7 @@ impl System for GrowbackSystem {
     }
 
     fn run(&self, _world: ECSReference<'_>) -> ECSResult<()> {
-        let _span = abm_framework::span("Sugarscape::growback");
+        let _span = syren::span("Sugarscape::growback");
         lock_state(&self.state)?.growback();
         Ok(())
     }
@@ -614,7 +614,7 @@ impl System for MoveHarvestAgeSystem {
         "Sugarscape::move_harvest_age"
     }
 
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         2
     }
 
@@ -623,7 +623,7 @@ impl System for MoveHarvestAgeSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let _span = abm_framework::span("Sugarscape::move_harvest_age");
+        let _span = syren::span("Sugarscape::move_harvest_age");
         let mut agents = collect_agents(ecs)?;
         let mut state = lock_state(&self.state)?;
         let width = state.config.width;
@@ -690,7 +690,7 @@ impl System for CpuMetabolismSystem {
         "Sugarscape::metabolism_cpu"
     }
 
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         3
     }
 
@@ -699,7 +699,7 @@ impl System for CpuMetabolismSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let _span = abm_framework::span("Sugarscape::metabolism_cpu");
+        let _span = syren::span("Sugarscape::metabolism_cpu");
         let q = ecs.query()?.write::<SugarAgent>()?.build()?;
         ecs.for_each_w1::<SugarAgent>(q, |agent| {
             agent.wealth = agent.wealth.saturating_sub(agent.metabolism);
@@ -729,7 +729,7 @@ impl System for GpuMetabolismSystem {
         "Sugarscape::metabolism_gpu"
     }
 
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         3
     }
 
@@ -820,7 +820,7 @@ impl System for ReplacementSystem {
         "Sugarscape::replacement"
     }
 
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         4
     }
 
@@ -829,7 +829,7 @@ impl System for ReplacementSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let _span = abm_framework::span("Sugarscape::replacement");
+        let _span = syren::span("Sugarscape::replacement");
         let mut agents = collect_agents(ecs)?;
         let mut state = lock_state(&self.state)?;
         let width = state.config.width;
@@ -894,7 +894,7 @@ impl System for StatsSystem {
         "Sugarscape::stats"
     }
 
-    fn id(&self) -> abm_framework::SystemID {
+    fn id(&self) -> syren::SystemID {
         5
     }
 
@@ -903,7 +903,7 @@ impl System for StatsSystem {
     }
 
     fn run(&self, ecs: ECSReference<'_>) -> ECSResult<()> {
-        let _span = abm_framework::span("Sugarscape::stats");
+        let _span = syren::span("Sugarscape::stats");
         let q = ecs.query()?.read::<SugarAgent>()?.build()?;
         let mut wealths = ecs.reduce_read::<SugarAgent, Vec<u32>>(
             q,
@@ -1052,7 +1052,7 @@ fn parse_next_u64(
 }
 
 fn usage() -> &'static str {
-    "Usage: cargo run --release --features \"gpu profiling\" --example sugarscape_axtell_large -- [options]\n\
+    "Usage: cargo run --release --features \"gpu profiling\" --example sugarscape -- [options]\n\
 Options:\n\
   --agents N          Number of agents (default: 1000000)\n\
   --width W           Grid width (default: 4096)\n\

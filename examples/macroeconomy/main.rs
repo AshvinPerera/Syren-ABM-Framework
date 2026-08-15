@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compile to nothing unless the `profiling` feature is on, so an ordinary
     // run pays nothing for them.
     if let Some(path) = &config.profile_path {
-        abm_framework::init(path);
+        syren::init(path);
     }
     let mut example = match config.mode {
         RunMode::TinyFixture => build_macroeconomy_model(config.clone(), FixtureDataProvider)?,
@@ -153,15 +153,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&dir)?;
         let aggregates = dir.join("trace_aggregates.csv");
         let firms = dir.join("trace_firms.csv");
-        std::fs::write(&aggregates, agg_rows.join("
-"))?;
-        std::fs::write(&firms, firm_rows.join("
-"))?;
+        std::fs::write(
+            &aggregates,
+            agg_rows.join(
+                "
+",
+            ),
+        )?;
+        std::fs::write(
+            &firms,
+            firm_rows.join(
+                "
+",
+            ),
+        )?;
         eprintln!("wrote {} and {}", aggregates.display(), firms.display());
     }
     let state = macro_state(&example.model)?;
     if config.profile_path.is_some() {
-        abm_framework::shutdown();
+        syren::shutdown();
     }
     eprintln!("completed {} quarters", state.quarter);
     eprintln!(
@@ -236,8 +246,10 @@ fn parse_args(
                     .ok_or("--initialisation requires a yyyy-Qn value")?;
             }
             "--firms-per-sector" => {
-                config.firms_per_sector =
-                    args.next().ok_or("--firms-per-sector requires a value")?.parse()?;
+                config.firms_per_sector = args
+                    .next()
+                    .ok_or("--firms-per-sector requires a value")?
+                    .parse()?;
             }
             "--profile" => {
                 config.profile_path = Some(PathBuf::from(
@@ -250,8 +262,11 @@ fn parse_args(
                 config.policy.trace = true;
             }
             "--debug-firm" => {
-                config.policy.debug_firm_id =
-                    Some(args.next().ok_or("--debug-firm requires a firm id")?.parse()?);
+                config.policy.debug_firm_id = Some(
+                    args.next()
+                        .ok_or("--debug-firm requires a firm id")?
+                        .parse()?,
+                );
             }
             "-h" | "--help" => {
                 println!(

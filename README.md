@@ -10,7 +10,7 @@ and correctness-oriented integration tests.
 
 ## Status
 
-- Crate name: `abm_framework`
+- Crate name: `syren`
 - Rust edition: 2021
 - MSRV: 1.87
 - Library artifact: `rlib`
@@ -116,7 +116,7 @@ Add the crate from this repository:
 
 ```toml
 [dependencies]
-abm_framework = { git = "https://github.com/AshvinPerera/Syren-ABM-Framework.git" }
+syren = { git = "https://github.com/AshvinPerera/Syren-ABM-Framework.git" }
 ```
 
 ### Low-level ECS
@@ -126,7 +126,7 @@ deferred commands, and run systems through a scheduler:
 
 ```rust
 use std::sync::{Arc, RwLock};
-use abm_framework::{
+use syren::{
     advanced::EntityShards, Bundle, Command, ComponentRegistry, ECSManager,
     ECSResult, FnSystem, QueryBuilder, Read, Scheduler,
 };
@@ -185,10 +185,10 @@ over multi-component batches, see `AgentBatch`.
 # #[cfg(feature = "model")]
 # fn bulk_population_example() -> Result<(), Box<dyn std::error::Error>> {
 # use std::sync::{Arc, RwLock};
-# use abm_framework::advanced::EntityShards;
-# use abm_framework::agents::AgentTemplate;
-# use abm_framework::model::ModelBuilder;
-# use abm_framework::ComponentRegistry;
+# use syren::advanced::EntityShards;
+# use syren::agents::AgentTemplate;
+# use syren::model::ModelBuilder;
+# use syren::ComponentRegistry;
 # #[derive(Clone, Copy, Default)]
 # struct Household { cash: u32 }
 let registry = Arc::new(RwLock::new(ComponentRegistry::new()));
@@ -323,9 +323,9 @@ execution spans, boundary finalisation, deferred command application, and
 (with `gpu_profiling`) GPU dispatch timing.
 
 ```rust
-abm_framework::init("profile/trace.json");
+syren::init("profile/trace.json");
 // run simulation work
-abm_framework::shutdown();
+syren::shutdown();
 ```
 
 ## Project Layout

@@ -500,6 +500,10 @@ pub fn execute_gpu_system(
     })
 }
 
+// Each parameter is a distinct engine resource the dispatch loop needs by
+// reference; bundling them into a struct would only move the same set of
+// borrows behind an extra indirection without improving clarity.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_over_archetypes(
     run_time: &mut DeviceRuntime,
     world_state: &mut GpuWorldState,

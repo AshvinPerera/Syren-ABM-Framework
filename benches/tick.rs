@@ -1,7 +1,7 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::{AccessSets, FnSystem, Read, Scheduler, Signature, Write};
+use syren::{AccessSets, FnSystem, Read, Scheduler, Signature, Write};
 
 mod common;
 use common::*;
@@ -87,8 +87,8 @@ fn tick_benchmark(c: &mut Criterion) {
             |(ecs, mut scheduler)| {
                 ecs.run(&mut scheduler).unwrap();
                 // Return the world so criterion drops it outside the timed
-                // region; dropping a 1M-agent world costs several ms and
-                // previously dominated this measurement.
+                // region; dropping a 1M-agent world costs several ms, which
+                // would otherwise dominate this measurement.
                 (ecs, scheduler)
             },
             BatchSize::LargeInput,
@@ -155,9 +155,8 @@ fn tick_benchmark(c: &mut Criterion) {
             consumes: Default::default(),
         };
         scheduler.add_system(FnSystem::new(2, "decay", access_decay, move |world| {
-            world.for_each::<(Write<Wealth>,), _>(q_decay_wealth.clone(), |w| {
-                w.0.value *= 0.9999
-            })?;
+            world
+                .for_each::<(Write<Wealth>,), _>(q_decay_wealth.clone(), |w| w.0.value *= 0.9999)?;
             Ok(())
         }));
 

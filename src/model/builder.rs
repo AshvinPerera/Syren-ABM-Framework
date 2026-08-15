@@ -561,8 +561,8 @@ impl ModelBuilder {
 
         // Group by template so an agent declared with several components is
         // spawned once with all of its columns, not once per column.
-        let mut grouped: Vec<(String, usize, Vec<(crate::ComponentID, Box<dyn Any + Send>)>)> =
-            Vec::new();
+        type GroupedColumns = Vec<(crate::ComponentID, Box<dyn Any + Send>)>;
+        let mut grouped: Vec<(String, usize, GroupedColumns)> = Vec::new();
         for population in self.pending_agent_populations {
             match grouped
                 .iter_mut()

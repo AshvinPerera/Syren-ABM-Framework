@@ -77,8 +77,6 @@ impl QueryComponent {
     ///
     /// Returns [`RegistryError::NotRegistered`](crate::RegistryError::NotRegistered) if the descriptor carries no
     /// assigned [`ComponentID`] (i.e. it was created before registration).
-    /// Previously such descriptors silently aliased component `0`, producing
-    /// wrong-column reads.
     #[inline]
     pub fn from_desc(desc: &super::component::ComponentDesc) -> ECSResult<Self> {
         let Some(component_id) = desc.component_id else {

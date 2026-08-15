@@ -2,9 +2,9 @@
 //!
 //! Deliberately self-contained (the ~40 lines of cell math are duplicated
 //! from messaging's `SpatialConfig` rather than shared) so the `space` and
-//! `messaging` features stay independent. Carries the 0.5.0 hardening:
-//! saturating float→int casts, empty ranges for non-intersecting queries,
-//! and explicit torus wrapping.
+//! `messaging` features stay independent. The cell math uses saturating
+//! float→int casts, returns empty ranges for non-intersecting queries, and
+//! wraps explicitly on the torus.
 
 use smallvec::SmallVec;
 
@@ -86,12 +86,12 @@ impl GridGeometry {
     #[inline]
     pub fn normalise(&self, x: f32, y: f32) -> (f32, f32) {
         if self.torus {
-            (self.wrap_axis(x, self.width), self.wrap_axis(y, self.height))
-        } else {
             (
-                clamp_finite(x, self.width),
-                clamp_finite(y, self.height),
+                self.wrap_axis(x, self.width),
+                self.wrap_axis(y, self.height),
             )
+        } else {
+            (clamp_finite(x, self.width), clamp_finite(y, self.height))
         }
     }
 
@@ -170,13 +170,11 @@ impl GridGeometry {
             if !intersects {
                 return rects;
             }
-            let col_lo = ((((cx - radius) / self.cell_size).floor().max(0.0)) as u32)
-                .min(cols - 1);
+            let col_lo = ((((cx - radius) / self.cell_size).floor().max(0.0)) as u32).min(cols - 1);
             let col_hi = ((cx + radius) / self.cell_size)
                 .ceil()
                 .min((cols - 1) as f32) as u32;
-            let row_lo = ((((cy - radius) / self.cell_size).floor().max(0.0)) as u32)
-                .min(rows - 1);
+            let row_lo = ((((cy - radius) / self.cell_size).floor().max(0.0)) as u32).min(rows - 1);
             let row_hi = ((cy + radius) / self.cell_size)
                 .ceil()
                 .min((rows - 1) as f32) as u32;
@@ -254,9 +252,18 @@ mod tests {
     #[test]
     fn validation_rejects_degenerate_geometry() {
         for bad in [
-            GridGeometry { width: 0.0, ..plane() },
-            GridGeometry { cell_size: -1.0, ..plane() },
-            GridGeometry { height: f32::NAN, ..plane() },
+            GridGeometry {
+                width: 0.0,
+                ..plane()
+            },
+            GridGeometry {
+                cell_size: -1.0,
+                ..plane()
+            },
+            GridGeometry {
+                height: f32::NAN,
+                ..plane()
+            },
         ] {
             assert!(bad.validate().is_err());
         }

@@ -158,7 +158,7 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     ///
     /// Must be followed by either `swap_remove_forgotten_dyn` on every copied
     /// source row (commit) or `truncate_forgotten` back to the returned start
-    /// (rollback). See the typed [`Attribute::extend_from_rows`] contract.
+    /// (rollback). See the typed `Attribute::extend_from_rows` contract.
     ///
     /// # Errors
     /// - [`AttributeError::TypeMismatch`] if `source` stores a different type.
@@ -174,7 +174,7 @@ pub trait TypeErasedAttribute: Any + Send + Sync {
     /// `Vec<T>` (batched add-component's new-column path).
     ///
     /// `order` must be a permutation of `0..len`; see
-    /// [`Attribute::extend_permuted_from_vec`].
+    /// `Attribute::extend_permuted_from_vec`.
     fn extend_permuted_from_vec_any(
         &mut self,
         values: Box<dyn Any + Send>,

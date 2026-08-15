@@ -579,7 +579,8 @@ impl ECSData {
     ) -> Result<CommandEvents, CommandDrainFailure> {
         let mut events = CommandEvents::default();
         #[cfg(feature = "gpu")]
-        let mut touched: std::collections::BTreeSet<ArchetypeID> = std::collections::BTreeSet::new();
+        let mut touched: std::collections::BTreeSet<ArchetypeID> =
+            std::collections::BTreeSet::new();
         let mut iter = commands.into_iter();
 
         while let Some(command) = iter.next() {
@@ -815,11 +816,7 @@ impl ECSData {
             .iter()
             .map(|column| column.component_id)
             .collect();
-        self.archetypes[archetype_id as usize].append_batch_columns(
-            start,
-            count,
-            batch.columns,
-        )?;
+        self.archetypes[archetype_id as usize].append_batch_columns(start, count, batch.columns)?;
 
         // Every location below is addressable: `append_batch_columns`
         // validated `start + count - 1` against ChunkID/RowID limits.
@@ -881,13 +878,13 @@ impl ECSData {
             resolved.push((entity, location));
         }
 
-        let mut by_archetype: HashMap<ArchetypeID, Vec<(Entity, ChunkID, RowID)>> =
-            HashMap::new();
+        let mut by_archetype: HashMap<ArchetypeID, Vec<(Entity, ChunkID, RowID)>> = HashMap::new();
         for (entity, location) in resolved {
-            by_archetype
-                .entry(location.archetype)
-                .or_default()
-                .push((entity, location.chunk, location.row));
+            by_archetype.entry(location.archetype).or_default().push((
+                entity,
+                location.chunk,
+                location.row,
+            ));
         }
 
         let mut archetype_ids: Vec<ArchetypeID> = by_archetype.keys().copied().collect();
@@ -908,8 +905,7 @@ impl ECSData {
                     return Err(SpawnError::StaleEntity(StaleEntityError).into());
                 }
             }
-            self.archetypes[archetype_id as usize]
-                .despawn_rows_batch(&self.shards, &targets)?;
+            self.archetypes[archetype_id as usize].despawn_rows_batch(&self.shards, &targets)?;
         }
 
         events.despawned.reserve(entities.len());
@@ -961,8 +957,7 @@ impl ECSData {
 
         // Preflight: one shared source archetype, all live, none already
         // carrying the component.
-        let mut resolved: Vec<(usize, Entity, EntityLocation)> =
-            Vec::with_capacity(entities.len());
+        let mut resolved: Vec<(usize, Entity, EntityLocation)> = Vec::with_capacity(entities.len());
         let mut source_id: Option<ArchetypeID> = None;
         for (input_index, &entity) in entities.iter().enumerate() {
             let Some(location) = self.shards.get_location(entity)? else {
@@ -1001,11 +996,8 @@ impl ECSData {
                 .registry
                 .read()
                 .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
-            let (_, destination) = Self::get_archetype_pair_mut(
-                &mut self.archetypes,
-                source_id,
-                destination_id,
-            )?;
+            let (_, destination) =
+                Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
             let factory = || registry.make_empty_component(component_id);
             destination
                 .ensure_component(component_id, factory)
@@ -1027,7 +1019,10 @@ impl ECSData {
                 return Err(SpawnError::StaleEntity(StaleEntityError).into());
             }
         }
-        let order: Vec<usize> = resolved.iter().map(|&(input_index, _, _)| input_index).collect();
+        let order: Vec<usize> = resolved
+            .iter()
+            .map(|&(input_index, _, _)| input_index)
+            .collect();
         let targets: Vec<(Entity, ChunkID, RowID)> = resolved
             .iter()
             .map(|&(_, entity, location)| (entity, location.chunk, location.row))
@@ -1068,8 +1063,7 @@ impl ECSData {
         }
 
         // Preflight: resolve, drop non-carriers, group by archetype.
-        let mut by_archetype: HashMap<ArchetypeID, Vec<(Entity, ChunkID, RowID)>> =
-            HashMap::new();
+        let mut by_archetype: HashMap<ArchetypeID, Vec<(Entity, ChunkID, RowID)>> = HashMap::new();
         for &entity in &entities {
             let Some(location) = self.shards.get_location(entity)? else {
                 return Err(SpawnError::StaleEntity(StaleEntityError).into());
@@ -1080,10 +1074,11 @@ impl ECSData {
             {
                 continue;
             }
-            by_archetype
-                .entry(location.archetype)
-                .or_default()
-                .push((entity, location.chunk, location.row));
+            by_archetype.entry(location.archetype).or_default().push((
+                entity,
+                location.chunk,
+                location.row,
+            ));
         }
 
         let mut archetype_ids: Vec<ArchetypeID> = by_archetype.keys().copied().collect();
@@ -1116,11 +1111,8 @@ impl ECSData {
                     .registry
                     .read()
                     .map_err(|_| ECSError::from(RegistryError::PoisonedLock))?;
-                let (_, destination) = Self::get_archetype_pair_mut(
-                    &mut self.archetypes,
-                    source_id,
-                    destination_id,
-                )?;
+                let (_, destination) =
+                    Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
                 Self::ensure_shared_components(
                     &source_signature,
                     destination,
@@ -1132,13 +1124,7 @@ impl ECSData {
             let shards = &self.shards;
             let (source, destination) =
                 Self::get_archetype_pair_mut(&mut self.archetypes, source_id, destination_id)?;
-            source.migrate_rows_batch(
-                destination,
-                shards,
-                &targets,
-                None,
-                Some(component_id),
-            )?;
+            source.migrate_rows_batch(destination, shards, &targets, None, Some(component_id))?;
 
             touched.push(source_id);
             touched.push(destination_id);
@@ -1167,8 +1153,7 @@ impl ECSData {
     #[cfg(feature = "gpu")]
     fn notify_touched_archetypes(&self, touched: &std::collections::BTreeSet<ArchetypeID>) {
         for &archetype_id in touched {
-            self.gpu_dirty_chunks
-                .notify_archetype_changed(archetype_id);
+            self.gpu_dirty_chunks.notify_archetype_changed(archetype_id);
         }
     }
 
@@ -1565,7 +1550,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             ecs.apply_deferred_commands(),
-            Err(ECSError::Spawn(crate::engine::error::SpawnError::BatchColumnMismatch { .. }))
+            Err(ECSError::Spawn(
+                crate::engine::error::SpawnError::BatchColumnMismatch { .. }
+            ))
         ));
 
         // Declared len matches the count but the payload is short: the append
@@ -1655,7 +1642,12 @@ mod tests {
         assert_eq!(misaligned.load(std::sync::atomic::Ordering::Relaxed), 0);
 
         // Entity handles resolve to the values they were spawned with.
-        for (k, &entity) in events.spawned_batches[0].entities.iter().enumerate().step_by(7919) {
+        for (k, &entity) in events.spawned_batches[0]
+            .entities
+            .iter()
+            .enumerate()
+            .step_by(7919)
+        {
             let marker: Marker = world.read_entity_component(entity, marker_id).unwrap();
             assert_eq!(marker.0 as usize, k);
         }
@@ -1766,7 +1758,9 @@ mod tests {
             .with_exclusive(|data| {
                 let location = data.shards.get_location(entities[0])?.unwrap();
                 assert_eq!(
-                    data.archetypes[location.archetype as usize].length().unwrap(),
+                    data.archetypes[location.archetype as usize]
+                        .length()
+                        .unwrap(),
                     n as usize
                 );
                 Ok(())

@@ -1,7 +1,7 @@
 use criterion::*;
 use std::hint::black_box;
 
-use abm_framework::{Read, Write};
+use syren::{Read, Write};
 
 mod common;
 use common::*;

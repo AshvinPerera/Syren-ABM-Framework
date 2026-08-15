@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use abm_framework::{
+use syren::{
     advanced::EntityShards, AccessSets, Bundle, Command, ComponentID, ComponentRegistry, ECSError,
     ECSManager, ECSReference, ECSResult, GPUPod, GpuSystem, Signature, System, SystemBackend,
     SystemID,

@@ -219,7 +219,11 @@ impl BoundaryResource for GridSpace2D {
         Ok(())
     }
 
-    fn finalise(&mut self, _ctx: &mut BoundaryContext<'_>, channels: &[ChannelID]) -> ECSResult<()> {
+    fn finalise(
+        &mut self,
+        _ctx: &mut BoundaryContext<'_>,
+        channels: &[ChannelID],
+    ) -> ECSResult<()> {
         if channels.contains(&self.channels[0]) {
             self.rebuild();
         }

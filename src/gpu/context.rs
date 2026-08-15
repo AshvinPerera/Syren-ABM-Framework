@@ -112,7 +112,7 @@ impl GPUContext {
         })?;
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("abm_framework_device"),
+            label: Some("syren_device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
                 max_storage_buffers_per_shader_stage: 10,

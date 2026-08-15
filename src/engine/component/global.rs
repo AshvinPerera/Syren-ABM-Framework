@@ -111,7 +111,7 @@ pub fn register_component<T: 'static + Send + Sync>() -> ECSResult<ComponentID> 
 /// ```
 /// # #[cfg(feature = "gpu")]
 /// # {
-/// use abm_framework::GPUPod;
+/// use syren::GPUPod;
 ///
 /// #[repr(C)]
 /// #[derive(Copy, Clone)]
