@@ -19,8 +19,8 @@ underneath a cast.
 Because the compiler cannot see which components a query touches, aliasing is
 enforced at runtime by the borrow tracker. The invariant: no two live borrows
 alias a component incompatibly (two writes, or a read overlapping a write). The
-scheduler avoids conflicts by construction through declared access; the tracker is
-the backstop that turns a mistake into an error rather than a data race.
+scheduler avoids conflicts through declared access; the borrow tracker is the
+backstop, turning a conflicting borrow into an error instead of a data race.
 
 ## Per-worker staging
 
@@ -48,5 +48,5 @@ bound.
 ## When editing near unsafe
 
 Each `unsafe` block in the source carries a comment stating the invariant it
-relies on. If you change code near one, re-establish that the invariant still
-holds; the safe API around it exists to keep the invariant true.
+relies on. A change near one must re-establish that the invariant still holds; the
+surrounding safe API maintains it.

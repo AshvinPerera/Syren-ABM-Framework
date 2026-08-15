@@ -1,13 +1,11 @@
 # Installation
 
-Syren requires a Rust toolchain that meets the library's minimum supported
-version (MSRV), **Rust 1.87**. Newer toolchains work; the development toolchain
-is pinned in `rust-toolchain.toml`.
+Syren's minimum supported Rust version (MSRV) is **Rust 1.87**. Newer toolchains
+also work. The development toolchain is pinned in `rust-toolchain.toml`.
 
 ## Add the dependency
 
-Add Syren to your `Cargo.toml`. It has no default features, so enable the ones
-your model needs:
+Syren has no default features. Enable the features your model uses:
 
 ```toml
 [dependencies]
@@ -16,8 +14,7 @@ syren = { version = "0.6.0-rc.1", features = ["model", "messaging"] }
 
 ## Feature selection
 
-Features are additive. Enable only what you use; each unlocks a module and its
-dependencies.
+Features are additive. Each enables a module and its dependencies.
 
 | Feature | Enables |
 | --- | --- |
@@ -31,11 +28,10 @@ dependencies.
 | `profiling` | Tracing spans and Chrome Trace output. |
 | `all` | Everything above. |
 
-Most models want `model`. Add `messaging` if agents exchange messages, and
-`gpu` (or `messaging_gpu`) for GPU execution.
+A model built with `ModelBuilder` requires `model`. Add `messaging` for message
+passing, and `gpu` or `messaging_gpu` for GPU execution.
 
-See the [feature matrix](../reference/features.md) for the supported
-combinations.
+The [feature matrix](../reference/features.md) lists the supported combinations.
 
 ## Verify the toolchain
 
@@ -43,6 +39,6 @@ combinations.
 cargo build
 ```
 
-If you use GPU features, note that building the `gpu` feature only requires the
-wgpu crate to compile; **running** a GPU system additionally needs a working
-graphics adapter. See [CPU and GPU state](../concepts/cpu-gpu.md).
+The `gpu` feature requires only that the wgpu crate compiles; running a GPU
+system additionally requires a working graphics adapter. See [CPU and GPU
+state](../concepts/cpu-gpu.md).

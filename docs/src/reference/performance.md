@@ -1,7 +1,7 @@
 # Performance methodology
 
-Syren is built for large populations, but a performance claim is only meaningful
-with its context. This chapter describes how to measure and how to report.
+A performance claim is only meaningful with its context. This chapter describes
+how to measure and how to report.
 
 ## Measure in release
 
@@ -41,7 +41,7 @@ performance figure:
 - the exact **command**.
 
 This is the same provenance discipline as for results; see [run
-provenance](../science/provenance.md).
+provenance](../reproducibility/provenance.md).
 
 ## Thread scaling
 
@@ -52,8 +52,8 @@ work to scale across many cores.
 
 ## Where time goes
 
-Use the [profiler](../concepts/profiling.md) to attribute time within a tick.
-It shows whether time is in one system, in a stage that parallelises poorly, or in
-structural mutation at a scheduler boundary — which tells you what to change.
+Use the [profiler](../concepts/profiling.md) to attribute time within a tick. It
+shows whether time is spent in one system, in a stage that parallelises poorly,
+or in structural mutation at a scheduler boundary.
 
 [Criterion]: https://docs.rs/criterion

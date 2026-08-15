@@ -2,9 +2,9 @@
 
 ## Build an initial population in bulk
 
-Prefer the bulk path for the starting population: build a `Vec` per component
-column and hand each to `with_agent_population`. This materialises the columns
-once instead of spawning agents individually.
+Build the starting population in bulk: build a `Vec` per component column and
+pass each to `with_agent_population`. This materialises the columns once instead
+of spawning agents individually.
 
 ```rust,ignore
 let population: Vec<Position> = vec![Position { x: 0 }; 10_000];
@@ -34,9 +34,8 @@ whole batch rolls back, so a failure never leaves a partial cohort. Structural
 changes take effect at the scheduler boundary, after the current stage, which is
 also where lifecycle hooks fire.
 
-Prefer a batch over many single spawns: batched structural mutation is both
-faster and easier to reason about, because the whole change lands at one
-well-defined point in the tick.
+A batch applies as one atomic change at a single point in the tick; prefer it
+over many single spawns.
 
 ## Choosing shard count
 

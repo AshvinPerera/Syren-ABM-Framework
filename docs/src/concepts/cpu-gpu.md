@@ -32,16 +32,16 @@ dispatches it to the device rather than running a CPU closure.
 
 The CPU and GPU views of a column are synchronised at defined points: the
 scheduler boundary, and explicit sync or readback calls. Between those points a
-column may be resident on the GPU. Keeping visibility at boundaries is what lets
-GPU dispatch avoid a blocking poll on the hot path.
+column may be resident on the GPU. Synchronising only at boundaries lets GPU
+dispatch avoid a blocking poll during the tick.
 
 ## Building versus running
 
-Enabling the `gpu` feature only requires the wgpu crate to **compile**. Actually
-**running** a GPU system needs a working graphics adapter. Where no adapter is
-available, GPU execution is unavailable; the test suite reports a skip rather
-than failing. Plan for a CPU fallback path if your model must run on machines
-without a GPU.
+Enabling the `gpu` feature requires only that the wgpu crate compiles. Running a
+GPU system requires a working graphics adapter. Where no adapter is available,
+GPU execution is unavailable and the test suite reports a skip rather than
+failing. A model that must run on machines without a GPU needs a CPU fallback
+path.
 
 See [add a GPU component and system](../how-to/gpu.md).
 

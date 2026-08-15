@@ -1,50 +1,50 @@
 # Scheduling, stages, and channels
 
-The **scheduler** turns a set of systems into an ordered execution plan and runs
-it each tick. It is the piece that turns declared access into safe parallelism.
+The **scheduler** compiles a set of systems into an ordered execution plan and
+runs it each tick. It packs systems that declare non-conflicting access into
+stages that run in parallel.
 
 ## Stages
 
 The scheduler packs systems into **stages**. A stage is a group of systems with
-no conflicting access; the systems in a stage run in parallel, and stages run one
-after another. Packing is driven by:
+no conflicting access; the systems in a stage run in parallel, and stages run in
+sequence. Packing is driven by:
 
 - **Access conflicts** — a write to a component that another system reads or
-  writes forces the two into different stages.
+  writes places the two in different stages.
 - **Channel ordering** — a consumer of a channel runs in a later stage than the
   channel's producers.
 
-The resulting plan is deterministic: the same set of systems and constraints
-produces the same stages every run.
+The plan is deterministic: the same set of systems and constraints produces the
+same stages every run.
 
 ## Channels
 
 A **channel** is a named ordering edge. A system declares that it produces or
-consumes a channel; the scheduler guarantees producers run before consumers.
-Channels express "run me after credit clears" without inventing a fake data
-dependency. Environment values and message boundaries each own a channel, so a
-system that reads an environment value is ordered after the systems that write
-it.
+consumes a channel, and the scheduler runs producers before consumers. A channel
+orders two systems that have no shared component access. Environment values and
+message boundaries each own a channel, so a system that reads an environment
+value runs after the systems that write it.
 
 ## Boundaries
 
-A **boundary** is a model-owned resource that is written during a stage and made
-visible at the stage edge — the environment and the message buffers are
-boundaries. Boundary writes are staged per worker during parallel execution and
-finalised at the boundary between stages, which keeps concurrent writers from
-contending while preserving a deterministic merge order.
+A **boundary** is a model-owned resource written during a stage and made visible
+at the stage edge; the environment and the message buffers are boundaries.
+Boundary writes are staged per worker during parallel execution and merged at the
+stage edge in a fixed order, so concurrent writers do not contend and the merge
+is deterministic.
 
 ## Activation order and the seed
 
-Where a stage runs several systems, their **activation order** is fixed and
-seeded, so any order-sensitive step is reproducible. The model seed set with
-`ModelBuilder::with_seed` feeds both this activation order and each system's run
-context. See [reproducibility](../science/reproducibility.md).
+Within a stage, the **activation order** of systems is fixed and seeded, so an
+order-sensitive step is reproducible. The seed set with `ModelBuilder::with_seed`
+feeds both this activation order and each system's run context. See
+[reproducibility](../reproducibility/guarantees.md).
 
 ## Inspecting the plan
 
-A built [`Model`] can print its execution plan as text or as a Graphviz DOT
-graph, which is useful when checking that systems land in the stages you expect.
+A built [`Model`] prints its execution plan as text or as a Graphviz DOT graph,
+which shows the stage each system is placed in:
 
 ```rust,ignore
 println!("{}", model.execution_plan_text());

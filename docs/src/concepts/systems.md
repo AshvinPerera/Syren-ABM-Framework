@@ -6,9 +6,8 @@ scheduler uses that declaration to decide which systems can run together.
 
 ## FnSystem and query-derived access
 
-The common way to write a system is [`FnSystem`], which wraps a closure. The
-recommended constructor is `FnSystem::from_queries`, which **derives the access
-set from the queries the system runs**:
+A system is usually an [`FnSystem`], which wraps a closure.
+`FnSystem::from_queries` derives the access set from the queries the system runs:
 
 ```rust,ignore
 let step_query = QueryBuilder::with_registry(registry).write::<Position>()?.build()?;
@@ -26,32 +25,29 @@ let system = FnSystem::from_queries(
 );
 ```
 
-Deriving access from the queries means the declaration cannot drift from what the
-system actually touches: if you change the query, the access follows. You can
-still construct an [`AccessSets`] by hand where a system's access is not captured
-by a single query, but the derived path is preferred.
+Because the access set is derived from the queries, it matches what the system
+touches, and changing the query changes the access. A system whose access is not
+captured by a single query can construct an [`AccessSets`] directly.
 
 ## Access sets and conflicts
 
 Two systems **conflict** when one writes a component the other reads or writes.
-Conflicting systems must not run at the same time. Non-conflicting systems — for
-example, two systems that write disjoint components — can run in parallel. The
-scheduler computes this from the declared access; see
-[scheduling](scheduling.md).
+Conflicting systems do not run at the same time. Non-conflicting systems — for
+example, two systems that write disjoint components — run in parallel. The
+scheduler computes this from the declared access; see [scheduling](scheduling.md).
 
 ## Channels for ordering
 
-Access conflicts are not the only ordering constraint. Sometimes system B must
-run after system A even though they touch different components — B consumes an
-effect A produces. That ordering is expressed with **channels**: a system
-declares that it *produces* or *consumes* a named channel, and the scheduler
-orders producers before consumers. See [order systems with
-channels](../how-to/channels.md).
+A system may need to run after another even when the two touch different
+components, when one consumes an effect the other produces. This ordering is
+expressed with **channels**: a system declares that it *produces* or *consumes* a
+named channel, and the scheduler orders producers before consumers. See [order
+systems with channels](../how-to/channels.md).
 
 ## Backends
 
 A system runs on the CPU by default. A system can also declare a GPU backend
-(via the [`GpuSystem`] trait) so the scheduler dispatches it as a compute
+through the [`GpuSystem`] trait, so the scheduler dispatches it as a compute
 shader; see [CPU and GPU state](cpu-gpu.md).
 
 [`FnSystem`]: https://docs.rs/syren/latest/syren/struct.FnSystem.html

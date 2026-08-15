@@ -18,8 +18,8 @@ that uses the library.
 
 ## What the framework provides
 
-- **Archetype-ECS storage** — components stored in chunked, columnar arrays for
-  cache-friendly iteration over large populations.
+- **Archetype-ECS storage** — components stored in chunked, columnar arrays,
+  iterated over contiguous memory.
 - **Deterministic scheduling** — systems declare their data access; the
   scheduler packs non-conflicting systems into parallel stages and preserves a
   reproducible activation order.
@@ -40,7 +40,8 @@ that uses the library.
 - **Core concepts** explains each part of the framework and how it relates to
   the source.
 - **How-to** gives task-focused recipes.
-- **Science** covers reproducibility, verification, provenance, and citation.
+- **Reproducibility** covers the reproducibility guarantees, verification,
+  provenance, and citation.
 - **Reference** collects the feature matrix, compatibility policy, error model,
   performance methodology, and a glossary.
 - **Contributing** documents the engine internals and the development process.

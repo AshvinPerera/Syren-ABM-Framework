@@ -1,8 +1,7 @@
 # Derive access sets from queries
 
-A system must declare the components it reads and writes. The robust way is to
-let the declaration follow the queries the system runs, so the two cannot drift
-apart.
+A system must declare the components it reads and writes. Let the declaration
+follow the queries the system runs, so the two stay in sync.
 
 ## Use `from_queries`
 
@@ -27,8 +26,8 @@ let system = FnSystem::from_queries(
 );
 ```
 
-Change the query — say, add a `read::<Velocity>()` — and the access set follows
-automatically. There is no separate hand-written access list to keep in sync.
+Changing the query — for example adding `read::<Velocity>()` — changes the
+derived access. There is no separate access list to maintain.
 
 ## Multiple queries
 
@@ -43,14 +42,14 @@ FnSystem::from_queries(id, name, &[&query_a, &query_b], move |ecs| { /* ... */ }
 
 Occasionally a system's access is not captured by the queries it runs — for
 example, it reads a boundary in a way the query shape does not express. In that
-case construct an `AccessSets` directly. Prefer the derived path wherever a query
-captures the access; the manual path is the exception, and it is the one place
-where the declaration can drift from reality.
+case construct an `AccessSets` directly. Use the derived path where a query
+captures the access; the manual path is the exception, and the only place the
+declaration can diverge from what the system touches.
 
 ## Why it matters
 
 The scheduler uses the declared access to place non-conflicting systems in the
 same parallel stage. If a declaration understates what a system touches, the
-runtime borrow check catches the conflict and returns an error rather than
-risking a data race — but an accurate, query-derived declaration lets the
-scheduler parallelise correctly in the first place.
+runtime borrow check catches the conflict and returns an error instead of
+allowing a data race. An accurate, query-derived declaration lets the scheduler
+parallelise the system correctly.

@@ -6,7 +6,7 @@ _Requires the `environment` feature (implied by `model`)._
 
 An **environment** holds model-wide values — state that is not per-agent, such as
 a price index, a policy rate, or an audit record. Values are keyed by name and
-type. You register a key up front and get a typed handle ([`EnvKey`]):
+type. Register a key up front to get a typed handle ([`EnvKey`]):
 
 ```rust,ignore
 let key = builder.register_environment::<Prices>("prices", Prices::default())?;

@@ -8,7 +8,7 @@ than leaving the world partly updated.
 ## Error categories
 
 The crate error type composes the errors from each subsystem. The main
-categories you will encounter:
+categories:
 
 - **Registration** — a component or resource used before it was registered, or a
   type mismatch. Freeze the registry after registering all components.
@@ -39,8 +39,8 @@ Failures are contained at well-defined boundaries:
 
 ## Handling errors
 
-Propagate errors with `?` and decide at the top of your run loop whether a failed
-tick is recoverable. Because the world is not left in a torn state, you can
-inspect it after a failed tick to diagnose the cause.
+Propagate errors with `?` and decide in the run loop whether a failed tick is
+recoverable. The world is not left in a torn state, so it can be inspected after
+a failed tick to diagnose the cause.
 
 [`ECSResult`]: https://docs.rs/syren/latest/syren/type.ECSResult.html

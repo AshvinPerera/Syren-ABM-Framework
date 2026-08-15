@@ -8,8 +8,8 @@ or a per-tick audit record.
 
 ## Register a key
 
-Register each environment value on the builder before building the model. You get
-back a typed [`EnvKey`]:
+Register each environment value on the builder before building the model. It
+returns a typed [`EnvKey`]:
 
 ```rust,ignore
 let prices_key = builder.register_environment::<Prices>("prices", Prices::default())?;
@@ -38,9 +38,9 @@ let prices: Prices = model.environment().get::<Prices>("prices")?;
 ## Ordering around environment values
 
 Each environment key owns a channel, so the scheduler orders a system that reads
-a value after the systems that write it — you do not have to wire that ordering
-by hand. Because the environment is a boundary, writes made during a parallel
-stage are finalised deterministically at the stage edge.
+a value after the systems that write it; this ordering is not wired by hand.
+Because the environment is a boundary, writes made during a parallel stage are
+finalised deterministically at the stage edge.
 
 ## Aggregates and audits
 

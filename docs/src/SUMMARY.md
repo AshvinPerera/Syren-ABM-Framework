@@ -35,13 +35,13 @@
 - [Add a GPU component and system](how-to/gpu.md)
 - [Collect results and profiles](how-to/results-profiles.md)
 
-# Science
+# Reproducibility
 
-- [Reproducibility](science/reproducibility.md)
-- [Sources of nondeterminism](science/nondeterminism.md)
-- [Verification and validation](science/verification-validation.md)
-- [Run provenance](science/provenance.md)
-- [Citation](science/citation.md)
+- [Reproducibility](reproducibility/guarantees.md)
+- [Sources of nondeterminism](reproducibility/nondeterminism.md)
+- [Verification and validation](reproducibility/verification-validation.md)
+- [Run provenance](reproducibility/provenance.md)
+- [Citation](reproducibility/citation.md)
 
 # Reference
 

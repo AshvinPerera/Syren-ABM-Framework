@@ -1,7 +1,7 @@
 # Run provenance
 
-A result is only reproducible if you can say exactly what produced it. Record
-enough that someone else — or you, later — can reconstruct the run.
+A result is reproducible only if what produced it is recorded. Record enough to
+reconstruct the run.
 
 ## Provenance checklist
 
@@ -34,5 +34,4 @@ compared across machines.
 
 Have the model print its provenance at startup, or write it into the output
 alongside the results, so a stored result carries the information needed to
-reproduce it. The narrower the gap between "the result" and "how to regenerate
-it", the more credible the result.
+reproduce it.

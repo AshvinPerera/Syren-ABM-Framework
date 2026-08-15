@@ -32,9 +32,9 @@ cargo test --all-features --no-run
 
 Determinism is tested explicitly: a model runs at several thread counts and the
 trajectories are compared bit for bit, and distinct seeds are asserted to
-diverge. When you change anything that touches iteration order, accumulation, or
-randomness, keep these green — they are the guard against silently introducing
-order sensitivity.
+diverge. A change that touches iteration order, accumulation, or randomness must
+keep these tests green; they guard against silently introducing order
+sensitivity.
 
 ## GPU tests
 

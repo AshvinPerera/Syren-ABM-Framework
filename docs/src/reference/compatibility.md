@@ -11,8 +11,8 @@ change that requires a newer language or standard-library feature than 1.87
 provides must either avoid it or come with a deliberate MSRV bump.
 
 The development toolchain is pinned separately in `rust-toolchain.toml` and is
-newer than the MSRV; it is what formatting, linting, and generated output are
-produced with.
+newer than the MSRV. Formatting, linting, and generated output are produced with
+it.
 
 ## Platforms
 

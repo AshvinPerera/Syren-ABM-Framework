@@ -6,11 +6,11 @@ an effect A produced — express that ordering with a **channel**.
 
 ## Channel IDs
 
-A channel is identified by a `ChannelID`. You do not invent these directly;
-model resources own them. An environment key, a message handle, and a space
-handle each own a channel, and a model can register dedicated **phase keys**
-whose only purpose is ordering. Read the id from the resource, for example
-`key.channel_id()` or `handle.channel_id()`.
+A channel is identified by a `ChannelID`. Model resources own these; they are
+not created directly. An environment key, a message handle, and a space handle
+each own a channel, and a model can register dedicated **phase keys** used only
+for ordering. Read the id from the resource, for example `key.channel_id()` or
+`handle.channel_id()`.
 
 ## Declaring produce and consume
 

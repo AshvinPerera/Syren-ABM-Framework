@@ -38,7 +38,7 @@ When a change is meant to affect performance:
 ## Attributing time
 
 Use the [profiler](../concepts/profiling.md) to see where a tick spends its time
-before optimising. Measure first; a benchmark tells you whether a change helped,
-and the profiler tells you where to aim it.
+before optimising. A benchmark shows whether a change helped; the profiler shows
+where the time goes.
 
 [Criterion]: https://docs.rs/criterion

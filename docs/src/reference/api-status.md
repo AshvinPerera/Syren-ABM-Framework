@@ -1,7 +1,7 @@
 # API status
 
 Not every public item carries the same stability. Syren groups its surface into
-tiers so you know how much notice a change will get.
+tiers by how much notice a change gets.
 
 ## Stable public API
 
@@ -10,8 +10,7 @@ The types and functions re-exported from the crate root and from the `model`,
 API. These follow the [compatibility policy](compatibility.md): stable across
 patch releases, changed only with migration notes across pre-1.0 minor releases.
 
-This is the surface the guide teaches and the one the rustdoc reference documents
-as primary.
+The guide and the rustdoc reference treat this surface as primary.
 
 ## The `advanced` module
 
@@ -19,7 +18,7 @@ The [`advanced`] module exposes lower-level building blocks — entity shards,
 archetypes, chunk borrows, type-erased attributes, and the worker staging
 primitive. They exist for models and extensions that need to reach beneath the
 high-level API. They are more likely to change than the stable surface and are
-documented as such. Reach for them deliberately.
+documented as such.
 
 ## GPU API
 
@@ -36,7 +35,6 @@ notice. Where an item is experimental, its rustdoc says so.
 ## Deprecation
 
 Where practical, an item is deprecated for one minor release before removal, so
-dependent code gets a compiler warning and a migration path rather than a sudden
-break.
+dependent code gets a compiler warning and a migration path before it is removed.
 
 [`advanced`]: https://docs.rs/syren/latest/syren/advanced/index.html

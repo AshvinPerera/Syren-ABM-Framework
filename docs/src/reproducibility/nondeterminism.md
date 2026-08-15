@@ -1,7 +1,6 @@
 # Sources of nondeterminism
 
-Reproducibility can be lost in specific, identifiable ways. This chapter lists
-them so you can rule each one out.
+Reproducibility can be lost in a few specific ways. This chapter lists them.
 
 ## Seeds
 
@@ -16,7 +15,7 @@ A correct model is thread-count invariant. If a trajectory changes with the
 number of workers, some step depends on visitation order. The usual culprits are
 a shared mutable RNG, a floating-point sum accumulated in completion order, or a
 collected set whose order was not stabilised. See
-[reproducibility](reproducibility.md).
+[reproducibility](guarantees.md).
 
 ## Floating-point behaviour
 

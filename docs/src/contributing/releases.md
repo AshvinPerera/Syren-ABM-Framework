@@ -25,8 +25,8 @@ This chapter summarises it and records the reasoning.
 
 A release candidate (`-rc.N`) carries out everything through building the package
 and documentation and creating a **draft** release, but stops before tagging,
-publishing to crates.io, and minting a DOI. Those irreversible steps wait for a
-deliberate, separate approval.
+publishing to crates.io, and minting a DOI. These irreversible steps require a
+separate approval.
 
 ## Versioning
 

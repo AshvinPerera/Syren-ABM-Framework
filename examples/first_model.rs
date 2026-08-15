@@ -1,8 +1,8 @@
 //! Introductory model: a population of walkers on an integer number line.
 //!
-//! This is the smallest end-to-end path through the framework. Each tick, every
+//! A minimal model that exercises the framework end to end. Each tick, every
 //! walker takes one deterministic step left or right; after a fixed number of
-//! ticks a reduction reports how the population spread out.
+//! ticks a reduction reports the population's spread.
 //!
 //! Run it with the `model` feature:
 //!

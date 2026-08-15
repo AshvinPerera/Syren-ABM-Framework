@@ -1,16 +1,15 @@
 # Use DetRng
 
-[`DetRng`] is the sanctioned random number generator for models. It is what makes
-a model's randomness reproducible independently of how work is scheduled across
-threads.
+[`DetRng`] is the random number generator for models. It keys each draw on the
+run context and a salt, so the result does not depend on how work is scheduled
+across threads.
 
 ## Why not a thread-local RNG
 
-A generator that carries mutable state (a thread-local, or one stored on the
-world) produces draws in the order rows are visited. Under Rayon's work stealing
-that order changes with the thread count, so the trajectory would change too.
-`DetRng` avoids this by **keying** each draw on coordinates that do not depend on
-scheduling.
+A generator with mutable state — a thread-local, or one stored on the world —
+produces draws in the order rows are visited. Under Rayon's work stealing that
+order changes with the thread count, which changes the trajectory. `DetRng`
+avoids this by keying each draw on coordinates that do not depend on scheduling.
 
 ## Keying on the run context
 
@@ -31,8 +30,8 @@ streams. The `simulation_seed` comes from `ModelBuilder::with_seed`.
 ## Per-agent streams
 
 When a loop over agents draws randomness, salt the stream with the agent's
-identity so the draw depends on the agent, not on the position at which it is
-visited:
+identity, so the draw depends on the agent rather than on the position at which it
+is visited:
 
 ```rust,ignore
 ecs.for_each_entity_w1::<Position>(query, move |entity, pos| {
@@ -41,8 +40,8 @@ ecs.for_each_entity_w1::<Position>(query, move |entity, pos| {
 })?;
 ```
 
-This is the pattern the `first_model` example uses. It is what keeps the walk
-identical at one thread and at eight.
+The `first_model` example uses this pattern, which keeps its walk identical at
+one and eight threads.
 
 ## Draw helpers
 
@@ -52,8 +51,8 @@ identical at one thread and at eight.
 
 ## Randomness outside a system
 
-Population generation happens before any tick, so there is no run context. Seed a
-separate `DetRng::from_seed(seed)` for that, keyed on the model's configured seed,
+Population generation happens before any tick, so there is no run context. Use a
+separate `DetRng::from_seed(seed)` there, keyed on the model's configured seed,
 and keep it distinct from the per-tick streams.
 
 [`DetRng`]: https://docs.rs/syren/latest/syren/struct.DetRng.html
