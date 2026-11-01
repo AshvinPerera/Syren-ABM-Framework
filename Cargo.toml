@@ -44,7 +44,7 @@ bytemuck = { version = "1.16", features = ["derive"], optional = true }
 pollster = { version = "1.0.1", optional = true }
 smallvec = "1.15.1"
 thiserror = "2"
-parking_lot = { version = "0.12", features = ["arc_lock"] }
+parking_lot = { version = "0.13", features = ["arc_lock"] }
 
 [dev-dependencies]
 criterion = "0.8.1"
